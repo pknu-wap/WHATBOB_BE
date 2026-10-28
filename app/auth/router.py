@@ -1,3 +1,5 @@
+from urllib.parse import urlencode
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from app.auth.schemas import KakaoLoginRequest, TokenResponse
@@ -9,13 +11,19 @@ router = APIRouter(prefix="/api/auth/kakao", tags=["Auth"])
 
 
 @router.get("/login/url")
-def get_kakao_login_url():
-    """브라우저에서 테스트할 수 있도록 카카오 로그인 시작 링크를 반환합니다."""
+def get_kakao_login_url(
+    state: str = Query(..., min_length=1, description="프론트에서 생성·저장한 로그인 요청 식별값"),
+):
+    """프론트 콜백으로 돌아오는 로그인 URL을 반환합니다. state 검증은 프론트에서 수행합니다."""
+    params = {
+        "client_id": settings.KAKAO_REST_API_KEY,
+        "redirect_uri": settings.KAKAO_REDIRECT_URI,
+        "response_type": "code",
+        "state": state,
+    }
     url = (
-        f"https://kauth.kakao.com/oauth/authorize"
-        f"?client_id={settings.KAKAO_REST_API_KEY}"
-        f"&redirect_uri={settings.KAKAO_REDIRECT_URI}"
-        f"&response_type=code"
+        "https://kauth.kakao.com/oauth/authorize?"
+        + urlencode(params)
     )
     return {"login_url": url}
 
@@ -23,8 +31,9 @@ def get_kakao_login_url():
 @router.get("/callback", response_model=TokenResponse)
 async def kakao_callback_test(code: str = Query(..., description="카카오 인가 코드"), db: Session = Depends(get_db)):
     """
-    [로컬 브라우저 테스트용 콜백 엔드포인트]
-    카카오 로그인을 마치면 카카오가 이 주소로 인가 코드(?code=...)를 보내옵니다.
+    기존 백엔드 콜백 테스트용 경로입니다.
+    프론트 콜백 구성에서는 이 경로 대신 프론트가 POST /login으로 코드를 전달합니다.
+    이 경로를 직접 사용하려면 Redirect URI 설정도 이 주소로 맞춰야 합니다.
     """
     return await process_kakao_login(code, db)
 
