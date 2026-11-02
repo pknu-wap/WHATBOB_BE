@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.auth.router import router as auth_router
 from app.core.database import Base, engine
+from app.rooms.router import router as rooms_router
 
 logger = logging.getLogger("uvicorn")
 
@@ -41,6 +42,7 @@ app.add_middleware(
 
 # 라우터 등록
 app.include_router(auth_router)
+app.include_router(rooms_router)
 
 
 @app.get("/")
