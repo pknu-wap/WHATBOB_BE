@@ -3,6 +3,49 @@
 WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 최신 작업을 위에 추가하며, 기록 방법은 같은 디렉터리의 `AGENTS.md`를 따른다.
 
+## 2026-11-03
+
+### 주문서 추천의 명칭을 샤논 엔트로피 초기 점수와 사용자 피드백 통계 기반 알고리즘으로 정정
+
+#### 변경 이유 및 내용
+
+- 기존 주석의 ML 학습·클러스터링·L2 정규화 로지스틱 학습 표현이 실제 구현과 달라 정정했다. 초기 질문 점수는 선택지별 메뉴 분포의 샤논 엔트로피와 커버리지로 계산하고, 미리 지정된 주제의 반복 정도로 초기 중요도를 보정한다.
+- 사용자 피드백 이후에는 조건 일치/불일치 그룹의 만족도를 평활화하고, 만족도 차이 등을 시그모이드로 변환한 결과와 초기 점수를 후기 수에 따른 비율로 혼합한다. 계산식과 추천 순위 기준은 변경하지 않았다.
+- 내부 이름을 `calculate_question_entropy_score`, `recalculate_question_weights`, `initial_score`, `importance_weight`, `recalculate_from_feedback`, `answer_match_results`, `feedback_importance`, `feedback_ratio` 등 실제 역할에 맞게 변경하고 호출부·시드 스크립트·테스트를 함께 수정했다.
+- 이전 기록의 ML·재학습 표현은 당시 기록으로 보존하며, 현재 구현에 대한 설명은 이번 정정 내용을 따른다. 선택적인 LLM 질문 생성 기능은 그대로 유지한다.
+
+#### 주요 변경 파일
+
+- `app/recommend/order_sheet.py`
+- `app/recommend/router.py`
+- `app/recommend/schemas.py`
+- `app/menus/models.py`
+- `scripts/seed_menus.py`
+- `tests/test_recommend.py`
+- `tests/test_order_sheet_contract.py`
+- `LOG.md`
+
+#### API 변경
+
+- 기존 경로·응답 JSON 키·기본값은 유지한다. 질문 조회 및 중요도 조정 응답의 `info_gain_score`, `ml_weight`는 호환용 alias로 유지하고 설명을 정정했다.
+- `POST /api/recommendations/order-sheet/weights`: 기존 `adjustments[].ml_weight`, `run_ml_retrain` 요청을 계속 지원하며 새 이름 `adjustments[].importance_weight`, `recalculate_from_feedback`도 허용한다. 내부 Python 속성명만 변경했다.
+
+#### DB 변경
+
+- 스키마·데이터 변경 및 마이그레이션 없음. 새 ORM 속성을 기존 `order_sheet_questions.info_gain_score`, `order_sheet_questions.ml_weight`, `recommendation_feedbacks.feature_match_vector` 컬럼에 명시적으로 매핑한다.
+
+#### 검증
+
+- `.\.venv\Scripts\python.exe -m pytest -v`: 18개 통과. 기존 추천·인증·CORS 테스트와 신규 HTTP 호환성 테스트 2개를 실행했다.
+- 신규 테스트는 기존/새 요청 키 모두 처리되는지, 기존 응답 키가 유지되는지, 새 ORM 속성으로 기존 이름의 DB 컬럼을 읽고 쓰는지 인메모리 SQLite에서 확인했다.
+- `git diff --check`: 통과.
+- 경고 3건: Starlette의 AnyIO deprecated alias, 기존 인증 DTO의 Pydantic 설정 방식, FastAPI/Pydantic의 요청 필드 alias 메타데이터 경고. 테스트에서 실제 기존/새 요청 키의 처리는 모두 통과했다.
+
+#### 남은 작업 및 주의 사항
+
+- 기존 DB 컬럼·API JSON 키·공유 질문 JSON 파일에는 호환성을 위해 이전 이름이 남아 있다. 이 이름까지 제거하려면 프론트엔드 계약 변경과 DB 마이그레이션을 별도로 진행해야 한다.
+- 실제 MySQL 및 외부 LLM 호출은 이번 작업에서 미실행. 커밋·푸시는 수행하지 않았다.
+
 ## 2026-10-30
 
 ### 식약처 100g 기준 칼로리를 실제 한 끼(1인분, 700~1,100kcal 중심) 기준으로 환산 및 주문서 무게감(`heaviness`) 기준 개편

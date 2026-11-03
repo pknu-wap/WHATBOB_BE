@@ -184,21 +184,21 @@ def test_order_sheet_raises_when_no_candidates_remain(seeded_db):
     assert "추천 가능 메뉴가 없습니다" in exc_info.value.message
 
 
-def test_feedback_accumulation_and_ml_weight_retraining(seeded_db):
-    """4~5단계: 추천 결과에 대한 피드백이 쌓이면 질문 중요도 가중치(ml_weight)가 재학습·조정되는지 검증"""
+def test_feedback_accumulation_and_weight_recalculation(seeded_db):
+    """4~5단계: 누적 사용자 피드백 통계로 질문 중요도가 재계산되는지 검증"""
     q_soup = (
         seeded_db.query(OrderSheetQuestion)
         .filter(OrderSheetQuestion.cluster_key == "has_soup")
-        .order_by(OrderSheetQuestion.ml_weight.desc())
+        .order_by(OrderSheetQuestion.importance_weight.desc())
         .first()
     )
     q_temp = (
         seeded_db.query(OrderSheetQuestion)
         .filter(OrderSheetQuestion.cluster_key == "temperature")
-        .order_by(OrderSheetQuestion.ml_weight.desc())
+        .order_by(OrderSheetQuestion.importance_weight.desc())
         .first()
     )
-    initial_soup_weight = float(q_soup.ml_weight)
+    initial_soup_weight = float(q_soup.importance_weight)
 
     rec_resp = submit_order_sheet(
         request=OrderSheetRecommendRequest(
@@ -227,7 +227,7 @@ def test_feedback_accumulation_and_ml_weight_retraining(seeded_db):
 
     seeded_db.refresh(q_soup)
     assert q_soup.positive_count >= 4
-    assert float(q_soup.ml_weight) != initial_soup_weight
+    assert float(q_soup.importance_weight) != initial_soup_weight
     assert seeded_db.query(Recommendation).count() >= 1
     assert seeded_db.query(RecommendationFeedback).count() >= 4
 
@@ -236,16 +236,16 @@ def test_developer_weight_tuning_endpoint(seeded_db):
     """4단계: 개발팀이 특정 질문의 가중치를 직접 조정하거나 증감(feedback_delta)해 서버에 반영하는 기능 검증"""
     target_q = (
         seeded_db.query(OrderSheetQuestion)
-        .order_by(OrderSheetQuestion.ml_weight.asc())
+        .order_by(OrderSheetQuestion.importance_weight.asc())
         .first()
     )
 
     resp = adjust_order_sheet_weights(
         request=OrderSheetWeightTuneRequest(
             adjustments=[
-                WeightAdjustmentItem(question_id=target_q.id, ml_weight=1.95)
+                WeightAdjustmentItem(question_id=target_q.id, importance_weight=1.95)
             ],
-            run_ml_retrain=False,
+            recalculate_from_feedback=False,
         ),
         db=seeded_db,
     )
@@ -436,21 +436,21 @@ def test_order_sheet_raises_when_no_candidates_remain(seeded_db):
     assert "추천 가능 메뉴가 없습니다" in exc_info.value.message
 
 
-def test_feedback_accumulation_and_ml_weight_retraining(seeded_db):
-    """4~5단계: 추천 결과에 대한 피드백이 쌓이면 질문 중요도 가중치(ml_weight)가 재학습·조정되는지 검증"""
+def test_feedback_accumulation_and_weight_recalculation(seeded_db):
+    """4~5단계: 누적 사용자 피드백 통계로 질문 중요도가 재계산되는지 검증"""
     q_soup = (
         seeded_db.query(OrderSheetQuestion)
         .filter(OrderSheetQuestion.cluster_key == "has_soup")
-        .order_by(OrderSheetQuestion.ml_weight.desc())
+        .order_by(OrderSheetQuestion.importance_weight.desc())
         .first()
     )
     q_temp = (
         seeded_db.query(OrderSheetQuestion)
         .filter(OrderSheetQuestion.cluster_key == "temperature")
-        .order_by(OrderSheetQuestion.ml_weight.desc())
+        .order_by(OrderSheetQuestion.importance_weight.desc())
         .first()
     )
-    initial_soup_weight = float(q_soup.ml_weight)
+    initial_soup_weight = float(q_soup.importance_weight)
 
     rec_resp = submit_order_sheet(
         request=OrderSheetRecommendRequest(
@@ -479,7 +479,7 @@ def test_feedback_accumulation_and_ml_weight_retraining(seeded_db):
 
     seeded_db.refresh(q_soup)
     assert q_soup.positive_count >= 4
-    assert float(q_soup.ml_weight) != initial_soup_weight
+    assert float(q_soup.importance_weight) != initial_soup_weight
     assert seeded_db.query(Recommendation).count() >= 1
     assert seeded_db.query(RecommendationFeedback).count() >= 4
 
@@ -488,16 +488,16 @@ def test_developer_weight_tuning_endpoint(seeded_db):
     """4단계: 개발팀이 특정 질문의 가중치를 직접 조정하거나 증감(feedback_delta)해 서버에 반영하는 기능 검증"""
     target_q = (
         seeded_db.query(OrderSheetQuestion)
-        .order_by(OrderSheetQuestion.ml_weight.asc())
+        .order_by(OrderSheetQuestion.importance_weight.asc())
         .first()
     )
 
     resp = adjust_order_sheet_weights(
         request=OrderSheetWeightTuneRequest(
             adjustments=[
-                WeightAdjustmentItem(question_id=target_q.id, ml_weight=1.95)
+                WeightAdjustmentItem(question_id=target_q.id, importance_weight=1.95)
             ],
-            run_ml_retrain=False,
+            recalculate_from_feedback=False,
         ),
         db=seeded_db,
     )

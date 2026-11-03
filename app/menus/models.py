@@ -61,7 +61,7 @@ class UserFoodExclusion(Base):
 
 
 class OrderSheetQuestion(Base):
-    """LLM 생성 주문서 질문 후보 풀 및 ML 중요도 가중치 테이블"""
+    """주문서 질문 후보와 엔트로피·사용자 피드백 기반 중요도 테이블"""
     __tablename__ = "order_sheet_questions"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
@@ -72,11 +72,12 @@ class OrderSheetQuestion(Base):
     # 각 선택지(option_id, label, rules)를 담은 JSON 배열
     options_json = Column(JSON, nullable=False)
 
-    # 3단계: 데이터 0건일 때 음식 분포로부터 계산한 초기 정보 이득 점수 (0.0 ~ 1.0)
-    info_gain_score = Column(Float, nullable=False, default=0.5)
+    # 초기 점수는 선택지 분포의 샤논 엔트로피와 커버리지로 계산한다.
+    # 기존 DB 컬럼명을 매핑해 이미 저장된 질문과 피드백을 그대로 사용한다.
+    initial_score = Column("info_gain_score", Float, nullable=False, default=0.5)
 
-    # 4~5단계: 개발팀 사전 피드백 및 실사용자 피드백 재학습으로 갱신되는 중요도 가중치
-    ml_weight = Column(Float, index=True, nullable=False, default=0.5)
+    # 초기 주제 다양성 보정, 수동 조정 및 누적 만족도 통계로 갱신하는 중요도.
+    importance_weight = Column("ml_weight", Float, index=True, nullable=False, default=0.5)
 
     shown_count = Column(Integer, nullable=False, default=0)
     positive_count = Column(Integer, nullable=False, default=0)
@@ -99,7 +100,7 @@ class Recommendation(Base):
 
 
 class RecommendationFeedback(Base):
-    """추천 결과에 대한 사용자 피드백 및 ML 재학습용 특징 매칭 벡터 로그 테이블"""
+    """추천 만족 여부와 질문별 조건 일치 결과를 저장하는 피드백 테이블"""
     __tablename__ = "recommendation_feedbacks"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
@@ -113,7 +114,7 @@ class RecommendationFeedback(Base):
     selected_menu_id = Column(Integer, ForeignKey("menus.id", ondelete="SET NULL"), nullable=True)
     is_satisfied = Column(Boolean, nullable=False)
 
-    # {question_id_str: 1.0 (매칭됨) or 0.0 (불일치)} 형태의 학습용 입력 벡터 X
-    feature_match_vector = Column(JSON, nullable=False, default=dict)
+    # 질문별 조건 일치 여부: {질문 ID 문자열: 1.0(일치) 또는 0.0(불일치)}.
+    answer_match_results = Column("feature_match_vector", JSON, nullable=False, default=dict)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 

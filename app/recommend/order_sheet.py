@@ -1,3 +1,9 @@
+"""샤논 엔트로피 기반 초기 점수와 사용자 피드백 통계로 메뉴를 추천한다.
+
+초기에는 선택지별 음식 분포와 주제 다양성으로 질문 중요도를 정한다.
+이후에는 조건 일치 여부별 만족도를 집계해 같은 중요도를 재계산한다.
+"""
+
 import math
 import random
 from typing import Any
@@ -62,22 +68,24 @@ def _to_question_dto(
         cluster_key=question.cluster_key,
         question_text=question.question_text,
         options=options,
-        info_gain_score=round(float(question.info_gain_score), 4),
-        ml_weight=round(float(question.ml_weight), 4),
+        initial_score=round(float(question.initial_score), 4),
+        importance_weight=round(float(question.importance_weight), 4),
         shown_count=int(question.shown_count or 0),
         positive_count=int(question.positive_count or 0),
         is_exploration=is_exploration,
     )
 
 
-def calculate_question_info_gain(
+def calculate_question_entropy_score(
     menus: list[Menu],
     options_json: list[dict[str, Any]],
 ) -> float:
     """
-    [3단계 초기 ML 선별]
-    피드백 데이터가 0건일 때 음식 후보 분포에 대한 선택지별 정규화 샤논 엔트로피(Information Gain)와
-    커버리지(Coverage)를 결합해 질문의 메뉴 분할 변별력(0.05 ~ 1.0)을 산출합니다.
+    [3단계 샤논 엔트로피 기반 초기 질문 점수]
+    조건이 있는 선택지별 메뉴 수로 정규화 샤논 엔트로피를 계산하고,
+    커버리지를 결합해 초기 점수(0.05 ~ 1.0)를 산출합니다.
+    조건 선택지가 하나면 일치/불일치의 이진 엔트로피를 사용합니다.
+    선택지별 개수는 중복 매칭을 포함하므로 커버리지 비율은 최대 1로 제한합니다.
     """
     if not menus or not options_json:
         return 0.1
@@ -122,18 +130,18 @@ def rank_and_score_question_pool(
     raw_questions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """
-    [3단계 초기 ML 클러스터링 & 정보 이득 정렬]
-    수백 개의 후보 질문 각각에 대해 정보 이득을 계산하고,
-    동일 의미 클러스터(cluster_key) 내 중복 질문에는 감쇠 계수를 적용해 초기 ml_weight를 산출합니다.
+    [3단계 엔트로피 점수와 주제 다양성에 따른 초기 중요도 산정]
+    후보 질문마다 엔트로피 기반 초기 점수를 계산합니다.
+    미리 지정된 같은 주제(cluster_key)의 질문에는 순서대로 감쇠 계수를 적용합니다.
     """
     scored: list[dict[str, Any]] = []
     for q in raw_questions:
-        ig = calculate_question_info_gain(menus, q["options"])
+        initial_score = calculate_question_entropy_score(menus, q["options"])
         q_copy = dict(q)
-        q_copy["info_gain_score"] = ig
+        q_copy["initial_score"] = initial_score
         scored.append(q_copy)
 
-    scored.sort(key=lambda x: x["info_gain_score"], reverse=True)
+    scored.sort(key=lambda x: x["initial_score"], reverse=True)
 
     cluster_seen_counts: dict[str, int] = {}
     for item in scored:
@@ -141,9 +149,9 @@ def rank_and_score_question_pool(
         rank_in_cluster = cluster_seen_counts.get(cluster, 0)
         cluster_seen_counts[cluster] = rank_in_cluster + 1
         diversity_factor = 0.90 ** rank_in_cluster
-        item["ml_weight"] = round(max(0.05, item["info_gain_score"] * diversity_factor), 4)
+        item["importance_weight"] = round(max(0.05, item["initial_score"] * diversity_factor), 4)
 
-    scored.sort(key=lambda x: x["ml_weight"], reverse=True)
+    scored.sort(key=lambda x: x["importance_weight"], reverse=True)
     return scored
 
 
@@ -155,14 +163,14 @@ def select_order_sheet_questions(
 ) -> OrderSheetQuestionsResponse:
     """
     [5단계 탐색+활용(Exploration-Exploitation) 질문 추출]
-    - 상위 exploitation_count(기본 7개): 서로 다른 cluster_key를 우선하여 ml_weight 최상위 질문 선택
+    - 상위 exploitation_count(기본 7개): 서로 다른 cluster_key를 우선하여 importance_weight 최상위 질문 선택
     - 나머지 exploration_count(기본 2개): 후보 풀에서 노출 횟수가 적은 질문을 가중 샘플링하여
-      새로운 질문도 사용자 피드백을 받아 재학습 시 상위권으로 올라올 수 있도록 보장
+      새로운 질문도 사용자 피드백에 따른 중요도 재계산 기회를 얻도록 합니다.
     """
     active_questions = (
         db.query(OrderSheetQuestion)
         .filter(OrderSheetQuestion.is_active.is_(True))
-        .order_by(OrderSheetQuestion.ml_weight.desc(), OrderSheetQuestion.id.asc())
+        .order_by(OrderSheetQuestion.importance_weight.desc(), OrderSheetQuestion.id.asc())
         .all()
     )
     if not active_questions:
@@ -199,7 +207,7 @@ def select_order_sheet_questions(
         pool_copy = list(remaining_pool)
         while len(selected_explore) < actual_explore and pool_copy:
             weights = [
-                (float(q.ml_weight) + 0.3) / math.sqrt(float(q.shown_count or 0) + 1.0)
+                (float(q.importance_weight) + 0.3) / math.sqrt(float(q.shown_count or 0) + 1.0)
                 for q in pool_copy
             ]
             chosen = rng.choices(pool_copy, weights=weights, k=1)[0]
@@ -227,7 +235,7 @@ def create_order_sheet_recommendation(
     """
     [5단계 주문서 답변 기반 메뉴 추천]
     1. 사용자 알레르기/비선호/섭취불가 메뉴를 먼저 제외(Hard Filter)
-    2. 제출된 질문별 선택지 조건식(rules)을 평가하여 질문의 ml_weight 가중치 합산
+    2. 제출된 질문별 선택지 조건식(rules)을 평가하여 질문의 importance_weight 가중치 합산
     3. 상위 top_k 메뉴를 추천하고 추천 기록을 MySQL에 저장
     """
     all_menus = db.query(Menu).all()
@@ -271,7 +279,7 @@ def create_order_sheet_recommendation(
         matched_codes: list[str] = []
         for q, opt in validated_answers:
             rules = opt.get("rules", [])
-            weight = float(q.ml_weight)
+            weight = float(q.importance_weight)
             if not rules:
                 score += weight * 0.35
             elif evaluate_option_rules(menu, rules):
@@ -332,18 +340,19 @@ def create_order_sheet_recommendation(
     )
 
 
-def retrain_question_weights(db: Session) -> dict[str, float]:
+def recalculate_question_weights(db: Session) -> dict[str, float]:
     """
-    [4·5단계 피드백 누적 데이터 기반 ML 가중치 재학습]
-    누적된 RecommendationFeedback 로그의 (feature_match_vector X, is_satisfied y)를 학습하여
-    질문별 조건 일치 시 만족 확률 향상도(Empirical Lift + L2 정규화 로지스틱 가중치)를 계산하고,
-    초기 info_gain_score와 결합해 MySQL의 ml_weight를 업데이트합니다.
+    [4·5단계 누적 사용자 피드백 기반 질문 중요도 재계산]
+    질문별 조건 일치/불일치 그룹의 만족도를 전체 만족도로 평활화합니다.
+    두 그룹의 만족도 차이와 일치 그룹의 만족도를 시그모이드로 변환한 뒤,
+    후기 수에 따른 비율로 초기 엔트로피 기반 점수와 혼합해 중요도를 갱신합니다.
+    별도 모델 최적화 없이 고정된 통계 수식을 적용합니다.
     """
     questions = db.query(OrderSheetQuestion).all()
     feedbacks = db.query(RecommendationFeedback).all()
 
     if not feedbacks:
-        return {q.question_code: round(float(q.ml_weight), 4) for q in questions}
+        return {q.question_code: round(float(q.importance_weight), 4) for q in questions}
 
     total_fb = len(feedbacks)
     global_pos = sum(1 for fb in feedbacks if fb.is_satisfied)
@@ -351,25 +360,25 @@ def retrain_question_weights(db: Session) -> dict[str, float]:
 
     stats: dict[str, dict[str, float]] = {}
     for fb in feedbacks:
-        vec = fb.feature_match_vector or {}
-        y = 1.0 if fb.is_satisfied else 0.0
-        for q_id_str, match_val in vec.items():
+        match_results = fb.answer_match_results or {}
+        satisfaction = 1.0 if fb.is_satisfied else 0.0
+        for q_id_str, match_val in match_results.items():
             st = stats.setdefault(
                 str(q_id_str),
                 {"match_pos": 0.0, "match_total": 0.0, "unmatch_pos": 0.0, "unmatch_total": 0.0},
             )
             if float(match_val) >= 0.5:
                 st["match_total"] += 1.0
-                st["match_pos"] += y
+                st["match_pos"] += satisfaction
             else:
                 st["unmatch_total"] += 1.0
-                st["unmatch_pos"] += y
+                st["unmatch_pos"] += satisfaction
 
     updated: dict[str, float] = {}
     for q in questions:
         st = stats.get(str(q.id))
         if not st or (st["match_total"] + st["unmatch_total"]) == 0:
-            updated[q.question_code] = round(float(q.ml_weight), 4)
+            updated[q.question_code] = round(float(q.importance_weight), 4)
             continue
 
         sample_n = st["match_total"] + st["unmatch_total"]
@@ -377,12 +386,15 @@ def retrain_question_weights(db: Session) -> dict[str, float]:
         p_unmatch = (st["unmatch_pos"] + 1.0 * base_rate) / (st["unmatch_total"] + 1.0)
 
         lift = p_match - p_unmatch
-        learned_importance = 1.0 / (1.0 + math.exp(-3.2 * (lift + (p_match - 0.5))))
+        feedback_importance = 1.0 / (1.0 + math.exp(-3.2 * (lift + (p_match - 0.5))))
 
-        alpha = min(0.85, sample_n / (sample_n + 4.0))
-        new_weight = (1.0 - alpha) * float(q.info_gain_score) + alpha * learned_importance
-        q.ml_weight = round(max(0.05, min(2.0, new_weight)), 4)
-        updated[q.question_code] = q.ml_weight
+        feedback_ratio = min(0.85, sample_n / (sample_n + 4.0))
+        new_weight = (
+            (1.0 - feedback_ratio) * float(q.initial_score)
+            + feedback_ratio * feedback_importance
+        )
+        q.importance_weight = round(max(0.05, min(2.0, new_weight)), 4)
+        updated[q.question_code] = q.importance_weight
 
     db.commit()
     return updated
@@ -395,7 +407,7 @@ def record_recommendation_feedback(
 ) -> RecommendationFeedbackResponse:
     """
     추천 결과에 대한 사용자(또는 4단계 개발팀) 피드백을 기록하고,
-    즉시 질문 가중치 ML 재학습을 수행해 MySQL에 반영합니다.
+    누적 만족도 통계로 질문 중요도를 즉시 재계산해 DB에 반영합니다.
     """
     rec = db.query(Recommendation).filter(Recommendation.id == recommendation_id).first()
     if not rec:
@@ -420,7 +432,7 @@ def record_recommendation_feedback(
     )
     q_map = {q.id: q for q in questions}
 
-    feature_match_vector: dict[str, float] = {}
+    answer_match_results: dict[str, float] = {}
     for ans in answers:
         qid = ans.get("question_id")
         opt_id = ans.get("option_id")
@@ -434,7 +446,7 @@ def record_recommendation_feedback(
         if target_menu is not None and rules:
             matched = evaluate_option_rules(target_menu, rules)
 
-        feature_match_vector[str(q.id)] = 1.0 if matched else 0.0
+        answer_match_results[str(q.id)] = 1.0 if matched else 0.0
         if request.is_satisfied and matched:
             q.positive_count = int(q.positive_count or 0) + 1
 
@@ -443,13 +455,13 @@ def record_recommendation_feedback(
         user_id=request.user_id or rec.user_id,
         selected_menu_id=target_menu_id,
         is_satisfied=request.is_satisfied,
-        feature_match_vector=feature_match_vector,
+        answer_match_results=answer_match_results,
     )
     db.add(feedback)
     db.commit()
     db.refresh(feedback)
 
-    updated_weights = retrain_question_weights(db)
+    updated_weights = recalculate_question_weights(db)
 
     return RecommendationFeedbackResponse(
         feedback_id=feedback.id,
@@ -477,11 +489,11 @@ def tune_question_weights(
             q = q_map.get(adj.question_id)
             if not q:
                 continue
-            if adj.ml_weight is not None:
-                q.ml_weight = round(float(adj.ml_weight), 4)
+            if adj.importance_weight is not None:
+                q.importance_weight = round(float(adj.importance_weight), 4)
             if adj.feedback_delta is not None:
-                q.ml_weight = round(
-                    max(0.05, min(2.0, float(q.ml_weight) + float(adj.feedback_delta))),
+                q.importance_weight = round(
+                    max(0.05, min(2.0, float(q.importance_weight) + float(adj.feedback_delta))),
                     4,
                 )
             if adj.is_active is not None:
@@ -489,13 +501,13 @@ def tune_question_weights(
             updated_count += 1
         db.commit()
 
-    if request.run_ml_retrain:
-        retrain_question_weights(db)
+    if request.recalculate_from_feedback:
+        recalculate_question_weights(db)
 
     top_rows = (
         db.query(OrderSheetQuestion)
         .filter(OrderSheetQuestion.is_active.is_(True))
-        .order_by(OrderSheetQuestion.ml_weight.desc(), OrderSheetQuestion.id.asc())
+        .order_by(OrderSheetQuestion.importance_weight.desc(), OrderSheetQuestion.id.asc())
         .limit(DEFAULT_TOTAL_QUESTIONS)
         .all()
     )

@@ -711,7 +711,7 @@ def seed_database(
     """
     1단계: CSV 파싱 및 MySQL menus 테이블 적재
     2단계: 200+ 질문 후보 풀(LLM 연동 포함) 생성
-    3단계: 초기 ML(엔트로피 정보 이득 + 클러스터 다양성) 계산 후 MySQL order_sheet_questions 적재
+    3단계: 샤논 엔트로피·커버리지와 주제 다양성으로 초기 중요도를 계산해 질문 테이블에 적재
     """
     parsed_menus = parse_and_clean_csv(
         csv_path=csv_path,
@@ -757,9 +757,9 @@ def seed_database(
             existing_q = existing_q_map[code]
             existing_q.question_text = q_data["question_text"]
             existing_q.options_json = q_data["options"]
-            existing_q.info_gain_score = q_data["info_gain_score"]
+            existing_q.initial_score = q_data["initial_score"]
             if existing_q.shown_count == 0 and existing_q.positive_count == 0:
-                existing_q.ml_weight = q_data["ml_weight"]
+                existing_q.importance_weight = q_data["importance_weight"]
         else:
             db.add(
                 OrderSheetQuestion(
@@ -767,8 +767,8 @@ def seed_database(
                     cluster_key=q_data["cluster_key"],
                     question_text=q_data["question_text"],
                     options_json=q_data["options"],
-                    info_gain_score=q_data["info_gain_score"],
-                    ml_weight=q_data["ml_weight"],
+                    initial_score=q_data["initial_score"],
+                    importance_weight=q_data["importance_weight"],
                     shown_count=0,
                     positive_count=0,
                     is_active=True,

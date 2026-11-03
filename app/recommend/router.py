@@ -45,7 +45,7 @@ def get_order_sheet_questions(
     db: Session = Depends(get_db),
 ):
     """
-    MySQL에 적재된 질문 풀에서 ML 가중치 상위 질문(기본 7개)과
+    DB에 적재된 질문 풀에서 엔트로피·피드백 기반 중요도가 높은 질문(기본 7개)과
     새로운 피드백 수집을 위한 탐색 질문(기본 2개)을 합쳐 총 9개의 주문서 질문지를 반환합니다.
     """
     result = select_order_sheet_questions(
@@ -67,7 +67,7 @@ def submit_order_sheet(
 ):
     """
     사용자의 주문서 답변을 받아 알레르기/비선호 음식을 먼저 제외(Hard Filter)한 뒤,
-    각 질문의 ML 중요도 가중치를 반영하여 최적의 메뉴를 추천합니다.
+    엔트로피 기반 초기 점수와 사용자 피드백 통계로 조정한 질문 중요도를 합산해 메뉴를 추천합니다.
     """
     result = create_order_sheet_recommendation(db=db, request=request)
     return ApiResponse(success=True, data=result, message=None)
@@ -85,7 +85,7 @@ def submit_recommendation_feedback(
 ):
     """
     추천 결과에 대한 사용자(또는 사전 튜닝 단계)의 만족/불만족 피드백을 저장하고,
-    누적된 피드백 데이터를 바탕으로 질문 중요도 가중치(ml_weight)를 즉시 재학습합니다.
+    조건 일치 여부별 누적 만족도 통계와 초기 점수를 결합해 질문 중요도를 즉시 재계산합니다.
     """
     result = record_recommendation_feedback(
         db=db,
@@ -105,8 +105,8 @@ def adjust_order_sheet_weights(
     db: Session = Depends(get_db),
 ):
     """
-    [4단계 개발팀 사전 피드백 튜닝 및 일괄 재학습]
-    특정 질문의 가중치를 직접 조정하거나 누적 피드백 기반 ML 재학습을 실행합니다.
+    [4단계 개발팀 사전 피드백 튜닝 및 일괄 재계산]
+    특정 질문의 중요도를 직접 조정하거나 누적 사용자 피드백 통계로 재계산합니다.
     """
     result = tune_question_weights(db=db, request=request)
     return ApiResponse(success=True, data=result, message=None)

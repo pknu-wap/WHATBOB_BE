@@ -24,15 +24,22 @@ class QuestionOptionDTO(BaseModel):
 
 
 class OrderSheetQuestionDTO(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
     id: int
     question_code: str
     cluster_key: str
     question_text: str
     options: list[QuestionOptionDTO]
-    info_gain_score: float
-    ml_weight: float
+    # alias는 기존 프론트엔드의 JSON 키와 호환하기 위한 이름이다.
+    initial_score: float = Field(
+        alias="info_gain_score",
+        description="샤논 엔트로피와 커버리지로 계산한 초기 질문 점수",
+    )
+    importance_weight: float = Field(
+        alias="ml_weight",
+        description="초기 점수·주제 다양성 및 사용자 피드백 통계로 조정하는 질문 중요도",
+    )
     shown_count: int = 0
     positive_count: int = 0
     is_exploration: bool = False
@@ -110,15 +117,25 @@ class RecommendationFeedbackResponse(BaseModel):
 
 
 class WeightAdjustmentItem(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     question_id: int
-    ml_weight: Optional[float] = Field(default=None, ge=0.01, le=5.0)
+    importance_weight: Optional[float] = Field(
+        default=None, ge=0.01, le=5.0, alias="ml_weight",
+        description="직접 지정할 질문 중요도 (기존 JSON 키 유지)",
+    )
     feedback_delta: Optional[float] = Field(default=None, ge=-1.0, le=1.0)
     is_active: Optional[bool] = None
 
 
 class OrderSheetWeightTuneRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     adjustments: list[WeightAdjustmentItem] = Field(default_factory=list)
-    run_ml_retrain: bool = True
+    recalculate_from_feedback: bool = Field(
+        default=True, alias="run_ml_retrain",
+        description="누적 사용자 피드백 통계로 질문 중요도를 재계산할지 여부 (기존 JSON 키 유지)",
+    )
 
 
 class OrderSheetWeightTuneResponse(BaseModel):
