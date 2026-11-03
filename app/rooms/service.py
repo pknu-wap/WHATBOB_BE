@@ -1,5 +1,4 @@
 from fastapi import HTTPException, status
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -77,25 +76,20 @@ def join_room(
                 detail="Room is not accepting members",
             )
 
-        existing_member = (
-            db.query(RoomMember)
-            .filter(
-                RoomMember.room_id == room.id,
-                RoomMember.user_id == user.id,
-            )
-            .one_or_none()
+        member_rows = (
+            db.query(RoomMember.user_id)
+            .filter(RoomMember.room_id == room.id)
+            .with_for_update()
+            .all()
         )
-        if existing_member is not None:
+        member_user_ids = {row[0] for row in member_rows}
+        if user.id in member_user_ids:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="User is already a room member",
             )
 
-        member_count = (
-            db.query(func.count(RoomMember.id))
-            .filter(RoomMember.room_id == room.id)
-            .scalar()
-        )
+        member_count = len(member_rows)
         if member_count >= room.max_members:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
