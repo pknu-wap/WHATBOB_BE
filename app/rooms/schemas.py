@@ -16,3 +16,15 @@ class RoomCreateResponse(BaseModel):
     status: str
     max_members: int
     created_at: datetime
+
+
+class RoomJoinResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    room_id: str
+    user_id: int
+    role: str
+    room_status: str
+    member_count: int
+    max_members: int
+    joined_at: datetime
