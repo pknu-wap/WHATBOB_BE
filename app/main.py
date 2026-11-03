@@ -1,9 +1,15 @@
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+import app.menus.models  # noqa: F401
+import app.users.models  # noqa: F401
 from app.auth.router import router as auth_router
 from app.core.database import Base, engine
+from app.recommend.common import RecommendationDomainException
+from app.recommend.router import router as recommend_router
 
 logger = logging.getLogger("uvicorn")
 
@@ -39,10 +45,28 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "ngrok-skip-browser-warning"],
 )
 
+
+@app.exception_handler(RecommendationDomainException)
+async def handle_recommendation_domain_exception(
+    request: Request,
+    exc: RecommendationDomainException,
+):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "success": False,
+            "data": None,
+            "message": exc.message,
+        },
+    )
+
+
 # 라우터 등록
 app.include_router(auth_router)
+app.include_router(recommend_router)
 
 
 @app.get("/")
 def health_check():
     return {"message": "WHATBOB 백엔드 서버가 정상 동작 중입니다."}
+
