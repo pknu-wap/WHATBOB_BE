@@ -176,3 +176,82 @@ def test_join_room_requires_login():
     response = client.post("/api/rooms/room-id/join")
 
     assert response.status_code == 401
+
+
+def test_get_room_returns_details_and_members_to_joined_user():
+    client, db, host = build_client()
+    create_response = client.post("/api/rooms", json={"max_members": 3})
+    room_id = create_response.json()["room_id"]
+    participant = add_user(db, 987654321, "participant")
+    client.app.dependency_overrides[get_current_user] = lambda: participant
+    assert client.post(f"/api/rooms/{room_id}/join").status_code == 201
+
+    response = client.get(f"/api/rooms/{room_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["room_id"] == room_id
+    assert body["host_user_id"] == host.id
+    assert body["status"] == "WAITING"
+    assert body["max_members"] == 3
+    assert body["member_count"] == 2
+    assert body["is_full"] is False
+    assert body["is_member"] is True
+    assert body["my_role"] == "MEMBER"
+    assert [member["role"] for member in body["members"]] == [
+        "HOST",
+        "MEMBER",
+    ]
+    assert body["members"][1]["nickname"] == "participant"
+
+
+def test_get_room_hides_members_from_non_member():
+    client, db, _ = build_client()
+    create_response = client.post("/api/rooms", json={"max_members": 2})
+    room_id = create_response.json()["room_id"]
+    non_member = add_user(db, 987654321, "non-member")
+    client.app.dependency_overrides[get_current_user] = lambda: non_member
+
+    response = client.get(f"/api/rooms/{room_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["member_count"] == 1
+    assert body["is_full"] is False
+    assert body["is_member"] is False
+    assert body["my_role"] is None
+    assert body["members"] == []
+
+
+def test_get_room_returns_full_state():
+    client, db, _ = build_client()
+    create_response = client.post("/api/rooms", json={"max_members": 2})
+    room_id = create_response.json()["room_id"]
+    participant = add_user(db, 987654321, "participant")
+    client.app.dependency_overrides[get_current_user] = lambda: participant
+    assert client.post(f"/api/rooms/{room_id}/join").status_code == 201
+
+    response = client.get(f"/api/rooms/{room_id}")
+
+    assert response.status_code == 200
+    assert response.json()["member_count"] == 2
+    assert response.json()["is_full"] is True
+
+
+def test_get_room_rejects_unknown_room():
+    client, _, _ = build_client()
+
+    response = client.get("/api/rooms/missing-room-id")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Room not found"
+
+
+def test_get_room_requires_login():
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get("/api/rooms/room-id")
+
+    assert response.status_code == 401
