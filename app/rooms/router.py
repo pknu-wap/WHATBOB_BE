@@ -6,9 +6,10 @@ from app.core.database import get_db
 from app.rooms.schemas import (
     RoomCreateRequest,
     RoomCreateResponse,
+    RoomDetailResponse,
     RoomJoinResponse,
 )
-from app.rooms.service import create_room, join_room
+from app.rooms.service import create_room, get_room, join_room
 from app.users.models import User
 
 router = APIRouter(prefix="/api/rooms", tags=["Rooms"])
@@ -38,3 +39,15 @@ def join_room_endpoint(
     db: Session = Depends(get_db),
 ):
     return join_room(db=db, room_public_id=room_id, user=current_user)
+
+
+@router.get(
+    "/{room_id}",
+    response_model=RoomDetailResponse,
+)
+def get_room_endpoint(
+    room_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return get_room(db=db, room_public_id=room_id, user=current_user)

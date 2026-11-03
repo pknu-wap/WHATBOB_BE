@@ -28,3 +28,25 @@ class RoomJoinResponse(BaseModel):
     member_count: int
     max_members: int
     joined_at: datetime
+
+
+class RoomMemberResponse(BaseModel):
+    user_id: int
+    nickname: str | None
+    profile_image: str | None
+    role: str
+    joined_at: datetime
+
+
+class RoomDetailResponse(BaseModel):
+    room_id: str
+    join_url: str
+    host_user_id: int
+    status: str
+    max_members: int
+    member_count: int
+    is_full: bool
+    is_member: bool
+    my_role: str | None
+    created_at: datetime
+    members: list[RoomMemberResponse]
