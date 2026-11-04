@@ -7,6 +7,7 @@ from app.menus.display import format_menu_name
 from app.menus.models import (
     Menu,
     OrderSheetQuestion,
+    QuestionSelectionState,
     Recommendation,
     RecommendationFeedback,
 )
@@ -31,9 +32,18 @@ from app.recommend.schemas import (
     RecommendationFeedbackResponse,
     RecommendedMenuDTO,
 )
+from app.recommend.variety import select_diverse_menus
 
 DEFAULT_TOTAL_QUESTIONS = 9
 DEFAULT_EXPLOITATION_COUNT = 7
+
+
+def _question_options(question: OrderSheetQuestion) -> list[dict[str, Any]]:
+    options = list(question.options_json or [])
+    # 기존 두 선택지 DB도 재적재 전까지 any를 조회·제출할 수 있다.
+    if len(options) == 2 and not any(opt.get("option_id") == "any" for opt in options):
+        options.append({"option_id": "any", "label": "상관없어요", "rules": []})
+    return options
 
 
 def _to_question_dto(
@@ -41,7 +51,7 @@ def _to_question_dto(
     is_exploration: bool = False,
 ) -> OrderSheetQuestionDTO:
     options = []
-    for opt in question.options_json or []:
+    for opt in _question_options(question):
         rules = [
             FilterRuleDTO(
                 field=r["field"],
@@ -153,6 +163,7 @@ def select_order_sheet_questions(
     total_count: int = DEFAULT_TOTAL_QUESTIONS,
     exploitation_count: int = DEFAULT_EXPLOITATION_COUNT,
     random_seed: int | None = None,
+    scope_key: str | None = None,
 ) -> OrderSheetQuestionsResponse:
     """
     [5단계 탐색+활용(Exploration-Exploitation) 질문 추출]
@@ -185,19 +196,48 @@ def select_order_sheet_questions(
 
     remaining_pool = [q for q in active_questions if q.cluster_key not in used_clusters]
     selected_explore: list[OrderSheetQuestion] = []
+    state = None
+    topic_counts: dict[str, int] = {}
+    last_clusters: set[str] = set()
+    if scope_key is not None:
+        state = (db.query(QuestionSelectionState)
+                 .filter(QuestionSelectionState.scope_key == scope_key)
+                 .with_for_update().first())
+        if state is None:
+            state = QuestionSelectionState(scope_key=scope_key)
+            db.add(state)
+        topic_counts = dict(state.topic_counts or {})
+        last_clusters = set(state.last_clusters or [])
 
     if actual_explore > 0 and remaining_pool:
         rng = random.Random(random_seed)
         pool_copy = list(remaining_pool)
         while len(selected_explore) < actual_explore and pool_copy:
+            # 직전 주제는 뒤로 미루고, 덜 나온 주제부터 순환한다.
+            fresh = [q for q in pool_copy if q.cluster_key not in last_clusters]
+            eligible = fresh or pool_copy
+            if state is not None:
+                least_count = min(topic_counts.get(q.cluster_key, 0) for q in eligible)
+                eligible = [q for q in eligible if topic_counts.get(q.cluster_key, 0) == least_count]
             weights = [
                 (float(q.importance_weight) + 0.3) / math.sqrt(float(q.shown_count or 0) + 1.0)
-                for q in pool_copy
+                for q in eligible
             ]
-            chosen = rng.choices(pool_copy, weights=weights, k=1)[0]
+            chosen = rng.choices(eligible, weights=weights, k=1)[0]
             selected_explore.append(chosen)
+            topic_counts[chosen.cluster_key] = topic_counts.get(chosen.cluster_key, 0) + 1
             used_clusters.add(chosen.cluster_key)
             pool_copy = [q for q in pool_copy if q.cluster_key not in used_clusters]
+
+    if state is not None:
+        state.last_clusters = [q.cluster_key for q in selected_explore]
+        state.topic_counts = topic_counts
+        selected_ids = [q.id for q in selected_exploit + selected_explore]
+        db.query(OrderSheetQuestion).filter(OrderSheetQuestion.id.in_(selected_ids)).update(
+            {OrderSheetQuestion.shown_count: OrderSheetQuestion.shown_count + 1},
+            synchronize_session="fetch",
+        )
+        db.commit()
 
     dtos = [
         _to_question_dto(q, is_exploration=False) for q in selected_exploit
@@ -248,7 +288,7 @@ def create_order_sheet_recommendation(
         if not q:
             raise InvalidOrderSheetException(f"존재하지 않는 질문 ID입니다: {ans.question_id}")
         matched_opt = next(
-            (opt for opt in (q.options_json or []) if opt.get("option_id") == ans.option_id),
+            (opt for opt in _question_options(q) if opt.get("option_id") == ans.option_id),
             None,
         )
         if not matched_opt:
@@ -256,7 +296,6 @@ def create_order_sheet_recommendation(
                 f"질문({q.question_code})에 유효하지 않은 선택지 ID입니다: {ans.option_id}"
             )
         validated_answers.append((q, matched_opt))
-        q.shown_count = int(q.shown_count or 0) + 1
 
     scored_candidates: list[tuple[float, list[str], Menu]] = []
     for menu in available_menus:
@@ -265,18 +304,15 @@ def create_order_sheet_recommendation(
         for q, opt in validated_answers:
             rules = opt.get("rules", [])
             weight = float(q.importance_weight)
-            if not rules:
-                score += weight * 0.35
-            elif evaluate_option_rules(menu, rules):
+            if rules and evaluate_option_rules(menu, rules):
                 score += weight * 1.0
                 matched_codes.append(q.question_code)
         scored_candidates.append((round(score, 4), matched_codes, menu))
 
-    scored_candidates.sort(
-        key=lambda item: (item[0], len(item[1]), -item[2].id),
-        reverse=True,
+    top_items = select_diverse_menus(
+        db, scored_candidates, request.user_id, request.top_k,
+        total_weight=sum(float(q.importance_weight) for q, opt in validated_answers if opt.get("rules")),
     )
-    top_items = scored_candidates[: request.top_k]
 
     rec_record = Recommendation(
         user_id=request.user_id,
@@ -333,7 +369,7 @@ def recalculate_question_weights(db: Session) -> dict[str, float]:
     초기 initial_score와 결합해 MySQL의 importance_weight를 업데이트합니다.
     """
     questions = db.query(OrderSheetQuestion).all()
-    feedbacks = db.query(RecommendationFeedback).all()
+    feedbacks = [fb for fb in db.query(RecommendationFeedback).all() if fb.answer_match_results]
 
     if not feedbacks:
         return {q.question_code: round(float(q.importance_weight), 4) for q in questions}
@@ -397,6 +433,10 @@ def record_recommendation_feedback(
     target_menu_id = request.selected_menu_id
     if target_menu_id is None and rec.recommended_menu_ids:
         target_menu_id = rec.recommended_menu_ids[0]
+    if target_menu_id not in (rec.recommended_menu_ids or []):
+        raise InvalidOrderSheetException("해당 추천 결과에 포함된 메뉴만 평가할 수 있습니다.")
+    if request.user_id is not None and rec.user_id != request.user_id:
+        raise InvalidOrderSheetException("추천을 요청한 사용자와 피드백 사용자가 다릅니다.")
 
     target_menu = (
         db.query(Menu).filter(Menu.id == target_menu_id).first()
@@ -422,6 +462,9 @@ def record_recommendation_feedback(
             continue
         opt = next((o for o in (q.options_json or []) if o.get("option_id") == opt_id), None)
         rules = opt.get("rules", []) if opt else []
+        # 상관없음은 취향 신호가 아니므로 질문 중요도 학습에서 제외한다.
+        if not rules:
+            continue
 
         matched = True
         if target_menu is not None and rules:

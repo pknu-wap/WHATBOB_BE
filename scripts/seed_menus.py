@@ -60,7 +60,19 @@ def _derive_origin_type(origin_raw: str, company_name: str) -> str:
     return "restaurant"
 
 
-def _derive_meal_type(cat_large: str) -> str:
+MEAL_BREAD_NAMES = frozenset({
+    "버거", "햄버거", "피자", "피자빵", "샌드위치", "핫도그", "토스트",
+    "또띠아", "부리토", "브리토", "타코", "퀘사디아", "케밥", "파니니",
+})
+
+
+def _is_meal_bread(cat_large: str, name: str) -> bool:
+    return cat_large == "빵 및 과자류" and name.split("_")[0].strip() in MEAL_BREAD_NAMES
+
+
+def _derive_meal_type(cat_large: str, name: str = "") -> str:
+    if _is_meal_bread(cat_large, name):
+        return "main_meal"
     if cat_large in ("음료 및 차류",):
         return "beverage"
     if cat_large in ("빵 및 과자류", "유제품류 및 빙과류", "과일류"):
@@ -215,7 +227,9 @@ def parse_and_clean_csv(
             if not food_code or not name or not cat_large:
                 continue
 
-            if not include_beverages_and_bakery and cat_large in ("음료 및 차류", "빵 및 과자류", "유제품류 및 빙과류"):
+            if (not include_beverages_and_bakery
+                    and cat_large in ("음료 및 차류", "빵 및 과자류", "유제품류 및 빙과류")
+                    and not _is_meal_bread(cat_large, name)):
                 continue
 
             origin_raw = (row.get("식품기원명") or "").strip()
@@ -253,12 +267,12 @@ def parse_and_clean_csv(
                 "category_medium": None if cat_medium == "해당없음" else cat_medium,
                 "category_small": None if cat_small == "해당없음" else cat_small,
                 "origin_type": _derive_origin_type(origin_raw, company),
-                "meal_type": _derive_meal_type(cat_large),
+                "meal_type": _derive_meal_type(cat_large, name),
                 "has_soup": _derive_has_soup(cat_large, name),
                 "cooking_style": _derive_cooking_style(cat_large),
                 "main_ingredient": _derive_main_ingredient(cat_medium, cat_small, name),
                 "flavor_intensity": _derive_flavor_intensity(cat_medium, name, sodium_mg, sugar_g),
-                "temperature": _derive_temperature(cat_large, name),
+                "temperature": "hot" if _is_meal_bread(cat_large, name) else _derive_temperature(cat_large, name),
                 "heaviness": _derive_heaviness(meal_kcal, fat_g, cat_large),
                 "kcal": meal_kcal,
                 "protein_g": protein_g,
@@ -290,7 +304,7 @@ def fetch_llm_generated_questions(base_pool: list[dict[str, Any]]) -> list[dict[
         "다음 cluster_key 목록에 대해 사용자에게 물어볼 자연스럽고 재치 있는 한국어 질문 문구를 "
         "각 클러스터당 2개씩 JSON 배열로 생성하세요. "
         "질문은 공백과 문장부호를 포함해 24자 이내여야 합니다. "
-        "각 질문은 제공된 두 선택지 중 하나를 고를 수 있는 내용이어야 합니다. "
+        "각 질문은 두 취향 선택지와 상관없어요 중 하나를 고를 수 있는 내용이어야 합니다. "
         "출력 형식: [{\"cluster_key\": \"has_soup\", \"question_text\": \"...\"}]\n"
         f"클러스터별 선택지: {json.dumps(cluster_options_map, ensure_ascii=False)}"
     )
@@ -362,10 +376,8 @@ def seed_database(
             existing_menus[code] = None
         elif existing_menus[code] is not None:
             existing_m = existing_menus[code]
-            existing_m.kcal = m_data["kcal"]
-            existing_m.heaviness = m_data["heaviness"]
-            existing_m.main_ingredient = m_data["main_ingredient"]
-            existing_m.allergen_tags = m_data["allergen_tags"]
+            for field, value in m_data.items():
+                setattr(existing_m, field, value)
 
     if new_menu_objs:
         db.bulk_save_objects(new_menu_objs)
@@ -380,7 +392,7 @@ def seed_database(
 
 
 def seed_question_pool(db: Session, use_llm: bool = False) -> dict[str, int]:
-    """기존 메뉴는 유지하고 두 선택지 질문을 추가하며 이전 질문은 이력용으로 보관한다."""
+    """기존 취향 선택지 ID를 유지하며 상관없음을 추가하고 이전 질문은 이력용으로 보관한다."""
     all_menus = db.query(Menu).all()
     if not all_menus:
         raise ValueError("질문의 초기 점수를 계산하려면 메뉴 데이터가 필요합니다.")
@@ -466,8 +478,9 @@ def main():
     parser = argparse.ArgumentParser(description="WhatBap CSV 메뉴 파싱 및 주문서 질문 풀 시드 스크립트")
     parser.add_argument("--csv", type=str, default=str(DEFAULT_CSV_PATH), help="식품영양성분 CSV 파일 경로")
     parser.add_argument("--max-menus", type=int, default=None, help="최대 적재 메뉴 수 제한 (전체 적재 시 생략)")
-    parser.add_argument("--meals-only", action="store_true", help="음료/베이커리 제외하고 정규 식사 메뉴만 적재")
-    parser.add_argument("--questions-only", action="store_true", help="기존 메뉴를 수정하지 않고 두 선택지·24자 질문만 갱신 (LLM 호출 없음)")
+    parser.add_argument("--meals-only", action="store_true", help="햄버거·피자 등 식사용 빵류를 포함하고 음료·디저트는 제외")
+    parser.add_argument("--questions-only", action="store_true", help="기존 메뉴를 수정하지 않고 상관없음·24자 질문만 갱신 (LLM 호출 없음)")
+    parser.add_argument("--no-llm", action="store_true", help="외부 LLM 호출 없이 내장 질문만 적재")
     args = parser.parse_args()
 
     if not args.questions_only:
@@ -483,7 +496,7 @@ def main():
                 csv_path=Path(args.csv),
                 max_menus=args.max_menus,
                 include_beverages_and_bakery=not args.meals_only,
-                use_llm=True,
+                use_llm=not args.no_llm,
             )
         print(f"[시드 완료] {summary}")
     finally:

@@ -48,11 +48,12 @@ def test_binary_options_cover_existing_menu_categories():
     )
     for question in pool:
         assert 1 <= len(question["question_text"]) <= 24
-        assert len(question["options"]) == 2
-        assert len({o["option_id"] for o in question["options"]}) == 2
+        assert len(question["options"]) == 3
+        assert len({o["option_id"] for o in question["options"]}) == 3
+        assert question["options"][-1] == {"option_id": "any", "label": "상관없어요", "rules": []}
     # 같은 주제의 문구 변형은 동일한 두 선택지를 사용한다.
     for question in {q["cluster_key"]: q for q in pool}.values():
-        options = question["options"]
+        options = [o for o in question["options"] if o["rules"]]
         field = options[0]["rules"][0]["field"]
         for menu_data in menus:
             if menu_data[field] is not None:
@@ -70,17 +71,18 @@ def test_numeric_options_do_not_overlap_at_boundary(cluster, field, boundary):
     question = next(q for q in build_candidate_question_pool() if q["cluster_key"] == cluster)
     for value in (boundary - 0.01, boundary, boundary + 0.01):
         menu = Menu(**{field: value})
-        assert sum(evaluate_option_rules(menu, o["rules"]) for o in question["options"]) == 1
+        assert sum(evaluate_option_rules(menu, o["rules"]) for o in question["options"] if o["rules"]) == 1
 
 
-def test_response_contract_enforces_24_characters_and_two_options():
+def test_response_contract_enforces_24_characters_and_two_or_three_options():
     question = build_candidate_question_pool()[0]
     payload = dict(question, id=1, initial_score=0.5, importance_weight=0.5)
     payload["question_text"] = "가" * 24
     assert len(OrderSheetQuestionDTO(**payload).question_text) == 24
     with pytest.raises(ValidationError):
         OrderSheetQuestionDTO(**dict(payload, question_text="가" * 25))
-    for count in (1, 3):
+    assert len(OrderSheetQuestionDTO(**dict(payload, options=question["options"][:2])).options) == 2
+    for count in (1, 4):
         with pytest.raises(ValidationError):
             OrderSheetQuestionDTO(**dict(payload, options=[question["options"][0]] * count))
 
@@ -119,7 +121,7 @@ def test_llm_discards_overlong_questions_without_truncating(monkeypatch):
     questions = seed_menus.fetch_llm_generated_questions(build_candidate_question_pool())
     assert len(questions) == 1
     assert questions[0]["question_text"] == "가" * 24
-    assert len(questions[0]["options"]) == 2
+    assert len(questions[0]["options"]) == 3
 
 
 def test_seed_preserves_old_feedback_and_serves_binary_questions(db):
@@ -161,9 +163,9 @@ def test_seed_preserves_old_feedback_and_serves_binary_questions(db):
         for question in data["questions"]:
             assert question["id"] != old.id
             assert len(question["question_text"]) <= 24
-            assert len(question["options"]) == 2
-        # 두 버튼 모두 추천과 피드백까지 처리할 수 있다.
-        for index in (0, 1):
+            assert len(question["options"]) == 3
+        # 두 취향 답변과 상관없음 모두 추천과 피드백까지 처리할 수 있다.
+        for index in (0, 1, 2):
             response = client.post("/api/recommendations/order-sheet", json={
                 "answers": [{"question_id": q["id"], "option_id": q["options"][index]["option_id"]}
                             for q in data["questions"]],

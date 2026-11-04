@@ -1,9 +1,9 @@
-"""버튼 두 개와 24자 이내 문구를 사용하는 주문서 질문 후보."""
+"""두 취향 선택지와 상관없음, 24자 이내 문구를 사용하는 주문서 질문 후보."""
 
 from typing import Any
 
 MAX_QUESTION_TEXT_LENGTH = 24
-QUESTION_OPTION_COUNT = 2
+QUESTION_OPTION_COUNT = 3
 QUESTION_CODE_PREFIX = "q_binary_v1_"
 
 
@@ -62,6 +62,7 @@ def build_candidate_question_pool() -> list[dict[str, Any]]:
              "rules": [{"field": field, "op": op, "value": value}]},
             {"option_id": negative[0], "label": negative[1],
              "rules": [{"field": field, "op": opposite_ops[op], "value": value}]},
+            {"option_id": "any", "label": "상관없어요", "rules": []},
         ]
         for idx, template in enumerate(templates, start=1):
             question_text = template.format(topic=topic)

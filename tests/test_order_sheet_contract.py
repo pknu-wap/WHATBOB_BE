@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.core.database import get_db
-from app.menus.models import OrderSheetQuestion
+from app.menus.models import OrderSheetQuestion, QuestionSelectionState
 from app.recommend.router import router
 
 
@@ -22,6 +22,7 @@ def test_weight_names_preserve_http_and_database_compatibility(weight_key, recal
         poolclass=StaticPool,
     )
     OrderSheetQuestion.__table__.create(engine)
+    QuestionSelectionState.__table__.create(engine)
     try:
         with Session(engine) as db:
             question = OrderSheetQuestion(
