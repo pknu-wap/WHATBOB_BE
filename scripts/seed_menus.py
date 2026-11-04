@@ -15,6 +15,7 @@ import app.users.models  # noqa: F401
 from app.core.config import settings
 from app.core.database import Base, SessionLocal, engine
 from app.menus.models import Menu, OrderSheetQuestion
+from app.recommend.common import derive_allergens_from_text
 from app.recommend.order_sheet import rank_and_score_question_pool
 
 logger = logging.getLogger(__name__)
@@ -186,25 +187,7 @@ def _derive_heaviness(meal_kcal: Optional[float], fat_g: Optional[float], cat_la
 
 def _derive_allergens(cat_medium: str, cat_small: str, name: str, cat_large: str) -> list[str]:
     combined = f"{cat_large} {cat_medium} {cat_small} {name}"
-    combined_no_stingray = combined.replace("가오리", "")
-    tags: list[str] = []
-    allergen_rules = {
-        "해산물": ("해물", "새우", "오징어", "조개", "홍합", "바지락", "굴", "전복", "게", "생선", "참치", "고등어", "갈치", "황태", "어묵", "회", "홍어", "가오리", "연어", "낙지", "쭈꾸미", "주꾸미", "아귀", "코다리", "명태", "동태", "조기", "장어"),
-        "갑각류/조개류": ("새우", "게", "조개", "홍합", "바지락", "굴", "전복", "키조개"),
-        "돼지고기": ("돼지", "삼겹", "제육", "돈까스", "돈가스", "족발", "보쌈", "햄", "베이컨", "소시지", "탕수육", "순대", "수육"),
-        "소고기": ("소고기", "한우", "불고기", "갈비", "차돌", "육회", "설렁탕", "곰탕"),
-        "가금류(닭/오리)": ("닭", "치킨", "오리", "삼계", "칠면조", "백숙"),
-        "유제품": ("우유", "치즈", "크림", "버터", "요거트", "라떼", "유제품"),
-        "달걀(난류)": ("달걀", "계란", "메추리알", "에그", "마요"),
-        "밀/글루텐": ("빵", "면", "국수", "파스타", "스파게티", "라면", "우동", "만두", "튀김", "전", "피자", "케이크"),
-        "대두(콩/두부)": ("두부", "콩", "된장", "청국장", "순두부", "콩비지"),
-        "견과류/깨": ("땅콩", "호두", "아몬드", "잣", "깨", "흑임자"),
-    }
-    for allergen_name, keywords in allergen_rules.items():
-        target_text = combined_no_stingray if allergen_name == "가금류(닭/오리)" else combined
-        if any(kw in target_text for kw in keywords):
-            tags.append(allergen_name)
-    return tags
+    return derive_allergens_from_text(combined)
 
 
 def parse_and_clean_csv(

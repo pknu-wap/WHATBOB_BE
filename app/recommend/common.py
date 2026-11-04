@@ -38,6 +38,164 @@ class InvalidOrderSheetException(RecommendationDomainException):
         super().__init__(message=message, status_code=400)
 
 
+# 식품 등의 표시·광고에 관한 법률 시행규칙 [별표 2] 기준 식약처 고시 법정 19대 알레르기 유발물질
+OFFICIAL_ALLERGEN_ITEMS: list[dict[str, Any]] = [
+    {
+        "id": "egg",
+        "name": "알류(달걀)",
+        "legal_name": "알류(가금류만 해당한다)",
+        "description": "달걀, 계란, 메추리알, 마요네즈 등",
+    },
+    {
+        "id": "milk",
+        "name": "우유",
+        "legal_name": "우유",
+        "description": "우유, 치즈, 버터, 크림, 요거트, 라떼 등",
+    },
+    {
+        "id": "buckwheat",
+        "name": "메밀",
+        "legal_name": "메밀",
+        "description": "메밀국수, 모밀, 메밀전병 등",
+    },
+    {
+        "id": "peanut",
+        "name": "땅콩",
+        "legal_name": "땅콩",
+        "description": "땅콩, 땅콩버터 등",
+    },
+    {
+        "id": "soybean",
+        "name": "대두(콩)",
+        "legal_name": "대두",
+        "description": "두부, 된장, 청국장, 순두부, 콩나물 등",
+    },
+    {
+        "id": "wheat",
+        "name": "밀",
+        "legal_name": "밀",
+        "description": "밀가루, 빵, 면, 라면, 파스타, 튀김 등",
+    },
+    {
+        "id": "mackerel",
+        "name": "고등어",
+        "legal_name": "고등어",
+        "description": "고등어구이, 조림 등",
+    },
+    {
+        "id": "crab",
+        "name": "게",
+        "legal_name": "게",
+        "description": "꽃게, 간장게장, 킹크랩, 게살 등",
+    },
+    {
+        "id": "shrimp",
+        "name": "새우",
+        "legal_name": "새우",
+        "description": "새우튀김, 대하, 칵테일새우 등",
+    },
+    {
+        "id": "pork",
+        "name": "돼지고기",
+        "legal_name": "돼지고기",
+        "description": "삼겹살, 제육, 돈까스, 보쌈, 햄, 소시지 등",
+    },
+    {
+        "id": "peach",
+        "name": "복숭아",
+        "legal_name": "복숭아",
+        "description": "복숭아, 복숭아 에이드/디저트 등",
+    },
+    {
+        "id": "tomato",
+        "name": "토마토",
+        "legal_name": "토마토",
+        "description": "토마토, 케첩, 스파게티 토마토소스 등",
+    },
+    {
+        "id": "sulfite",
+        "name": "아황산류",
+        "legal_name": "아황산류",
+        "description": "건과일류, 와인 가공식품 등",
+    },
+    {
+        "id": "walnut",
+        "name": "호두",
+        "legal_name": "호두",
+        "description": "호두, 월넛 등",
+    },
+    {
+        "id": "chicken",
+        "name": "닭고기",
+        "legal_name": "닭고기",
+        "description": "치킨, 닭볶음탕, 삼계탕 등",
+    },
+    {
+        "id": "beef",
+        "name": "쇠고기(소고기)",
+        "legal_name": "쇠고기",
+        "description": "소고기, 한우, 불고기, 갈비, 설렁탕 등",
+    },
+    {
+        "id": "squid",
+        "name": "오징어",
+        "legal_name": "오징어",
+        "description": "오징어볶음, 오징어순대 등",
+    },
+    {
+        "id": "shellfish",
+        "name": "조개류(굴/전복/홍합 포함)",
+        "legal_name": "조개류(굴, 전복, 홍합을 포함한다)",
+        "description": "바지락, 굴, 전복, 홍합, 가리비, 조개탕 등",
+    },
+    {
+        "id": "pine_nut",
+        "name": "잣",
+        "legal_name": "잣",
+        "description": "잣, 잣죽 등",
+    },
+]
+
+OFFICIAL_ALLERGEN_RULES: dict[str, tuple[str, ...]] = {
+    "알류(달걀)": ("달걀", "계란", "메추리알", "에그", "마요"),
+    "우유": ("우유", "치즈", "크림", "버터", "요거트", "라떼", "유제품"),
+    "메밀": ("메밀", "모밀"),
+    "땅콩": ("땅콩", "피넛"),
+    "대두(콩)": ("두부", "콩", "된장", "청국장", "순두부", "콩비지", "콩나물"),
+    "밀": ("빵", "면", "국수", "파스타", "스파게티", "라면", "우동", "만두", "튀김", "전", "피자", "케이크", "밀가루"),
+    "고등어": ("고등어",),
+    "게": ("꽃게", "대게", "킹크랩", "게살", "간장게장", "양념게장", "게장"),
+    "새우": ("새우", "대하", "칵테일새우", "새우튀김"),
+    "돼지고기": ("돼지", "삼겹", "제육", "돈까스", "돈가스", "족발", "보쌈", "햄", "베이컨", "소시지", "탕수육", "순대", "수육"),
+    "복숭아": ("복숭아",),
+    "토마토": ("토마토", "케첩", "케찹"),
+    "아황산류": ("아황산", "이산화황"),
+    "호두": ("호두", "월넛"),
+    "닭고기": ("닭", "치킨", "삼계", "칠면조", "백숙", "닭갈비", "닭볶음"),
+    "쇠고기(소고기)": ("소고기", "한우", "불고기", "갈비", "차돌", "육회", "설렁탕", "곰탕", "우삼겹", "소갈비"),
+    "오징어": ("오징어",),
+    "조개류(굴/전복/홍합 포함)": ("조개", "홍합", "바지락", "굴", "전복", "키조개", "가리비", "꼬막", "재첩"),
+    "잣": ("잣",),
+    # 기존 도메인 상위 호환 유지
+    "해산물": (
+        "해물", "새우", "오징어", "조개", "홍합", "바지락", "굴", "전복", "게", "생선", "참치",
+        "고등어", "갈치", "황태", "어묵", "회", "홍어", "가오리", "연어", "낙지", "쭈꾸미",
+        "주꾸미", "아귀", "코다리", "명태", "동태", "조기", "장어"
+    ),
+}
+
+
+def derive_allergens_from_text(text: str) -> list[str]:
+    """식약처 고시 19대 기준 및 주요 식품 키워드 기반으로 알레르기 태그를 추출합니다."""
+    text_no_stingray = text.replace("가오리", "")
+    tags: list[str] = []
+    for allergen_name, keywords in OFFICIAL_ALLERGEN_RULES.items():
+        target = text_no_stingray if allergen_name == "닭고기" else text
+        if any(kw in target for kw in keywords):
+            tags.append(allergen_name)
+    return tags
+
+
 def collect_user_exclusion_keywords(
     db: Session,
     user_id: Optional[int] = None,

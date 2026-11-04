@@ -45,6 +45,18 @@ class OrderSheetQuestionDTO(BaseModel):
     is_exploration: bool = False
 
 
+class AllergenItemDTO(BaseModel):
+    id: str = Field(description="알레르기 고유 코드 (예: egg, milk, peanut)")
+    name: str = Field(description="화면 표시용 이름 (예: 알류(달걀), 우유, 땅콩)")
+    legal_name: str = Field(description="식약처 고시 법정 명칭")
+    description: str = Field(description="해당 재료 및 대표 가공식품 예시")
+
+
+class AllergenListResponse(BaseModel):
+    total_count: int = Field(description="알레르기 유발물질 총 개수 (식약처 고시 19종)")
+    allergens: list[AllergenItemDTO]
+
+
 class OrderSheetQuestionsResponse(BaseModel):
     questions: list[OrderSheetQuestionDTO]
     total_count: int

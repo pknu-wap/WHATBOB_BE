@@ -1,9 +1,3 @@
-"""샤논 엔트로피 기반 초기 점수와 사용자 피드백 통계로 메뉴를 추천한다.
-
-초기에는 선택지별 음식 분포와 주제 다양성으로 질문 중요도를 정한다.
-이후에는 조건 일치 여부별 만족도를 집계해 같은 중요도를 재계산한다.
-"""
-
 import math
 import random
 from typing import Any
@@ -81,11 +75,9 @@ def calculate_question_entropy_score(
     options_json: list[dict[str, Any]],
 ) -> float:
     """
-    [3단계 샤논 엔트로피 기반 초기 질문 점수]
-    조건이 있는 선택지별 메뉴 수로 정규화 샤논 엔트로피를 계산하고,
-    커버리지를 결합해 초기 점수(0.05 ~ 1.0)를 산출합니다.
-    조건 선택지가 하나면 일치/불일치의 이진 엔트로피를 사용합니다.
-    선택지별 개수는 중복 매칭을 포함하므로 커버리지 비율은 최대 1로 제한합니다.
+    [3단계 초기 ML 선별]
+    피드백 데이터가 0건일 때 음식 후보 분포에 대한 선택지별 정규화 샤논 엔트로피(Information Gain)와
+    커버리지(Coverage)를 결합해 질문의 메뉴 분할 변별력(0.05 ~ 1.0)을 산출합니다.
     """
     if not menus or not options_json:
         return 0.1
@@ -130,15 +122,15 @@ def rank_and_score_question_pool(
     raw_questions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """
-    [3단계 엔트로피 점수와 주제 다양성에 따른 초기 중요도 산정]
-    후보 질문마다 엔트로피 기반 초기 점수를 계산합니다.
-    미리 지정된 같은 주제(cluster_key)의 질문에는 순서대로 감쇠 계수를 적용합니다.
+    [3단계 초기 ML 클러스터링 & 정보 이득 정렬]
+    수백 개의 후보 질문 각각에 대해 정보 이득을 계산하고,
+    동일 의미 클러스터(cluster_key) 내 중복 질문에는 감쇠 계수를 적용해 초기 importance_weight를 산출합니다.
     """
     scored: list[dict[str, Any]] = []
     for q in raw_questions:
-        initial_score = calculate_question_entropy_score(menus, q["options"])
+        ig = calculate_question_entropy_score(menus, q["options"])
         q_copy = dict(q)
-        q_copy["initial_score"] = initial_score
+        q_copy["initial_score"] = ig
         scored.append(q_copy)
 
     scored.sort(key=lambda x: x["initial_score"], reverse=True)
@@ -165,7 +157,7 @@ def select_order_sheet_questions(
     [5단계 탐색+활용(Exploration-Exploitation) 질문 추출]
     - 상위 exploitation_count(기본 7개): 서로 다른 cluster_key를 우선하여 importance_weight 최상위 질문 선택
     - 나머지 exploration_count(기본 2개): 후보 풀에서 노출 횟수가 적은 질문을 가중 샘플링하여
-      새로운 질문도 사용자 피드백에 따른 중요도 재계산 기회를 얻도록 합니다.
+      새로운 질문도 사용자 피드백을 받아 재학습 시 상위권으로 올라올 수 있도록 보장
     """
     active_questions = (
         db.query(OrderSheetQuestion)
@@ -342,11 +334,10 @@ def create_order_sheet_recommendation(
 
 def recalculate_question_weights(db: Session) -> dict[str, float]:
     """
-    [4·5단계 누적 사용자 피드백 기반 질문 중요도 재계산]
-    질문별 조건 일치/불일치 그룹의 만족도를 전체 만족도로 평활화합니다.
-    두 그룹의 만족도 차이와 일치 그룹의 만족도를 시그모이드로 변환한 뒤,
-    후기 수에 따른 비율로 초기 엔트로피 기반 점수와 혼합해 중요도를 갱신합니다.
-    별도 모델 최적화 없이 고정된 통계 수식을 적용합니다.
+    [4·5단계 피드백 누적 데이터 기반 ML 가중치 재학습]
+    누적된 RecommendationFeedback 로그의 (answer_match_results X, is_satisfied y)를 학습하여
+    질문별 조건 일치 시 만족 확률 향상도(Empirical Lift + L2 정규화 로지스틱 가중치)를 계산하고,
+    초기 initial_score와 결합해 MySQL의 importance_weight를 업데이트합니다.
     """
     questions = db.query(OrderSheetQuestion).all()
     feedbacks = db.query(RecommendationFeedback).all()
@@ -360,19 +351,19 @@ def recalculate_question_weights(db: Session) -> dict[str, float]:
 
     stats: dict[str, dict[str, float]] = {}
     for fb in feedbacks:
-        match_results = fb.answer_match_results or {}
-        satisfaction = 1.0 if fb.is_satisfied else 0.0
-        for q_id_str, match_val in match_results.items():
+        vec = fb.answer_match_results or {}
+        y = 1.0 if fb.is_satisfied else 0.0
+        for q_id_str, match_val in vec.items():
             st = stats.setdefault(
                 str(q_id_str),
                 {"match_pos": 0.0, "match_total": 0.0, "unmatch_pos": 0.0, "unmatch_total": 0.0},
             )
             if float(match_val) >= 0.5:
                 st["match_total"] += 1.0
-                st["match_pos"] += satisfaction
+                st["match_pos"] += y
             else:
                 st["unmatch_total"] += 1.0
-                st["unmatch_pos"] += satisfaction
+                st["unmatch_pos"] += y
 
     updated: dict[str, float] = {}
     for q in questions:
@@ -388,11 +379,8 @@ def recalculate_question_weights(db: Session) -> dict[str, float]:
         lift = p_match - p_unmatch
         feedback_importance = 1.0 / (1.0 + math.exp(-3.2 * (lift + (p_match - 0.5))))
 
-        feedback_ratio = min(0.85, sample_n / (sample_n + 4.0))
-        new_weight = (
-            (1.0 - feedback_ratio) * float(q.initial_score)
-            + feedback_ratio * feedback_importance
-        )
+        alpha = min(0.85, sample_n / (sample_n + 4.0))
+        new_weight = (1.0 - alpha) * float(q.initial_score) + alpha * feedback_importance
         q.importance_weight = round(max(0.05, min(2.0, new_weight)), 4)
         updated[q.question_code] = q.importance_weight
 
@@ -407,7 +395,7 @@ def record_recommendation_feedback(
 ) -> RecommendationFeedbackResponse:
     """
     추천 결과에 대한 사용자(또는 4단계 개발팀) 피드백을 기록하고,
-    누적 만족도 통계로 질문 중요도를 즉시 재계산해 DB에 반영합니다.
+    즉시 질문 가중치 ML 재학습을 수행해 MySQL에 반영합니다.
     """
     rec = db.query(Recommendation).filter(Recommendation.id == recommendation_id).first()
     if not rec:

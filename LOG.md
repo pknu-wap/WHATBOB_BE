@@ -3,6 +3,42 @@
 WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 최신 작업을 위에 추가하며, 기록 방법은 같은 디렉터리의 `AGENTS.md`를 따른다.
 
+## 2026-11-04
+
+### 식약처 법정 19대 알레르기 유발물질 표준화 및 조회 API 추가
+
+#### 변경 이유 및 내용
+
+- 「식품 등의 표시·광고에 관한 법률 시행규칙 [별표 2]」 기준 대한민국 식약처 고시 19대 알레르기 유발물질(알류, 우유, 메밀, 땅콩, 대두, 밀, 고등어, 게, 새우, 돼지고기, 복숭아, 토마토, 아황산류, 호두, 닭고기, 쇠고기, 오징어, 조개류, 잣)을 공식 표준 목록 및 감지 사전으로 정의했다.
+- 프론트엔드 알레르기/섭취불가 선택 화면(체크박스/칩) 렌더링에 사용할 수 있도록 `GET /api/recommendations/allergens` 엔드포인트를 추가했다.
+- `scripts/seed_menus.py`의 `_derive_allergens`를 고도화하여 2,320개 메뉴 파싱 시 19대 법정 유발물질을 정밀하게 추출해 `menus.allergen_tags`에 적재하도록 연동했다. 기존 "해산물" 등 상위 호환 키워드도 보존했다.
+
+#### 주요 변경 파일
+
+- `app/recommend/common.py`
+- `app/recommend/schemas.py`
+- `app/recommend/router.py`
+- `scripts/seed_menus.py`
+- `tests/test_recommend.py`
+- `LOG.md`
+
+#### API 변경
+
+- `GET /api/recommendations/allergens`: 신규 추가 (200 OK, 식약처 법정 19대 알레르기 유발물질 목록 및 설명 반환)
+
+#### DB 변경
+
+- 없음 (`menus.allergen_tags` JSON 컬럼 구조 그대로 호환)
+
+#### 검증
+
+- `.\.venv\Scripts\python.exe -m pytest tests/test_recommend.py`: 7개 테스트 케이스 전체 통과 (`7 passed in 1.87s`).
+- 19종 법정 알레르기 유발물질 반환 검증 및 제외 필터링 테스트 정상 검증 완료.
+
+#### 남은 작업 및 주의 사항
+
+- 오라클 클라우드 서버 배포 후 새 알레르기 태그 반영을 위해 `python -m scripts.seed_menus --meals-only` 재실행 권장.
+
 ## 2026-11-03
 
 ### 주문서 추천의 명칭을 샤논 엔트로피 초기 점수와 사용자 피드백 통계 기반 알고리즘으로 정정
