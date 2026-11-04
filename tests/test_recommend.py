@@ -97,6 +97,20 @@ def test_csv_parser_and_large_question_pool_generation():
         assert len(q["options"]) >= 2
 
 
+def test_get_official_allergens_returns_19_legal_allergens():
+    """식품 등의 표시·광고에 관한 법률 시행규칙 [별표 2] 기준 식약처 고시 19대 알레르기 유발물질 목록 반환 검증"""
+    from app.recommend.router import get_official_allergens
+    resp = get_official_allergens()
+    assert resp.success is True
+    data = resp.data
+    assert data.total_count == 19
+    assert len(data.allergens) == 19
+
+    ids = [item.id for item in data.allergens]
+    for required_id in ["egg", "milk", "buckwheat", "peanut", "soybean", "wheat", "mackerel", "crab", "shrimp", "pork", "peach", "tomato", "sulfite", "walnut", "chicken", "beef", "squid", "shellfish", "pine_nut"]:
+        assert required_id in ids
+
+
 def test_get_order_sheet_questions_returns_top7_and_explore2(seeded_db):
     """3단계 & 5단계: 질문 조회 시 가중치 상위 7개(서로 다른 클러스터 우선) + 후보 탐색 2개 = 총 9개 반환 검증"""
     resp = get_order_sheet_questions(total_count=9, exploitation_count=7, db=seeded_db)
@@ -347,6 +361,20 @@ def test_csv_parser_and_large_question_pool_generation():
         assert "question_code" in q
         assert "cluster_key" in q
         assert len(q["options"]) >= 2
+
+
+def test_get_official_allergens_returns_19_legal_allergens():
+    """식품 등의 표시·광고에 관한 법률 시행규칙 [별표 2] 기준 식약처 고시 19대 알레르기 유발물질 목록 반환 검증"""
+    from app.recommend.router import get_official_allergens
+    resp = get_official_allergens()
+    assert resp.success is True
+    data = resp.data
+    assert data.total_count == 19
+    assert len(data.allergens) == 19
+
+    ids = [item.id for item in data.allergens]
+    for required_id in ["egg", "milk", "buckwheat", "peanut", "soybean", "wheat", "mackerel", "crab", "shrimp", "pork", "peach", "tomato", "sulfite", "walnut", "chicken", "beef", "squid", "shellfish", "pine_nut"]:
+        assert required_id in ids
 
 
 def test_get_order_sheet_questions_returns_top7_and_explore2(seeded_db):

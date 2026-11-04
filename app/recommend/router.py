@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.recommend.common import OFFICIAL_ALLERGEN_ITEMS
 from app.recommend.order_sheet import (
     DEFAULT_EXPLOITATION_COUNT,
     DEFAULT_TOTAL_QUESTIONS,
@@ -11,6 +12,8 @@ from app.recommend.order_sheet import (
     tune_question_weights,
 )
 from app.recommend.schemas import (
+    AllergenItemDTO,
+    AllergenListResponse,
     ApiResponse,
     OrderSheetQuestionsResponse,
     OrderSheetRecommendRequest,
@@ -22,6 +25,25 @@ from app.recommend.schemas import (
 )
 
 router = APIRouter(prefix="/api/recommendations", tags=["Recommendations"])
+
+
+@router.get(
+    "/allergens",
+    response_model=ApiResponse[AllergenListResponse],
+    status_code=status.HTTP_200_OK,
+    summary="식약처 법정 19대 알레르기 유발물질 목록 조회",
+    description="식품 등의 표시·광고에 관한 법률 시행규칙 [별표 2] 기준 식약처 고시 19대 알레르기 유발물질 표준 목록을 반환합니다.",
+)
+def get_official_allergens():
+    """프론트엔드 알레르기/섭취불가 선택 화면 렌더링용 식약처 19대 알레르기 목록 반환"""
+    return ApiResponse(
+        success=True,
+        data=AllergenListResponse(
+            total_count=len(OFFICIAL_ALLERGEN_ITEMS),
+            allergens=[AllergenItemDTO(**item) for item in OFFICIAL_ALLERGEN_ITEMS],
+        ),
+        message=None,
+    )
 
 
 @router.get(
