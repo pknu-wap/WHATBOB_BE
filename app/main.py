@@ -10,6 +10,7 @@ from app.auth.router import router as auth_router
 from app.core.database import Base, engine
 from app.recommend.common import RecommendationDomainException
 from app.recommend.router import router as recommend_router
+from app.rooms.router import router as rooms_router
 
 logger = logging.getLogger("uvicorn")
 
@@ -64,6 +65,7 @@ async def handle_recommendation_domain_exception(
 # 라우터 등록
 app.include_router(auth_router)
 app.include_router(recommend_router)
+app.include_router(rooms_router)
 
 
 @app.get("/")

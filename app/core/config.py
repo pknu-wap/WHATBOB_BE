@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "mysql+pymysql://watbab:watbab@localhost:3306/watbab"
     JWT_SECRET: str = "watbab-default-secret-key"
     JWT_EXPIRE_MINUTES: int = 10080
+    FRONTEND_BASE_URL: str = "https://whatbobfe-app.vercel.app"
     KAKAO_REST_API_KEY: str
     KAKAO_REDIRECT_URI: str = "https://whatbobfe-app.vercel.app/auth/callback"
     KAKAO_CLIENT_SECRET: str | None = None
