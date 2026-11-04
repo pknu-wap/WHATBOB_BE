@@ -28,7 +28,14 @@ def test_weight_names_preserve_http_and_database_compatibility(weight_key, recal
                 question_code="q_soup_contract",
                 cluster_key="has_soup",
                 question_text="국물 있는 음식이 좋은가요?",
-                options_json=[{"option_id": "any", "label": "상관없어요", "rules": []}],
+                options_json=[
+                    {"option_id": "soup_yes", "label": "국물 있음", "rules": [
+                        {"field": "has_soup", "op": "eq", "value": True},
+                    ]},
+                    {"option_id": "soup_no", "label": "국물 없음", "rules": [
+                        {"field": "has_soup", "op": "eq", "value": False},
+                    ]},
+                ],
                 initial_score=0.8,
                 importance_weight=0.7,
             )

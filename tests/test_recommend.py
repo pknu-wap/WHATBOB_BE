@@ -94,7 +94,8 @@ def test_csv_parser_and_large_question_pool_generation():
     for q in pool:
         assert "question_code" in q
         assert "cluster_key" in q
-        assert len(q["options"]) >= 2
+        assert len(q["options"]) == 2
+        assert 1 <= len(q["question_text"]) <= 24
 
 
 def test_get_official_allergens_returns_19_legal_allergens():
@@ -161,7 +162,7 @@ def test_order_sheet_excludes_allergies_and_disliked_foods(seeded_db):
         exclusions=["훠궈"],
         answers=[
             AnswerItemRequest(question_id=q_soup.id, option_id="soup_yes"),
-            AnswerItemRequest(question_id=q_ing.id, option_id="seafood"),
+            AnswerItemRequest(question_id=q_ing.id, option_id="non_meat"),
         ],
         top_k=5,
     )
@@ -360,7 +361,8 @@ def test_csv_parser_and_large_question_pool_generation():
     for q in pool:
         assert "question_code" in q
         assert "cluster_key" in q
-        assert len(q["options"]) >= 2
+        assert len(q["options"]) == 2
+        assert 1 <= len(q["question_text"]) <= 24
 
 
 def test_get_official_allergens_returns_19_legal_allergens():
@@ -427,7 +429,7 @@ def test_order_sheet_excludes_allergies_and_disliked_foods(seeded_db):
         exclusions=["훠궈"],
         answers=[
             AnswerItemRequest(question_id=q_soup.id, option_id="soup_yes"),
-            AnswerItemRequest(question_id=q_ing.id, option_id="seafood"),
+            AnswerItemRequest(question_id=q_ing.id, option_id="non_meat"),
         ],
         top_k=5,
     )

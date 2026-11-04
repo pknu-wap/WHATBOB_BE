@@ -5,6 +5,53 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-04
 
+### 주문서 질문을 두 선택지와 최대 24자 문구로 변경
+
+#### 변경 이유 및 내용
+
+- 프론트에서 질문마다 답변 버튼 두 개를 표시할 수 있도록 12개 주제의 질문 후보 204개를 두 선택지로 구성했다. 재료·조리법처럼 기존 선택지가 많던 주제는 고기류/그 외 재료, 밥·면/그 외 조리 형태 등으로 묶어 기존 메뉴 분류가 빠지지 않게 했다. `상관없어요` 선택지는 새 질문에서 제거했다.
+- 공백·문장부호 포함 질문 문구 길이를 최대 24자로 제한했다. 응답 DTO에도 문구 1~24자 및 선택지 정확히 두 개 제약을 적용했다. 내장 질문의 실제 최대 길이는 17자다.
+- 질문 후보 정의를 `app/recommend/question_pool.py`에 모으고 공유 JSON을 재생성했다. 초기 점수와 중요도 계산, 기본 질문 수 9개(7+2), 기본 추천 수 5개는 기존 방식을 유지한다.
+- 선택적 LLM 생성에도 두 선택지와 24자 제한을 안내하고, 제한을 넘는 문구는 잘라 쓰지 않고 후보에서 제외한다. 외부 호출 없이 모의 응답으로 검증했다.
+- 과거 질문의 선택지 의미를 바꿔 기존 피드백 계산이 달라지는 일을 방지하기 위해 새 질문 코드 `q_binary_v1_...`를 사용한다. 시드 실행 시 이전 질문은 삭제·덮어쓰기 없이 비활성화하고 새 질문을 추가한다.
+- 기존 메뉴나 테이블 구조를 건드리지 않고 질문만 갱신하는 `--questions-only` 옵션을 추가했다. 이 옵션은 LLM을 호출하지 않는다.
+
+#### 주요 변경 파일
+
+- `app/recommend/question_pool.py`
+- `app/recommend/schemas.py`
+- `scripts/seed_menus.py`
+- `data/order_sheet_questions_pool.json`
+- `tests/test_binary_questions.py`
+- `tests/test_recommend.py`
+- `tests/test_order_sheet_contract.py`
+- `LOG.md`
+
+#### API 변경
+
+- `GET /api/recommendations/order-sheet/questions`: 질문별 `options`가 정확히 두 개, `question_text`가 공백 포함 최대 24자가 된다. 새 질문 ID·코드와 선택지 ID는 조회 응답에서 읽어 사용해야 한다.
+- `POST /api/recommendations/order-sheet/weights`: `top_questions`에도 같은 문구·선택지 제약을 적용한다.
+- 경로, 공통 응답 JSON 키와 중요도 alias(`info_gain_score`, `ml_weight`)는 유지한다. 추천·피드백 요청 형식 변경 없음.
+
+#### DB 변경
+
+- 테이블·컬럼·제약 조건 및 마이그레이션 파일 변경 없음.
+- 질문 갱신 시 `order_sheet_questions`에 새 질문·선택지·초기 점수·중요도를 저장하고 이전 질문의 `is_active`를 `false`로 변경한다. 기존 추천·피드백이 참조하는 이전 질문 ID와 선택지 조건은 보존한다.
+- 실제 로컬 MySQL 반영을 시도했으나 계정 인증 오류(1045)로 실패했다. 실제 DB 데이터는 갱신하지 못했으며, 위 전환 동작은 인메모리 SQLite에서 검증했다.
+
+#### 검증
+
+- `.\.venv\Scripts\python.exe -m pytest -q -rs`: 42개 통과, 1개 건너뜀. MySQL 방 통합 테스트는 `MYSQL_TEST_DATABASE_URL` 미설정으로 건너뛰었다. 기존 경고 3건(Starlette AnyIO, 인증 DTO Pydantic 설정, 요청 alias 메타데이터)이 남아 있다.
+- 추가 검증: 전체 CSV 메뉴 분류의 두 선택지 커버리지, 영양 수치 경계에서 조건 중복·누락 없음, 24자 허용/25자 거부, 선택지 1개·3개 거부, 공유 JSON 일치, LLM 초과 문구 제외, 두 버튼 각각의 HTTP 추천·피드백, 이전 추천 피드백 보존, 재시드 중복 방지 및 사용된 질문 중요도 유지.
+- `.\.venv\Scripts\python.exe -m scripts.seed_menus --questions-only`: 실행했으나 로컬 MySQL 계정 인증 오류(1045)로 실패. 실제 MySQL 반영 및 원격 배포 미완료.
+- `git diff --check`: 통과.
+
+#### 남은 작업 및 주의 사항
+
+- DB 인증 설정을 해결한 뒤 `.\.venv\Scripts\python.exe -m scripts.seed_menus --questions-only`를 실행해야 실제 질문 조회에 반영된다. 배포 환경에서는 `python -m scripts.seed_menus --questions-only`를 실행한다.
+- 새 응답 DTO는 두 선택지·24자 제약을 검사하므로 기존 DB를 사용하는 환경은 질문 갱신 후 새 백엔드로 전환해야 한다. 프론트에 저장된 이전 질문 대신 질문 목록을 새로 조회해야 한다.
+- 기존 질문·피드백은 보존되지만 새 질문의 중요도는 새 초기 점수부터 시작한다. 외부 LLM 실제 호출과 원격 배포는 미실행이며 커밋·푸시는 수행하지 않았다.
+
 ### 식약처 법정 19대 알레르기 유발물질 표준화 및 조회 API 추가
 
 #### 변경 이유 및 내용
