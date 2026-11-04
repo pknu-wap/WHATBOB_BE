@@ -36,6 +36,8 @@ class RoomMemberResponse(BaseModel):
     profile_image: str | None
     role: str
     joined_at: datetime
+    order_sheet_completed: bool
+    order_sheet_completed_at: datetime | None
 
 
 class RoomDetailResponse(BaseModel):
@@ -50,3 +52,15 @@ class RoomDetailResponse(BaseModel):
     my_role: str | None
     created_at: datetime
     members: list[RoomMemberResponse]
+    completed_member_count: int
+    all_members_completed: bool
+
+
+class RoomOrderSheetCompleteResponse(BaseModel):
+    room_id: str
+    user_id: int
+    order_sheet_completed: bool
+    order_sheet_completed_at: datetime
+    completed_member_count: int
+    total_member_count: int
+    all_members_completed: bool

@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
@@ -75,3 +76,18 @@ class RoomMember(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+
+
+class RoomMemberOrderSheet(Base):
+    __tablename__ = "room_member_order_sheets"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    room_member_id = Column(
+        Integer,
+        ForeignKey("room_members.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+    is_completed = Column(Boolean, nullable=False, default=False)
+    completed_at = Column(DateTime, nullable=True)
