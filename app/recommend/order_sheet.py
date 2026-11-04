@@ -3,6 +3,7 @@ import random
 from typing import Any
 from sqlalchemy.orm import Session
 
+from app.menus.display import format_menu_name
 from app.menus.models import (
     Menu,
     OrderSheetQuestion,
@@ -155,9 +156,9 @@ def select_order_sheet_questions(
 ) -> OrderSheetQuestionsResponse:
     """
     [5단계 탐색+활용(Exploration-Exploitation) 질문 추출]
-    - 상위 exploitation_count(기본 7개): 서로 다른 cluster_key를 우선하여 importance_weight 최상위 질문 선택
-    - 나머지 exploration_count(기본 2개): 후보 풀에서 노출 횟수가 적은 질문을 가중 샘플링하여
-      새로운 질문도 사용자 피드백을 받아 재학습 시 상위권으로 올라올 수 있도록 보장
+    - 상위 exploitation_count(기본 7개): 서로 다른 cluster_key의 importance_weight 최상위 질문 선택
+    - 나머지 exploration_count(기본 2개): 아직 선택하지 않은 주제에서 노출 횟수를 고려해 가중 샘플링
+    - 상위·탐색 질문 전체에서 주제 중복을 금지하며, 주제가 부족하면 가능한 개수만 반환
     """
     active_questions = (
         db.query(OrderSheetQuestion)
@@ -168,12 +169,11 @@ def select_order_sheet_questions(
     if not active_questions:
         raise QuestionPoolEmptyException()
 
-    actual_total = min(total_count, len(active_questions))
+    actual_total = min(total_count, len({q.cluster_key for q in active_questions}))
     actual_exploit = min(exploitation_count, actual_total)
     actual_explore = actual_total - actual_exploit
 
     selected_exploit: list[OrderSheetQuestion] = []
-    used_ids: set[int] = set()
     used_clusters: set[str] = set()
 
     for q in active_questions:
@@ -181,17 +181,9 @@ def select_order_sheet_questions(
             break
         if q.cluster_key not in used_clusters:
             selected_exploit.append(q)
-            used_ids.add(q.id)
             used_clusters.add(q.cluster_key)
 
-    for q in active_questions:
-        if len(selected_exploit) >= actual_exploit:
-            break
-        if q.id not in used_ids:
-            selected_exploit.append(q)
-            used_ids.add(q.id)
-
-    remaining_pool = [q for q in active_questions if q.id not in used_ids]
+    remaining_pool = [q for q in active_questions if q.cluster_key not in used_clusters]
     selected_explore: list[OrderSheetQuestion] = []
 
     if actual_explore > 0 and remaining_pool:
@@ -204,7 +196,8 @@ def select_order_sheet_questions(
             ]
             chosen = rng.choices(pool_copy, weights=weights, k=1)[0]
             selected_explore.append(chosen)
-            pool_copy.remove(chosen)
+            used_clusters.add(chosen.cluster_key)
+            pool_copy = [q for q in pool_copy if q.cluster_key not in used_clusters]
 
     dtos = [
         _to_question_dto(q, is_exploration=False) for q in selected_exploit
@@ -302,7 +295,7 @@ def create_order_sheet_recommendation(
         RecommendedMenuDTO(
             menu_id=menu.id,
             food_code=menu.food_code,
-            name=menu.name,
+            name=format_menu_name(menu.name),
             base_name=menu.base_name,
             category_large=menu.category_large,
             category_medium=menu.category_medium,

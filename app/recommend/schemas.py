@@ -91,7 +91,7 @@ class RecommendedMenuDTO(BaseModel):
 
     menu_id: int
     food_code: str
-    name: str
+    name: str = Field(description="원본 음식명의 구분자와 중복 분류를 정리한 화면 표시명")
     base_name: str
     category_large: str
     category_medium: Optional[str] = None

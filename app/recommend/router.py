@@ -56,7 +56,7 @@ def get_order_sheet_questions(
         default=DEFAULT_TOTAL_QUESTIONS,
         ge=1,
         le=20,
-        description="반환할 주문서 전체 질문 개수 (기본 9개)",
+        description="반환할 주문서 전체 질문 개수 (기본 최대 9개, 활성 주제 수 이내)",
     ),
     exploitation_count: int = Query(
         default=DEFAULT_EXPLOITATION_COUNT,
@@ -68,7 +68,8 @@ def get_order_sheet_questions(
 ):
     """
     DB에 적재된 질문 풀에서 엔트로피·피드백 기반 중요도가 높은 질문(기본 7개)과
-    새로운 피드백 수집을 위한 탐색 질문(기본 2개)을 합쳐 총 9개의 주문서 질문지를 반환합니다.
+    새로운 피드백 수집을 위한 탐색 질문(기본 2개)을 합쳐 최대 9개의 주문서 질문지를 반환합니다.
+    상위·탐색 질문 전체에서 주제 중복을 제외하며, 활성 주제가 부족하면 반환 개수가 줄어듭니다.
     """
     result = select_order_sheet_questions(
         db=db,
