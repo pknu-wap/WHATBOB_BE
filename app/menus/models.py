@@ -87,6 +87,17 @@ class OrderSheetQuestion(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc),)
 
 
+class QuestionSelectionState(Base):
+    """로그인 사용자 또는 익명 브라우저별 탐색 질문 순환 상태."""
+    __tablename__ = "question_selection_states"
+
+    scope_key = Column(String(80), primary_key=True)
+    last_clusters = Column(JSON, nullable=False, default=list)
+    topic_counts = Column(JSON, nullable=False, default=dict)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+
+
 class Recommendation(Base):
     """주문서 추천 요청 및 결과 이력 테이블"""
     __tablename__ = "recommendations"

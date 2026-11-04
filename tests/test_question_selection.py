@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.core.database import get_db
-from app.menus.models import OrderSheetQuestion
+from app.menus.models import OrderSheetQuestion, QuestionSelectionState
 from app.recommend.common import QuestionPoolEmptyException
 from app.recommend.order_sheet import select_order_sheet_questions
 from app.recommend.question_pool import build_candidate_question_pool
@@ -19,6 +19,7 @@ def db():
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
     )
     OrderSheetQuestion.__table__.create(engine)
+    QuestionSelectionState.__table__.create(engine)
     with Session(engine) as session:
         yield session
     engine.dispose()
@@ -107,3 +108,49 @@ def test_http_counts_ignore_inactive_topics(db):
 def test_empty_active_question_pool_keeps_domain_error(db):
     with pytest.raises(QuestionPoolEmptyException):
         select_order_sheet_questions(db)
+
+
+def test_session_rotates_topics_without_submitting_and_persists_in_database(db):
+    add_question_topics(db, 12)
+    recent = set()
+    seen = set()
+    initial_count = sum(q.shown_count for q in db.query(OrderSheetQuestion))
+    for index in range(8):
+        result = select_order_sheet_questions(db, random_seed=1, scope_key="guest:one")
+        topics = {q.cluster_key for q in result.questions if q.is_exploration}
+        assert len(topics) == 2 and topics.isdisjoint(recent)
+        seen.update(topics)
+        recent = topics
+        # 요청마다 답변 제출 없이 노출 횟수를 누적한다.
+        assert sum(q.shown_count for q in db.query(OrderSheetQuestion)) == initial_count + 9 * (index + 1)
+        db.expire_all()
+    assert len(seen) == 5
+    state = db.get(QuestionSelectionState, "guest:one")
+    assert sum(state.topic_counts.values()) == 16
+    select_order_sheet_questions(db, scope_key="guest:two")
+    assert sum(db.get(QuestionSelectionState, "guest:two").topic_counts.values()) == 2
+    assert sum(state.topic_counts.values()) == 16
+
+
+def test_topic_shortage_reuses_only_when_necessary(db):
+    add_question_topics(db, 9)
+    for _ in range(3):
+        result = select_order_sheet_questions(db, scope_key="guest:small")
+        assert result.total_count == len({q.cluster_key for q in result.questions}) == 9
+
+
+def test_http_cookie_session_and_no_store_prevent_repeated_questions(db):
+    add_question_topics(db, 12)
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_db] = lambda: db
+    with TestClient(app) as client:
+        first = client.get("/api/recommendations/order-sheet/questions")
+        cookie = client.cookies.get("question_session")
+        second = client.get("/api/recommendations/order-sheet/questions")
+        assert cookie == client.cookies.get("question_session")
+    assert first.headers["cache-control"] == second.headers["cache-control"] == "no-store"
+    first_topics = {q["cluster_key"] for q in first.json()["data"]["questions"] if q["is_exploration"]}
+    second_topics = {q["cluster_key"] for q in second.json()["data"]["questions"] if q["is_exploration"]}
+    assert first_topics.isdisjoint(second_topics)
+    assert db.query(QuestionSelectionState).count() == 1

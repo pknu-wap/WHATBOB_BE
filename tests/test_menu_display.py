@@ -91,13 +91,14 @@ def test_recommendation_formats_names_without_changing_storage_or_exclusions():
                 assert response.status_code == 201
                 data = response.json()["data"]
                 results = data["recommended_menus"]
+                results = sorted(results, key=lambda item: item["menu_id"])
                 assert [item["name"] for item in results] == ["김치김밥", "땡초 치킨"]
                 assert [item["base_name"] for item in results] == ["김밥", "닭튀김"]
                 assert [item["menu_id"] for item in results] == [m.id for m in menus]
                 assert [item["food_code"] for item in results] == [m.food_code for m in menus]
                 assert [item["match_score"] for item in results] == [0.8, 0.8]
                 record = db.get(Recommendation, data["recommendation_id"])
-                assert record.recommended_menu_ids == [m.id for m in menus]
+                assert set(record.recommended_menu_ids) == {m.id for m in menus}
                 feedback = client.post(f'/api/recommendations/{record.id}/feedback', json={
                     "selected_menu_id": menus[1].id, "is_satisfied": True,
                 })

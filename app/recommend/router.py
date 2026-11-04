@@ -1,6 +1,9 @@
-from fastapi import APIRouter, Depends, Query, status
+from uuid import UUID, uuid4
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy.orm import Session
 
+from app.auth.dependencies import get_optional_current_user
 from app.core.database import get_db
 from app.recommend.common import OFFICIAL_ALLERGEN_ITEMS
 from app.recommend.order_sheet import (
@@ -23,8 +26,17 @@ from app.recommend.schemas import (
     RecommendationFeedbackRequest,
     RecommendationFeedbackResponse,
 )
+from app.users.models import User
 
 router = APIRouter(prefix="/api/recommendations", tags=["Recommendations"])
+
+
+def _bind_user(request, current_user):
+    if isinstance(current_user, User):
+        if request.user_id is not None and request.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="다른 사용자의 정보로 요청할 수 없습니다.")
+        return request.model_copy(update={"user_id": current_user.id})
+    return request
 
 
 @router.get(
@@ -65,16 +77,36 @@ def get_order_sheet_questions(
         description="가중치 최상위 고정 질문 개수 (나머지는 후보 탐색 질문)",
     ),
     db: Session = Depends(get_db),
+    http_request: Request = None,
+    response: Response = None,
+    current_user: User | None = Depends(get_optional_current_user),
 ):
     """
     DB에 적재된 질문 풀에서 엔트로피·피드백 기반 중요도가 높은 질문(기본 7개)과
     새로운 피드백 수집을 위한 탐색 질문(기본 2개)을 합쳐 최대 9개의 주문서 질문지를 반환합니다.
     상위·탐색 질문 전체에서 주제 중복을 제외하며, 활성 주제가 부족하면 반환 개수가 줄어듭니다.
     """
+    scope_key = None
+    if http_request is not None and response is not None:
+        response.headers["Cache-Control"] = "no-store"
+        if isinstance(current_user, User):
+            scope_key = f"user:{current_user.id}"
+        else:
+            cookie = http_request.cookies.get("question_session", "")
+            try:
+                session_id = UUID(cookie).hex
+            except (ValueError, AttributeError):
+                session_id = uuid4().hex
+            secure = http_request.url.scheme == "https"
+            response.set_cookie("question_session", session_id, httponly=True,
+                                secure=secure, samesite="none" if secure else "lax",
+                                max_age=60 * 60 * 24 * 30)
+            scope_key = f"guest:{session_id}"
     result = select_order_sheet_questions(
         db=db,
         total_count=total_count,
         exploitation_count=min(exploitation_count, total_count),
+        scope_key=scope_key,
     )
     return ApiResponse(success=True, data=result, message=None)
 
@@ -87,12 +119,13 @@ def get_order_sheet_questions(
 def submit_order_sheet(
     request: OrderSheetRecommendRequest,
     db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_current_user),
 ):
     """
     사용자의 주문서 답변을 받아 알레르기/비선호 음식을 먼저 제외(Hard Filter)한 뒤,
     엔트로피 기반 초기 점수와 사용자 피드백 통계로 조정한 질문 중요도를 합산해 메뉴를 추천합니다.
     """
-    result = create_order_sheet_recommendation(db=db, request=request)
+    result = create_order_sheet_recommendation(db=db, request=_bind_user(request, current_user))
     return ApiResponse(success=True, data=result, message=None)
 
 
@@ -105,6 +138,7 @@ def submit_recommendation_feedback(
     recommendation_id: int,
     request: RecommendationFeedbackRequest,
     db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_current_user),
 ):
     """
     추천 결과에 대한 사용자(또는 사전 튜닝 단계)의 만족/불만족 피드백을 저장하고,
@@ -113,7 +147,7 @@ def submit_recommendation_feedback(
     result = record_recommendation_feedback(
         db=db,
         recommendation_id=recommendation_id,
-        request=request,
+        request=_bind_user(request, current_user),
     )
     return ApiResponse(success=True, data=result, message=None)
 

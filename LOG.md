@@ -3,6 +3,57 @@
 WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 최신 작업을 위에 추가하며, 기록 방법은 같은 디렉터리의 `AGENTS.md`를 따른다.
 
+## 2026-11-05
+
+### 누락된 식사 후보 복구, 추천 종류 분산 및 질문 순환·상관없음 복원
+
+#### 변경 이유 및 내용
+
+- `--meals-only`에서 빵류를 통째로 제외해 햄버거·피자·샌드위치·핫도그·토스트·또띠아 등이 빠지던 문제를 수정했다. 식사용 빵류 기본 이름을 구분해 `main_meal`로 포함하고 온도 속성을 따뜻한 요리로 반영한다. 음료·케이크·과자까지 일괄 복구하지 않는다. 기존 메뉴 재시드 시 ID를 유지하고 원본 기반 속성도 갱신한다.
+- 같은 점수에서 작은 메뉴 ID가 계속 이기던 정렬을 제거했다. 기본 메뉴 종류를 먼저 구분해 한 종류는 결과에 하나만 포함하고, 비슷한 점수의 종류·상품을 추첨한다. 버거/햄버거 등 동의어는 같은 종류로 취급한다. 피자 상품 수가 많아도 개수만으로 결과를 독점하지 않는다.
+- 식별된 사용자의 최근 3회 추천 종류와 개별 메뉴의 최신 싫어요를 다음 추천의 순위 패널티로 반영한다. 이후 같은 메뉴에 좋아요를 주면 싫어요 패널티를 해제한다. 기존 알레르기·섭취 불가·명시적 비선호 제외 조건은 먼저 적용하고 해제하지 않는다.
+- 탐색 질문을 사용자 JWT 또는 익명 브라우저 쿠키별로 순환한다. 직전 탐색 주제를 가능한 범위에서 피하고 덜 노출된 주제부터 추첨한다. 서버가 재시작돼도 DB 상태를 사용한다. 질문 GET 시 노출 횟수를 증가시키고 추천 제출 시 이중 증가는 제거했다. 상위 7개+탐색 2개와 요청 안의 주제 중복 방지는 유지한다.
+- 두 취향 선택지에 `any`/`상관없어요`를 세 번째로 추가했다. 질문 문구 최대 24자, 기존 취향 선택지 ID와 질문 코드·ID는 유지한다. `any`는 메뉴 점수를 올리지 않고 질문 중요도 학습에서도 제외한다. 이전 두 선택지 DB도 재시드 전 조회·제출이 가능하도록 보완했다.
+- 추천 관련 API에 선택적 서비스 JWT 연동을 추가했다. 토큰이 있으면 사용자 ID를 자동 연결하고 본문에 다른 사용자 ID가 오면 403이다. 토큰 없는 기존 요청은 유지한다. 피드백 메뉴는 해당 추천 결과에 포함되어야 하며 추천과 피드백 사용자가 다르면 거부한다.
+- 공유 메뉴 JSON/CSV와 질문 JSON을 재생성했다. 식사 후보 파일은 기존 2,320개에서 7,503개로 늘었고 질문은 204개다. DB나 외부 API에 접근하지 않는 재생성 스크립트와 프론트·배포 연동 문서를 추가했다.
+
+#### 주요 변경 파일
+
+- `app/recommend/order_sheet.py`, `app/recommend/variety.py`
+- `app/recommend/question_pool.py`, `app/recommend/schemas.py`, `app/recommend/router.py`
+- `app/menus/models.py`, `app/auth/dependencies.py`
+- `scripts/seed_menus.py`, `scripts/export_recommend_data.py`
+- `data/menus_meals_only.json`, `data/menus_meals_only.csv`, `data/order_sheet_questions_pool.json`
+- `tests/test_recommend_variety.py`, `tests/test_question_selection.py`, `tests/test_binary_questions.py`
+- `tests/test_menu_display.py`, `tests/test_order_sheet_contract.py`, `tests/test_recommend.py`
+- `docs/RECOMMENDATION_VARIETY.md`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/recommendations/order-sheet/questions`: `options`에 세 번째 `any` 추가, 응답은 `Cache-Control: no-store`. JWT 사용자 또는 `question_session` 쿠키별 탐색 순환 상태를 갱신하고 실제 조회 노출을 집계한다. 다른 출처에서 익명 쿠키를 유지하려면 프론트 `credentials: include`가 필요하다.
+- `POST /api/recommendations/order-sheet`: 기본 종류별 최대 하나, 비슷한 점수의 후보 분산 및 사용자별 최근 노출·싫어요 반영. 종류 부족 시 `top_k`보다 적게 반환할 수 있다. `match_score`는 패널티 전의 답변 일치 점수이며 결과 순서와 단순 내림차순이 일치하지 않을 수 있다. JWT 사용 시 본문 `user_id` 생략 가능.
+- `POST /api/recommendations/{recommendation_id}/feedback`: 추천에 없는 메뉴·사용자 불일치 400. `any`는 질문 가중치 학습에서 제외하지만 메뉴에 대한 사용자 평가는 저장한다. JWT 사용 시 본문 `user_id` 생략 가능.
+- 기존 JSON 키, 응답 래퍼, 정상 HTTP 상태 및 중요도 alias는 유지한다. 유효하지 않은 Bearer 토큰은 401, JWT와 본문 사용자 불일치는 403이다.
+
+#### DB 변경
+
+- 추가 테이블 `question_selection_states`: `scope_key` 문자열 기본키, `last_clusters` JSON, `topic_counts` JSON, `updated_at` 날짜시간. 기존 프로젝트의 `Base.metadata.create_all`로 생성하며 별도 마이그레이션 파일은 없다.
+- 기존 테이블 구조 변경 없음. 시드 실행 시 기존 메뉴 ID·추천·피드백 참조를 유지하면서 메뉴를 추가·갱신하고 질문 `options_json`에 `any`를 추가한다. 운영 DB에는 아직 반영하지 않았다.
+
+#### 검증
+
+- `.\.venv\Scripts\python.exe -m scripts.export_recommend_data`: 7,503개 메뉴와 204개 질문 공유 파일 생성 완료. 실제 CSV를 읽고 DB·외부 API는 사용하지 않았다.
+- `.\.venv\Scripts\python.exe -m pytest -q tests/test_recommend_variety.py tests/test_question_selection.py`: 24개 통과. 메뉴 누락 복구, 기존 메뉴 재시드 시 속성 갱신·ID 유지, 종류별 분산·노출, 큰 점수 차이 유지, 최근 추천·사용자별 싫어요·좋아요 해제, `any` 중립·학습 제외·이전 두 선택지 DB 호환, 제외 조건과 후보 없음, 잘못된 피드백, JWT 사용자 연결 및 401/403, 탐색 주제 순환·DB 지속·브라우저 쿠키·주제 부족을 검증했다.
+- `.\.venv\Scripts\python.exe -m pytest -q -rs`: 113개 통과, 1개 건너뜀. MySQL 방 통합 테스트는 `MYSQL_TEST_DATABASE_URL` 미설정으로 건너뛰었다. 기존 경고 2건 유지(Starlette AnyIO, 요청 alias 메타데이터).
+- 별도 인메모리 SQLite에 실제 전체 CSV 시드: 메뉴 7,503개와 질문 204개 적재 성공. `any` 제출 시 서로 다른 기본 메뉴 5개 반환을 확인했다.
+- `git diff --check`: 통과.
+
+#### 남은 작업 및 주의 사항
+
+- 운영 환경에서 `python -m scripts.seed_menus --meals-only --no-llm`으로 메뉴·질문 갱신과 신규 상태 테이블 생성 후 백엔드 재시작이 필요하다. `--questions-only`만으로는 빠진 메뉴가 복구되지 않는다. 기존 DB에 이미 있는 음료·디저트를 임의로 삭제하지 않는다.
+- 프론트는 세 선택지 전체를 렌더링하고 질문 API를 새로 호출해야 한다. 로그인 사용자는 질문·추천·피드백에 서비스 JWT를 보내고 익명 질문은 쿠키를 유지한다. 자세한 절차는 `docs/RECOMMENDATION_VARIETY.md`에 기록했다.
+- 운영 MySQL·실제 프론트 화면·동시 요청 검증 및 원격 배포는 미실행. 현재 검증 DB는 인메모리 SQLite다. 장기간 운영 시 오래된 익명 질문 상태 정리 정책을 검토한다. 커밋·푸시는 수행하지 않았다.
+
 ## 2026-11-04
 
 ### 로그인 후 사용자 프로필 조회 API 추가 및 카카오 프로필 필드 처리 보완

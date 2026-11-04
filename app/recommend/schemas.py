@@ -32,7 +32,7 @@ class OrderSheetQuestionDTO(BaseModel):
     cluster_key: str
     question_text: str = Field(min_length=1, max_length=MAX_QUESTION_TEXT_LENGTH)
     options: list[QuestionOptionDTO] = Field(
-        min_length=QUESTION_OPTION_COUNT, max_length=QUESTION_OPTION_COUNT,
+        min_length=2, max_length=QUESTION_OPTION_COUNT,
     )
     # alias는 기존 프론트엔드의 JSON 키와 호환하기 위한 이름이다.
     initial_score: float = Field(
