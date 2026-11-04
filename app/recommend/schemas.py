@@ -1,5 +1,6 @@
 from typing import Any, Generic, Optional, TypeVar
 from pydantic import BaseModel, ConfigDict, Field
+from app.recommend.question_pool import MAX_QUESTION_TEXT_LENGTH, QUESTION_OPTION_COUNT
 
 T = TypeVar("T")
 
@@ -29,8 +30,10 @@ class OrderSheetQuestionDTO(BaseModel):
     id: int
     question_code: str
     cluster_key: str
-    question_text: str
-    options: list[QuestionOptionDTO]
+    question_text: str = Field(min_length=1, max_length=MAX_QUESTION_TEXT_LENGTH)
+    options: list[QuestionOptionDTO] = Field(
+        min_length=QUESTION_OPTION_COUNT, max_length=QUESTION_OPTION_COUNT,
+    )
     # alias는 기존 프론트엔드의 JSON 키와 호환하기 위한 이름이다.
     initial_score: float = Field(
         alias="info_gain_score",
