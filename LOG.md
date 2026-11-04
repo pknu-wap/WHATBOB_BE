@@ -5,6 +5,128 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-04
 
+### 로그인 후 사용자 프로필 조회 API 추가 및 카카오 프로필 필드 처리 보완
+
+#### 변경 이유 및 내용
+
+- 로그인은 성공하지만 닉네임·프로필 사진이 화면에 표시되지 않는 현상을 조사했다. 로그인 응답에는 이미 `user` 객체가 있었으나 `app/users/router.py`는 비어 있어 로그인 후 저장된 본인 정보를 다시 조회하는 API가 없었다. 실제 프론트 코드는 작업 폴더에 없어 화면의 데이터 저장·조회 경로까지는 확인하지 못했다.
+- 기존 방 API와 같은 `get_current_user` 인증 의존성을 사용해 `GET /api/users/me`를 추가하고 실제 앱에 라우터를 등록했다. 서비스 JWT의 사용자만 조회하고 Entity 대신 DTO를 반환한다.
+- 사용자 응답 DTO를 `app/users/schemas.py`로 옮겨 로그인과 내 정보 조회가 공유하도록 했다. 기존 `app.auth.schemas.UserResponse` import와 로그인 응답 키는 유지한다.
+- 카카오 사용자 정보 요청에 `secure_resource=true`를 추가해 HTTPS 이미지 URL을 요청한다. 최신 `kakao_account.profile`을 우선 읽고, 프로필 이미지가 없으면 썸네일 및 기존 `properties` 형식을 보완적으로 읽는다. 누락되거나 null인 프로필 객체도 처리한다.
+- 카카오 사용자 ID가 없거나 유효하지 않으면 잘못된 사용자 저장 대신 민감한 정보를 포함하지 않는 502 오류를 반환한다.
+- 기존 사용자는 재로그인 시 전달받은 프로필로 갱신하며, 카카오 응답에서 빠진 항목으로 기존 정보를 지우지 않는 동작을 유지한다. 사용자 동의로 제공되지 않은 정보를 임의로 생성하지 않는다.
+- 로그인 응답과 내 정보 응답의 필드 위치, 인증 헤더 및 동의항목 확인 방법을 `docs/USER_PROFILE_API.md`에 기록했다. 카카오 공식 REST API 문서의 HTTPS 이미지 요청 및 프로필 동의항목을 확인했다.
+
+#### 주요 변경 파일
+
+- `app/auth/kakao.py`
+- `app/auth/schemas.py`
+- `app/users/router.py`
+- `app/users/schemas.py`
+- `app/main.py`
+- `tests/test_user_profile.py`
+- `docs/USER_PROFILE_API.md`
+- `LOG.md`
+
+#### API 변경
+
+- 추가: `GET /api/users/me` — `Authorization: Bearer <서비스 JWT>`로 인증한 본인 정보를 200으로 반환한다. 본문은 `id`, `kakao_id`, `nickname`, `email`, `profile_image`를 담는 사용자 객체 자체이며 별도 `data`/`user` 래퍼는 없다. 토큰 누락·무효·만료 또는 사용자 부재 시 기존 인증 규칙에 따라 401을 반환한다.
+- `POST /api/auth/kakao/login`, `GET /api/auth/kakao/callback`: 기존 응답 형식을 유지한다. 카카오 프로필 대체 필드와 HTTPS 이미지 요청을 적용하며, 카카오 사용자 ID가 유효하지 않은 비정상 응답은 502로 처리한다.
+- 로그인 응답의 화면용 필드는 `user.nickname`, `user.profile_image`; 내 정보 조회 응답은 `nickname`, `profile_image`다.
+
+#### DB 변경
+
+- 없음. 테이블·컬럼·제약 조건 및 마이그레이션 파일 변경 없음. 기존 `users` 테이블을 사용하며 실제 DB에 직접 접근하거나 데이터를 갱신하지 않았다.
+
+#### 검증
+
+- `.\.venv\Scripts\python.exe -m pytest -q tests/test_user_profile.py tests/test_auth.py tests/test_cors.py tests/test_rooms.py`: 46개 통과.
+- 신규 테스트 22개: 최신/기존 프로필 필드, 썸네일, 필드 우선순위, 누락·null, HTTPS 요청 파라미터, 비정상 카카오 ID, 실제 앱에 등록된 내 정보 경로, 로그인 후 JWT 조회 및 CORS, 재로그인 동기화·기존 값 보존, 타 사용자 ID로 본인 조회 대체 불가, 토큰 누락·무효·만료·사용자 부재·잘못된 subject·잘못된 인증 방식의 401 처리를 검증했다.
+- `.\.venv\Scripts\python.exe -m pytest -q -rs`: 100개 통과, 1개 건너뜀. MySQL 방 통합 테스트는 `MYSQL_TEST_DATABASE_URL` 미설정으로 건너뛰었다. 기존 경고 2건 유지(Starlette AnyIO, 요청 alias 메타데이터). 사용자 DTO를 ConfigDict로 옮겨 기존 Pydantic 설정 경고는 해소했다.
+- `git diff --check`: 통과.
+
+#### 남은 작업 및 주의 사항
+
+- 카카오 실제 로그인, MySQL 및 프론트 화면 수동 검증, 원격 배포는 미실행. 외부 카카오 API는 모의 응답, DB는 인메모리 SQLite로 검증했다.
+- 프론트 저장소 위치를 요청했으며 아직 확인하지 못했다. 화면이 로그인 응답의 `user`를 저장하고 새로고침 시 서비스 JWT로 `/api/users/me`를 조회하는지 실제 호출부 확인이 필요하다. 화면 표시 문제의 완전한 해결 여부는 아직 확인하지 못했다.
+- 카카오에서 정보 자체가 제공되지 않으면 앱의 프로필 닉네임·프로필 사진 동의항목 설정과 실제 사용자 동의를 확인해야 한다. 과거에 비어 있던 프로필은 재로그인으로 갱신할 수 있다.
+- DB 재적재는 필요 없으며 백엔드 재시작·배포 후 신규 API가 제공된다.
+
+### 상위 질문과 탐색 질문 전체에서 같은 주제 중복 제거
+
+#### 변경 이유 및 내용
+
+- 기존 질문 선택은 이미 사용한 질문 ID만 탐색 후보에서 제외해서 같은 `cluster_key`의 다른 문구가 상위 질문과 탐색 질문에 함께 포함될 수 있었다. 탐색 질문 두 개 사이에서도 같은 주제가 반복될 수 있었다.
+- 질문 ID 대신 주제를 기준으로 선택한다. 상위 질문은 서로 다른 주제의 중요도 최상위 질문으로 구성하고, 탐색 후보에서는 상위 질문의 모든 주제를 제외한다. 탐색 질문을 하나 뽑을 때마다 그 주제의 나머지 문구도 후보에서 제외한다.
+- 반환 상한을 활성 질문 수가 아닌 활성 주제 수로 계산하고, 주제가 부족하면 반복 질문으로 채우던 처리를 제거했다. 기본 7+2 구성을 유지하되 활성 주제가 8개이면 7+1개, 7개 이하이면 가능한 상위 질문만 반환한다.
+- 탐색 질문의 중요도·사용 횟수 기반 가중 추출과 `random_seed` 재현성은 유지한다. 기존 메뉴 표시명 변경도 유지했다.
+
+#### 주요 변경 파일
+
+- `app/recommend/order_sheet.py`
+- `app/recommend/router.py`
+- `tests/test_question_selection.py`
+- `LOG.md`
+
+#### API 변경
+
+- `GET /api/recommendations/order-sheet/questions`: 상위·탐색 질문 전체의 `cluster_key`가 중복되지 않는다. 활성 주제가 요청 개수보다 적으면 실제 반환 개수가 줄어들고 `total_count`, `exploitation_count`, `exploration_count`는 실제 개수를 나타낸다.
+- 경로, 요청·응답 JSON 키, HTTP 상태 코드 및 기본 요청 개수 변경 없음. API 설명에 활성 주제 수에 따른 반환 상한을 명시했다.
+
+#### DB 변경
+
+- 없음. 테이블·컬럼·제약 조건, 마이그레이션 파일 및 저장 데이터 변경 없이 조회 시 선택 로직만 수정했다.
+
+#### 검증
+
+- `.\.venv\Scripts\python.exe -m pytest -q tests/test_question_selection.py tests/test_binary_questions.py tests/test_recommend.py tests/test_order_sheet_contract.py`: 29개 통과, 기존 경고 2건 유지.
+- 신규 테스트 11개: 20개 시드에서 상위 7개·탐색 2개의 ID 및 주제 중복 없음, 동일 시드 재현성, 활성 주제 수 1·7·8·9·12개와 요청 개수 경계, 탐색만으로 여러 주제를 채우는 경우, 비활성 질문·주제 제외 및 HTTP 개수 일치, 빈 질문 풀의 기존 도메인 오류를 검증했다.
+- 기존 추천·피드백·알레르기 제외·두 선택지·24자 제한 및 API/DB alias 호환성 테스트도 통과했다.
+- `git diff --check`: 통과.
+
+#### 남은 작업 및 주의 사항
+
+- 프론트는 고정 9개 대신 응답의 실제 질문 개수로 표시해야 한다. 현재 12개 주제가 활성화된 데이터에서는 기본 7+2개를 반환한다.
+- 실제 MySQL 및 프론트 화면을 통한 수동 확인, 원격 배포는 미실행. DB 재적재 없이 백엔드 재시작·배포로 적용한다.
+
+### 추천 메뉴의 원본 구분자 이름을 화면 표시명으로 정리
+
+#### 변경 이유 및 내용
+
+- 식품 데이터의 `김밥_김치`, `닭튀김_땡초 치킨` 같은 원본 이름이 추천 화면에 그대로 표시되는 문제를 해결했다.
+- 응답을 만들 때 `format_menu_name()`으로 표시명을 생성한다. `김밥_김치`는 `김치김밥`, `볶음밥_계란`은 `계란볶음밥`으로 조합한다.
+- `국밥_순대국밥`처럼 뒷부분이 완성된 음식명이거나 `닭튀김_땡초 치킨`, `스파게티_베이컨 크림 파스타`처럼 상품명이 별도로 있는 경우 중복 분류를 제거한다.
+- `간편조리세트` 구분은 정리하고 실제 상품명을 표시한다. 조합을 확신하기 어려운 재료·양념·조리 상태는 `두부찌개 (소고기·된장)`, `갈비탕 (소금제외)`처럼 괄호로 보존한다.
+- DB의 원본 이름과 기본 이름은 유지하고, 추천 후보 필터링·점수·순위·추천 기록은 기존 데이터를 사용한다.
+
+#### 주요 변경 파일
+
+- `app/menus/display.py`
+- `app/recommend/order_sheet.py`
+- `app/recommend/schemas.py`
+- `tests/test_menu_display.py`
+- `LOG.md`
+
+#### API 변경
+
+- `POST /api/recommendations/order-sheet`: `data.recommended_menus[].name`을 원본 이름 대신 정리한 화면 표시명으로 반환한다. 응답 키·타입, `menu_id`, `food_code`, `base_name` 및 점수는 유지한다.
+- `POST /api/recommendations/{recommendation_id}/feedback`: 계약 변경 없음. 정리된 메뉴 이름 대신 기존과 같이 메뉴 ID로 피드백을 전송한다.
+
+#### DB 변경
+
+- 없음. 테이블·컬럼·제약 조건과 마이그레이션 파일, 저장된 메뉴 데이터 및 공유 원본 데이터 변경 없음. 재적재 없이 백엔드 재시작·배포로 적용한다.
+
+#### 검증
+
+- `.\.venv\Scripts\python.exe -m pytest -q tests/test_menu_display.py`: 25개 통과. 원본 이름 형식·공백·빈 구분자·중복 음식명·상품명·복수 재료·조리 상태를 검증하고 실제 공유 메뉴 2,320개의 비어 있지 않은 표시명과 구분자 제거를 확인했다.
+- HTTP 추천 응답에서 자연스러운 이름, 동일한 메뉴 ID·음식 코드·기본 이름·점수 및 추천 기록을 확인했다. 표시명에서 빠진 원본 분류명으로도 제외 필터가 동작하고 기존 메뉴 ID로 피드백이 저장되는지 검증했다. DB 원본 이름이 유지되는지도 확인했다.
+- `.\.venv\Scripts\python.exe -m pytest -q -rs`: 67개 통과, 1개 건너뜀. MySQL 방 통합 테스트는 `MYSQL_TEST_DATABASE_URL` 미설정으로 건너뛰었다. 기존 경고 3건 유지.
+- `git diff --check`: 통과.
+
+#### 남은 작업 및 주의 사항
+
+- 실제 MySQL과 프론트 화면을 통한 수동 확인 및 원격 배포는 미실행. 이름의 완성 여부를 확신하기 어려운 형식은 의미 손실을 피하기 위해 기본 음식명과 세부 내용을 괄호로 함께 표시한다.
+
 ### 주문서 질문을 두 선택지와 최대 24자 문구로 변경
 
 #### 변경 이유 및 내용
