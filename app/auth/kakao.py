@@ -41,7 +41,11 @@ async def get_kakao_user_info(access_token: str) -> dict:
     }
 
     async with httpx.AsyncClient() as client:
-        response = await client.get(KAKAO_USER_INFO_URL, headers=headers)
+        response = await client.get(
+            KAKAO_USER_INFO_URL,
+            headers=headers,
+            params={"secure_resource": "true"},
+        )
         if response.status_code != 200:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -50,13 +54,25 @@ async def get_kakao_user_info(access_token: str) -> dict:
         user_info = response.json()
         
         kakao_id = user_info.get("id")
-        kakao_account = user_info.get("kakao_account", {})
-        profile = kakao_account.get("profile", {})
+        if not isinstance(kakao_id, int) or isinstance(kakao_id, bool) or kakao_id <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="카카오 사용자 식별 정보를 확인할 수 없습니다.",
+            )
+
+        kakao_account = user_info.get("kakao_account") or {}
+        profile = kakao_account.get("profile") or {}
+        properties = user_info.get("properties") or {}
 
         return {
             "kakao_id": kakao_id,
-            "nickname": profile.get("nickname"),
-            "profile_image": profile.get("profile_image_url"),
+            "nickname": profile.get("nickname") or properties.get("nickname"),
+            "profile_image": (
+                profile.get("profile_image_url")
+                or profile.get("thumbnail_image_url")
+                or properties.get("profile_image")
+                or properties.get("thumbnail_image")
+            ),
             "email": kakao_account.get("email"),
         }
 
