@@ -5,6 +5,49 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-05
 
+### 로그인 사용자 본인의 비선호 음식 조회·목록 저장·개별 삭제 API 추가
+
+#### 변경 이유 및 내용
+
+- 추천에서 `user_food_exclusions`의 비선호를 읽어 제외하는 기능은 있었으나 프론트에서 해당 목록을 조회·저장하는 API가 없었다. 기존 사용자 라우터에 서비스 JWT 인증이 필수인 본인 비선호 관리 API를 추가했다.
+- 목록 전체 저장은 본인의 `DISLIKE`만 교체한다. 유지한 항목의 ID는 보존하고 빈 배열로 비선호만 모두 해제할 수 있다. 같은 키워드의 알레르기·섭취 불가 설정과 다른 사용자의 설정은 유지한다.
+- 키워드는 공백 제거 후 1~100자 문자열, 요청당 최대 100개로 제한하고 공백·대소문자 중복을 제거한다. `user_id` 등 정의되지 않은 본문 필드는 거부하고 사용자 ID는 JWT에서만 읽는다.
+- 개별 삭제는 본인 소유의 비선호 항목 ID만 허용한다. 없는 항목·다른 사용자 항목·다른 제외 유형은 모두 404다. 목록 조회는 캐시하지 않도록 `Cache-Control: no-store`를 반환한다.
+- Controller → Service → Repository로 분리했다. 저장·삭제는 트랜잭션과 사용자 행 잠금으로 처리하고 실패 시 롤백한다. MySQL의 반복 읽기 격리에서도 갱신 중 최신 목록을 읽도록 변경용 조회에는 잠금을 사용한다.
+- 저장 후 동일한 JWT로 추천 요청 시 기존 후보 제외 로직에 자동 연결되는 것을 확인했다. 추천 결과의 싫어요 피드백과 명시적 비선호 등록은 별도로 유지한다.
+
+#### 주요 변경 파일
+
+- `app/users/router.py`
+- `app/users/schemas.py`
+- `app/users/service.py`
+- `app/users/repository.py`
+- `tests/test_user_dislikes.py`
+- `docs/USER_DISLIKES_API.md`
+- `LOG.md`
+
+#### API 변경
+
+- 추가 `GET /api/users/me/dislikes`: 본인의 비선호를 `success/data/message` 형식으로 200 반환. `data`는 `items: [{id, keyword}]`, `total_count`이며 미설정 시 빈 목록이다.
+- 추가 `PUT /api/users/me/dislikes`: `{"keywords": ["피자", "홍어"]}`로 본인 비선호 전체를 저장하고 최종 목록을 같은 형식으로 200 반환한다. `{"keywords": []}`는 비선호 전체 해제다. 누락·잘못된 형식·길이 초과·정의되지 않은 필드는 422다.
+- 추가 `DELETE /api/users/me/dislikes/{dislike_id}`: 본인 비선호 항목 하나 삭제 후 본문 없는 204. 본인 비선호가 아니거나 없는 ID는 404, 유효하지 않은 ID는 422다.
+- 세 API 모두 유효한 서비스 JWT 필수이며 토큰 누락·무효·만료·사용자 부재는 401이다. 기존 `/api/users/me` 프로필 응답 및 추천 API 계약 변경은 없다.
+
+#### DB 변경
+
+- 없음. 기존 `user_food_exclusions` 테이블의 `DISLIKE` 항목만 읽고 갱신한다. 테이블·컬럼·제약 조건, 마이그레이션 파일 및 외부 라이브러리 추가 없음. 운영 DB 접근·변경은 수행하지 않았다.
+
+#### 검증
+
+- `.\.venv\Scripts\python.exe -m pytest -q tests/test_user_dislikes.py`: 43개 통과. 실제 앱과 인메모리 SQLite, 서비스 JWT로 인증·본인 데이터 격리·입력 경계·공백/대소문자 중복·반복 저장 ID 유지·목록 교체·개별 삭제·다른 제외 유형 보존·저장 실패 롤백·다음 추천의 제외/해제·후보 없음 처리를 검증했다.
+- `.\.venv\Scripts\python.exe -m pytest -q -rs`: 최종 변경 기준 165개 통과, 1개 건너뜀. MySQL 방 통합 테스트는 `MYSQL_TEST_DATABASE_URL` 미설정으로 건너뛰었다. 기존 경고 2건 유지(Starlette AnyIO, 요청 alias 메타데이터).
+- `git diff --check`: 통과.
+
+#### 남은 작업 및 주의 사항
+
+- 백엔드 배포·재시작 후 사용 가능하며 비선호 API 추가를 위한 DB 재적재는 필요 없다. 프론트는 최종 선택 목록 전체를 PUT하고 조회 응답의 항목 ID로 개별 삭제해야 한다. 자세한 예시는 `docs/USER_DISLIKES_API.md`에 기록했다.
+- 운영 MySQL·실제 프론트 화면·동시 요청 검증 및 원격 배포는 미실행이다. 커밋·푸시는 수행하지 않았다.
+
 ### 누락된 식사 후보 복구, 추천 종류 분산 및 질문 순환·상관없음 복원
 
 #### 변경 이유 및 내용
