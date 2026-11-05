@@ -5,6 +5,8 @@ from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_optional_current_user
 from app.core.database import get_db
+from app.menus.display import format_menu_name
+from app.menus.models import Menu
 from app.recommend.common import OFFICIAL_ALLERGEN_ITEMS
 from app.recommend.order_sheet import (
     DEFAULT_EXPLOITATION_COUNT,
@@ -14,6 +16,7 @@ from app.recommend.order_sheet import (
     select_order_sheet_questions,
     tune_question_weights,
 )
+from app.recommend.random_pick import pick_random_menu
 from app.recommend.schemas import (
     AllergenItemDTO,
     AllergenListResponse,
@@ -23,6 +26,9 @@ from app.recommend.schemas import (
     OrderSheetRecommendResponse,
     OrderSheetWeightTuneRequest,
     OrderSheetWeightTuneResponse,
+    RandomMenuDTO,
+    RandomRecommendRequest,
+    RandomRecommendResponse,
     RecommendationFeedbackRequest,
     RecommendationFeedbackResponse,
 )
@@ -39,6 +45,29 @@ def _bind_user(request, current_user):
     return request
 
 
+def _to_random_menu_dto(menu: Menu) -> RandomMenuDTO:
+    return RandomMenuDTO(
+        menu_id=menu.id,
+        food_code=menu.food_code,
+        name=format_menu_name(menu.name),
+        base_name=menu.base_name,
+        category_large=menu.category_large,
+        category_medium=menu.category_medium,
+        meal_type=menu.meal_type,
+        has_soup=menu.has_soup,
+        cooking_style=menu.cooking_style,
+        main_ingredient=menu.main_ingredient,
+        flavor_intensity=menu.flavor_intensity,
+        temperature=menu.temperature,
+        heaviness=menu.heaviness,
+        kcal=menu.kcal,
+        protein_g=menu.protein_g,
+        fat_g=menu.fat_g,
+        carb_g=menu.carb_g,
+        sodium_mg=menu.sodium_mg,
+    )
+
+
 @router.get(
     "/allergens",
     response_model=ApiResponse[AllergenListResponse],
@@ -53,6 +82,34 @@ def get_official_allergens():
         data=AllergenListResponse(
             total_count=len(OFFICIAL_ALLERGEN_ITEMS),
             allergens=[AllergenItemDTO(**item) for item in OFFICIAL_ALLERGEN_ITEMS],
+        ),
+        message=None,
+    )
+
+
+@router.post(
+    "/random",
+    response_model=ApiResponse[RandomRecommendResponse],
+    status_code=status.HTTP_200_OK,
+)
+def get_random_recommendation(
+    request: RandomRecommendRequest,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_current_user),
+):
+    """제외 조건을 적용한 뒤 음식 종류와 실제 메뉴를 차례로 무작위 선택한다."""
+    result = pick_random_menu(
+        db=db,
+        user_id=current_user.id if isinstance(current_user, User) else None,
+        extra_exclusions=request.exclusions,
+    )
+    return ApiResponse(
+        success=True,
+        data=RandomRecommendResponse(
+            selected_menu=_to_random_menu_dto(result.menu),
+            excluded_count=result.excluded_count,
+            candidate_count=result.candidate_count,
+            menu_type_count=result.menu_type_count,
         ),
         message=None,
     )
