@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
     Boolean,
@@ -45,6 +45,15 @@ class Room(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+    expires_at = Column(
+        DateTime,
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc) + timedelta(hours=1),
+        index=True,
+    )
+    closed_at = Column(DateTime, nullable=True)
+    close_reason = Column(String(30), nullable=True)
+    host_disconnected_at = Column(DateTime, nullable=True)
 
 
 class RoomMember(Base):

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -11,6 +12,7 @@ from app.core.database import Base, engine
 from app.recommend.common import RecommendationDomainException
 from app.recommend.router import router as recommend_router
 from app.rooms.router import router as rooms_router
+from app.rooms.cleanup import room_cleanup_loop
 from app.rooms.websocket import router as rooms_websocket_router
 from app.users.router import router as users_router
 
@@ -25,7 +27,15 @@ async def lifespan(app: FastAPI):
         logger.info("데이터베이스 테이블 생성/확인 완료")
     except Exception as e:
         logger.warning(f"데이터베이스 연결 실패 (DB가 아직 실행되지 않았을 수 있습니다): {e}")
-    yield
+    cleanup_task = asyncio.create_task(room_cleanup_loop())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(

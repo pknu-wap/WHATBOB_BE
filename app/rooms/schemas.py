@@ -16,6 +16,7 @@ class RoomCreateResponse(BaseModel):
     status: str
     max_members: int
     created_at: datetime
+    expires_at: datetime
 
 
 class RoomJoinResponse(BaseModel):
@@ -51,6 +52,7 @@ class RoomDetailResponse(BaseModel):
     is_member: bool
     my_role: str | None
     created_at: datetime
+    expires_at: datetime
     members: list[RoomMemberResponse]
     completed_member_count: int
     all_members_completed: bool
@@ -64,3 +66,10 @@ class RoomOrderSheetCompleteResponse(BaseModel):
     completed_member_count: int
     total_member_count: int
     all_members_completed: bool
+
+
+class RoomDeleteResponse(BaseModel):
+    room_id: str
+    deleted: bool
+    close_reason: str
+    closed_at: datetime
