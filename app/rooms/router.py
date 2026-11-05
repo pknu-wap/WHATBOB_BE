@@ -12,6 +12,7 @@ from app.rooms.schemas import (
     RoomDeleteResponse,
     RoomDetailResponse,
     RoomJoinResponse,
+    RoomMemberLeaveResponse,
     RoomOrderSheetCompleteResponse,
 )
 from app.rooms.service import (
@@ -21,6 +22,7 @@ from app.rooms.service import (
     delete_closed_room,
     get_room,
     join_room,
+    leave_room_member,
 )
 from app.rooms.websocket import room_connection_manager
 from app.users.models import User
@@ -128,6 +130,41 @@ async def delete_room_endpoint(
         close_reason=closed_room.reason,
         closed_at=closed_room.closed_at,
     )
+
+
+@router.delete(
+    "/{room_id}/members/{user_id}",
+    response_model=RoomMemberLeaveResponse,
+)
+async def leave_room_member_endpoint(
+    room_id: str,
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    response = await run_in_threadpool(
+        leave_room_member,
+        db,
+        room_id,
+        user_id,
+        current_user,
+    )
+    room_connection_manager.cancel_member_disconnect(room_id, user_id)
+    await room_connection_manager.broadcast(
+        room_id,
+        {
+            "type": "room.updated",
+            "room_id": room_id,
+            "reason": "MEMBER_LEFT",
+            "user_id": user_id,
+            "member_count": response.member_count,
+            "completed_member_count": response.completed_member_count,
+            "all_members_completed": response.all_members_completed,
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    await room_connection_manager.close_user_connections(room_id, user_id)
+    return response
 
 
 @router.post(

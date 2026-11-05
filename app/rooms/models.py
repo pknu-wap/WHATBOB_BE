@@ -85,6 +85,8 @@ class RoomMember(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+    is_online = Column(Boolean, nullable=False, default=False)
+    disconnected_at = Column(DateTime, nullable=True)
 
 
 class RoomMemberOrderSheet(Base):

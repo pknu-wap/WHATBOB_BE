@@ -11,6 +11,7 @@ from app.rooms.schemas import (
     RoomCreateResponse,
     RoomDetailResponse,
     RoomJoinResponse,
+    RoomMemberLeaveResponse,
     RoomMemberResponse,
     RoomOrderSheetCompleteResponse,
 )
@@ -27,6 +28,12 @@ class ClosedRoom:
     room_id: str
     reason: str
     closed_at: datetime
+
+
+@dataclass(frozen=True)
+class OfflineRoomMember:
+    room_id: str
+    user_id: int
 
 
 def utcnow() -> datetime:
@@ -229,6 +236,8 @@ def get_room(
                 profile_image=member_user.profile_image,
                 role=room_member.role,
                 joined_at=room_member.joined_at,
+                is_online=room_member.is_online,
+                disconnected_at=room_member.disconnected_at,
                 order_sheet_completed=bool(
                     order_sheet and order_sheet.is_completed
                 ),
@@ -405,6 +414,100 @@ def close_room_by_host(
         raise
 
 
+def leave_room_member(
+    db: Session,
+    room_public_id: str,
+    requested_user_id: int,
+    user: User,
+) -> RoomMemberLeaveResponse:
+    """Remove a non-host member and recalculate room completion state."""
+    if user.id != requested_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Users can only leave a room as themselves",
+        )
+
+    try:
+        room = (
+            db.query(Room)
+            .filter(Room.public_id == room_public_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if room is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Room not found",
+            )
+        _ensure_room_not_expired(db, room)
+        if room.status == "CLOSED":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Room is closed",
+            )
+
+        member = (
+            db.query(RoomMember)
+            .filter(
+                RoomMember.room_id == room.id,
+                RoomMember.user_id == requested_user_id,
+            )
+            .with_for_update()
+            .one_or_none()
+        )
+        if member is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Room member not found",
+            )
+        if member.role == "HOST" or room.host_user_id == requested_user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="The room host must delete the room instead",
+            )
+
+        (
+            db.query(RoomMemberOrderSheet)
+            .filter(RoomMemberOrderSheet.room_member_id == member.id)
+            .delete(synchronize_session=False)
+        )
+        db.delete(member)
+        db.flush()
+
+        remaining_members = (
+            db.query(RoomMember.id)
+            .filter(RoomMember.room_id == room.id)
+            .all()
+        )
+        remaining_member_ids = [row[0] for row in remaining_members]
+        completed_member_count = 0
+        if remaining_member_ids:
+            completed_member_count = (
+                db.query(RoomMemberOrderSheet)
+                .filter(
+                    RoomMemberOrderSheet.room_member_id.in_(remaining_member_ids),
+                    RoomMemberOrderSheet.is_completed.is_(True),
+                )
+                .count()
+            )
+        member_count = len(remaining_member_ids)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return RoomMemberLeaveResponse(
+        room_id=room.public_id,
+        user_id=requested_user_id,
+        deleted=True,
+        member_count=member_count,
+        completed_member_count=completed_member_count,
+        all_members_completed=(
+            member_count > 0 and completed_member_count == member_count
+        ),
+    )
+
+
 def delete_closed_room(db: Session, room_public_id: str) -> bool:
     """Physically delete a closed room and all dependent rows."""
     try:
@@ -490,6 +593,136 @@ def clear_host_disconnected(
         room.host_disconnected_at = None
         db.commit()
         return changed
+    except Exception:
+        db.rollback()
+        raise
+
+
+def mark_room_member_disconnected(
+    db: Session,
+    room_public_id: str,
+    user_id: int,
+    disconnected_at: datetime | None = None,
+) -> bool:
+    """Start a room member's reconnect grace period."""
+    try:
+        member = (
+            db.query(RoomMember)
+            .join(Room, Room.id == RoomMember.room_id)
+            .filter(
+                Room.public_id == room_public_id,
+                Room.status != "CLOSED",
+                RoomMember.user_id == user_id,
+            )
+            .with_for_update()
+            .one_or_none()
+        )
+        if member is None:
+            return False
+        member.disconnected_at = disconnected_at or utcnow()
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+
+
+def mark_room_member_online(
+    db: Session,
+    room_public_id: str,
+    user_id: int,
+) -> bool:
+    """Mark a member online and report whether an offline event was visible."""
+    try:
+        member = (
+            db.query(RoomMember)
+            .join(Room, Room.id == RoomMember.room_id)
+            .filter(
+                Room.public_id == room_public_id,
+                Room.status != "CLOSED",
+                RoomMember.user_id == user_id,
+            )
+            .with_for_update()
+            .one_or_none()
+        )
+        if member is None:
+            return False
+        became_online = not member.is_online
+        member.is_online = True
+        member.disconnected_at = None
+        db.commit()
+        return became_online
+    except Exception:
+        db.rollback()
+        raise
+
+
+def mark_room_member_offline_after_grace(
+    db: Session,
+    room_public_id: str,
+    user_id: int,
+    now: datetime | None = None,
+) -> bool:
+    """Mark a member offline if the persisted grace period has elapsed."""
+    try:
+        member = (
+            db.query(RoomMember)
+            .join(Room, Room.id == RoomMember.room_id)
+            .filter(
+                Room.public_id == room_public_id,
+                Room.status != "CLOSED",
+                RoomMember.user_id == user_id,
+            )
+            .with_for_update()
+            .one_or_none()
+        )
+        if member is None or member.disconnected_at is None or not member.is_online:
+            return False
+        current_time = now or utcnow()
+        deadline = _as_utc(member.disconnected_at) + timedelta(
+            seconds=settings.ROOM_MEMBER_DISCONNECT_GRACE_SECONDS
+        )
+        if deadline > current_time:
+            return False
+        member.is_online = False
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+
+
+def mark_due_room_members_offline(
+    db: Session,
+    now: datetime | None = None,
+) -> list[OfflineRoomMember]:
+    """Recover overdue member presence transitions after task or server loss."""
+    current_time = now or utcnow()
+    cutoff = current_time - timedelta(
+        seconds=settings.ROOM_MEMBER_DISCONNECT_GRACE_SECONDS
+    )
+    try:
+        rows = (
+            db.query(RoomMember, Room.public_id)
+            .join(Room, Room.id == RoomMember.room_id)
+            .filter(
+                Room.status != "CLOSED",
+                RoomMember.role == "MEMBER",
+                RoomMember.is_online.is_(True),
+                RoomMember.disconnected_at.is_not(None),
+                RoomMember.disconnected_at <= cutoff,
+            )
+            .with_for_update()
+            .all()
+        )
+        offline_members = []
+        for member, room_public_id in rows:
+            member.is_online = False
+            offline_members.append(
+                OfflineRoomMember(room_id=room_public_id, user_id=member.user_id)
+            )
+        db.commit()
+        return offline_members
     except Exception:
         db.rollback()
         raise

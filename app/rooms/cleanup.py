@@ -3,7 +3,11 @@ import logging
 
 from app.core.config import settings
 from app.core.database import SessionLocal
-from app.rooms.service import close_due_rooms, delete_closed_room
+from app.rooms.service import (
+    close_due_rooms,
+    delete_closed_room,
+    mark_due_room_members_offline,
+)
 from app.rooms.websocket import room_connection_manager
 
 
@@ -12,6 +16,19 @@ logger = logging.getLogger("uvicorn")
 
 async def cleanup_due_rooms_once() -> int:
     """Close, notify, and physically delete every due room."""
+    with SessionLocal() as db:
+        offline_members = await asyncio.to_thread(mark_due_room_members_offline, db)
+    for member in offline_members:
+        await room_connection_manager.broadcast(
+            member.room_id,
+            {
+                "type": "room.updated",
+                "room_id": member.room_id,
+                "reason": "MEMBER_OFFLINE",
+                "user_id": member.user_id,
+            },
+        )
+
     with SessionLocal() as db:
         closed_rooms = await asyncio.to_thread(close_due_rooms, db)
 
