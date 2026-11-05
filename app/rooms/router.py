@@ -9,13 +9,16 @@ from app.core.database import get_db
 from app.rooms.schemas import (
     RoomCreateRequest,
     RoomCreateResponse,
+    RoomDeleteResponse,
     RoomDetailResponse,
     RoomJoinResponse,
     RoomOrderSheetCompleteResponse,
 )
 from app.rooms.service import (
+    close_room_by_host,
     complete_room_order_sheet,
     create_room,
+    delete_closed_room,
     get_room,
     join_room,
 )
@@ -23,6 +26,25 @@ from app.rooms.websocket import room_connection_manager
 from app.users.models import User
 
 router = APIRouter(prefix="/api/rooms", tags=["Rooms"])
+
+
+async def _notify_and_delete_closed_room(
+    db: Session,
+    room_id: str,
+    close_reason: str,
+    closed_at: datetime,
+) -> None:
+    await room_connection_manager.broadcast(
+        room_id,
+        {
+            "type": "room.closed",
+            "room_id": room_id,
+            "reason": close_reason,
+            "closed_at": closed_at.isoformat(),
+        },
+    )
+    await room_connection_manager.close_room_connections(room_id)
+    await run_in_threadpool(delete_closed_room, db, room_id)
 
 
 @router.post(
@@ -77,6 +99,35 @@ def get_room_endpoint(
     db: Session = Depends(get_db),
 ):
     return get_room(db=db, room_public_id=room_id, user=current_user)
+
+
+@router.delete(
+    "/{room_id}",
+    response_model=RoomDeleteResponse,
+)
+async def delete_room_endpoint(
+    room_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    closed_room = await run_in_threadpool(
+        close_room_by_host,
+        db,
+        room_id,
+        current_user,
+    )
+    await _notify_and_delete_closed_room(
+        db=db,
+        room_id=closed_room.room_id,
+        close_reason=closed_room.reason,
+        closed_at=closed_room.closed_at,
+    )
+    return RoomDeleteResponse(
+        room_id=closed_room.room_id,
+        deleted=True,
+        close_reason=closed_room.reason,
+        closed_at=closed_room.closed_at,
+    )
 
 
 @router.post(
