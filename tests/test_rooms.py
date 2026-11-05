@@ -207,6 +207,8 @@ def test_get_room_returns_details_and_members_to_joined_user():
         "MEMBER",
     ]
     assert body["members"][1]["nickname"] == "participant"
+    assert body["members"][1]["is_online"] is False
+    assert body["members"][1]["disconnected_at"] is None
     assert body["completed_member_count"] == 0
     assert body["all_members_completed"] is False
     assert all(
@@ -441,6 +443,38 @@ def test_room_websocket_broadcasts_join_and_completion_events():
         assert complete_event["reason"] == "ORDER_SHEET_COMPLETED"
         assert complete_event["user_id"] == participant.id
         assert complete_event["occurred_at"]
+
+
+def test_room_websocket_broadcasts_member_left_with_recalculated_progress():
+    client, db, host = build_client()
+    room_id = client.post(
+        "/api/rooms",
+        json={"max_members": 2},
+    ).json()["room_id"]
+    assert client.post(f"/api/rooms/{room_id}/order-sheet/complete").status_code == 200
+    host_token = create_access_token({"sub": str(host.id)})
+
+    with client.websocket_connect(f"/ws/rooms/{room_id}") as websocket:
+        websocket.send_json({"type": "auth", "access_token": host_token})
+        assert websocket.receive_json()["type"] == "connection.ready"
+
+        participant = add_user(db, 987654321, "participant")
+        client.app.dependency_overrides[get_current_user] = lambda: participant
+        assert client.post(f"/api/rooms/{room_id}/join").status_code == 201
+        assert websocket.receive_json()["reason"] == "MEMBER_JOINED"
+
+        response = client.delete(
+            f"/api/rooms/{room_id}/members/{participant.id}"
+        )
+        assert response.status_code == 200
+
+        event = websocket.receive_json()
+        assert event["type"] == "room.updated"
+        assert event["reason"] == "MEMBER_LEFT"
+        assert event["user_id"] == participant.id
+        assert event["member_count"] == 1
+        assert event["completed_member_count"] == 1
+        assert event["all_members_completed"] is True
 
 
 def test_room_websocket_rejects_non_member():

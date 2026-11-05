@@ -37,6 +37,8 @@ class RoomMemberResponse(BaseModel):
     profile_image: str | None
     role: str
     joined_at: datetime
+    is_online: bool
+    disconnected_at: datetime | None
     order_sheet_completed: bool
     order_sheet_completed_at: datetime | None
 
@@ -73,3 +75,12 @@ class RoomDeleteResponse(BaseModel):
     deleted: bool
     close_reason: str
     closed_at: datetime
+
+
+class RoomMemberLeaveResponse(BaseModel):
+    room_id: str
+    user_id: int
+    deleted: bool
+    member_count: int
+    completed_member_count: int
+    all_members_completed: bool

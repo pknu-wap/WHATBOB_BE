@@ -14,6 +14,9 @@ from app.rooms.service import (
     close_room_after_host_disconnect,
     delete_closed_room,
     mark_host_disconnected,
+    mark_room_member_disconnected,
+    mark_room_member_offline_after_grace,
+    mark_room_member_online,
 )
 from app.users.models import User
 
@@ -33,6 +36,7 @@ class RoomConnectionManager:
             lambda: defaultdict(set)
         )
         self._host_disconnect_tasks: dict[str, asyncio.Task] = {}
+        self._member_disconnect_tasks: dict[tuple[str, int], asyncio.Task] = {}
 
     def connect(
         self,
@@ -97,6 +101,35 @@ class RoomConnectionManager:
 
         task.add_done_callback(remove_finished)
 
+    def cancel_member_disconnect(self, room_public_id: str, user_id: int) -> None:
+        key = (room_public_id, user_id)
+        task = self._member_disconnect_tasks.pop(key, None)
+        if task is not None:
+            task.cancel()
+
+    def schedule_member_disconnect(
+        self,
+        room_public_id: str,
+        user_id: int,
+        database_bind,
+    ) -> None:
+        key = (room_public_id, user_id)
+        self.cancel_member_disconnect(room_public_id, user_id)
+        task = asyncio.create_task(
+            mark_member_offline_after_grace(
+                room_public_id,
+                user_id,
+                database_bind,
+            )
+        )
+        self._member_disconnect_tasks[key] = task
+
+        def remove_finished(finished_task: asyncio.Task) -> None:
+            if self._member_disconnect_tasks.get(key) is finished_task:
+                self._member_disconnect_tasks.pop(key, None)
+
+        task.add_done_callback(remove_finished)
+
     async def broadcast(self, room_public_id: str, message: dict) -> None:
         connections = list(self._connections.get(room_public_id, set()))
         if not connections:
@@ -116,9 +149,36 @@ class RoomConnectionManager:
     async def close_room_connections(self, room_public_id: str) -> None:
         connections = list(self._connections.pop(room_public_id, set()))
         self._user_connections.pop(room_public_id, None)
+        member_task_keys = [
+            key for key in self._member_disconnect_tasks if key[0] == room_public_id
+        ]
+        for _, user_id in member_task_keys:
+            self.cancel_member_disconnect(room_public_id, user_id)
         for websocket in connections:
             try:
                 await websocket.close(code=4000, reason="Room closed")
+            except Exception:
+                pass
+
+    async def close_user_connections(
+        self,
+        room_public_id: str,
+        user_id: int,
+    ) -> None:
+        users = self._user_connections.get(room_public_id)
+        if users is None:
+            return
+        connections = list(users.pop(user_id, set()))
+        room_connections = self._connections.get(room_public_id)
+        if room_connections is not None:
+            room_connections.difference_update(connections)
+            if not room_connections:
+                self._connections.pop(room_public_id, None)
+        if not users:
+            self._user_connections.pop(room_public_id, None)
+        for websocket in connections:
+            try:
+                await websocket.close(code=4001, reason="Room member left")
             except Exception:
                 pass
 
@@ -155,6 +215,34 @@ async def close_room_after_host_grace(
         await room_connection_manager.close_room_connections(room_public_id)
         with Session(bind=database_bind) as db:
             await asyncio.to_thread(delete_closed_room, db, room_public_id)
+    except asyncio.CancelledError:
+        return
+
+
+async def mark_member_offline_after_grace(
+    room_public_id: str,
+    user_id: int,
+    database_bind,
+) -> None:
+    try:
+        await asyncio.sleep(settings.ROOM_MEMBER_DISCONNECT_GRACE_SECONDS)
+        with Session(bind=database_bind) as db:
+            changed = await asyncio.to_thread(
+                mark_room_member_offline_after_grace,
+                db,
+                room_public_id,
+                user_id,
+            )
+        if changed:
+            await room_connection_manager.broadcast(
+                room_public_id,
+                {
+                    "type": "room.updated",
+                    "room_id": room_public_id,
+                    "reason": "MEMBER_OFFLINE",
+                    "user_id": user_id,
+                },
+            )
     except asyncio.CancelledError:
         return
 
@@ -240,6 +328,16 @@ async def room_websocket(
 
         authenticated_user_id = user.id
         authenticated_is_host = room.host_user_id == user.id
+        room_connection_manager.cancel_member_disconnect(
+            room_id,
+            authenticated_user_id,
+        )
+        with Session(bind=database_bind) as reconnect_db:
+            became_online = mark_room_member_online(
+                reconnect_db,
+                room_id,
+                authenticated_user_id,
+            )
         if authenticated_is_host:
             room_connection_manager.cancel_host_disconnect(room_id)
             with Session(bind=database_bind) as reconnect_db:
@@ -263,6 +361,16 @@ async def room_websocket(
                 "user_id": authenticated_user_id,
             }
         )
+        if became_online and not authenticated_is_host:
+            await room_connection_manager.broadcast(
+                room_id,
+                {
+                    "type": "room.updated",
+                    "room_id": room_id,
+                    "reason": "MEMBER_ONLINE",
+                    "user_id": authenticated_user_id,
+                },
+            )
 
         while True:
             message = await websocket.receive_json()
@@ -279,6 +387,11 @@ async def room_websocket(
             )
             if authenticated_is_host and is_last_connection:
                 with Session(bind=database_bind) as disconnect_db:
+                    mark_room_member_disconnected(
+                        disconnect_db,
+                        room_id,
+                        authenticated_user_id,
+                    )
                     marked = mark_host_disconnected(
                         disconnect_db,
                         room_id,
@@ -286,6 +399,19 @@ async def room_websocket(
                     )
                 if marked:
                     room_connection_manager.schedule_host_disconnect(
+                        room_id,
+                        authenticated_user_id,
+                        database_bind,
+                    )
+            elif is_last_connection:
+                with Session(bind=database_bind) as disconnect_db:
+                    marked = mark_room_member_disconnected(
+                        disconnect_db,
+                        room_id,
+                        authenticated_user_id,
+                    )
+                if marked:
+                    room_connection_manager.schedule_member_disconnect(
                         room_id,
                         authenticated_user_id,
                         database_bind,

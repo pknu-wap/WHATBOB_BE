@@ -37,6 +37,46 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 #### 남은 작업 및 주의 사항
 
 - 실제 전체 메뉴 데이터와 운영 MySQL에서 응답 시간 및 종류 분포를 확인해야 한다. 현재 구현은 식사 메뉴를 조회한 후 Python에서 제외 조건과 그룹을 계산한다.
+### 일반 참여자 직접 퇴장 및 WebSocket 접속 상태 유예 처리
+
+#### 변경 이유 및 내용
+
+- 일반 참여자가 방 전체를 종료하지 않고 본인만 나갈 수 있도록 퇴장 API를 추가했다. 인증 사용자와 경로의 사용자 ID가 같고 방장이 아닐 때만 퇴장할 수 있으며, 해당 참여자의 주문서를 먼저 삭제한 뒤 참여자 행을 삭제한다.
+- 참여자 퇴장 후 남은 인원과 완료 인원을 다시 계산한다. 미완료 참여자가 나가 남은 참여자가 모두 완료 상태가 되면 `all_members_completed=true`로 응답하고 `MEMBER_LEFT` 이벤트에도 같은 집계 결과를 포함한다.
+- `room_members`에 온라인 여부와 마지막 연결 종료 시각을 저장한다. 일반 참여자의 마지막 WebSocket 연결이 끊기면 연결 종료 시각을 기록하고 60초 동안 온라인 상태를 유지한다. 유예 시간 안에 재접속하면 예약을 취소하고, 미복귀 시 오프라인으로 전환해 `MEMBER_OFFLINE` 이벤트를 전송한다. 오프라인 참여자의 멤버십과 주문서는 유지한다.
+- 오프라인 상태에서 다시 연결하면 온라인으로 복구하고 `MEMBER_ONLINE` 이벤트를 전송한다. 여러 WebSocket 중 마지막 연결이 종료됐을 때만 유예를 시작하며, 서버 재시작으로 인메모리 예약이 사라진 경우에도 주기적 정리 작업이 DB의 종료 시각을 기준으로 오프라인 전환을 복구한다.
+- 방장의 기존 60초 방 종료 유예와 1시간 방 만료·삭제 동작은 유지했다. 방장 WebSocket 상태도 방 상세 응답의 접속 상태 필드와 일치하도록 갱신한다.
+
+#### 주요 변경 파일
+
+- `app/rooms/models.py`, `app/rooms/schemas.py`
+- `app/rooms/service.py`, `app/rooms/router.py`, `app/rooms/websocket.py`
+- `app/rooms/cleanup.py`, `app/core/config.py`, `.env.example`
+- `scripts/migrate_room_lifecycle.py`
+- `tests/test_rooms.py`, `tests/test_room_deletion.py`, `LOG.md`
+
+#### API 변경
+
+- 추가: `DELETE /api/rooms/{room_id}/members/{user_id}` — 일반 참여자가 본인 ID로만 호출할 수 있다. 방장은 호출할 수 없고 기존 `DELETE /api/rooms/{room_id}`를 사용해야 한다. 성공 응답은 `room_id`, `user_id`, `deleted`, `member_count`, `completed_member_count`, `all_members_completed`를 포함한다.
+- 수정: `GET /api/rooms/{room_id}`의 참여자 항목에 `is_online`, `disconnected_at`을 추가한다. 단순 오프라인 참여자도 완료 인원 계산에 계속 포함한다.
+- 추가 WebSocket 이벤트: `room.updated`의 `MEMBER_OFFLINE`, `MEMBER_ONLINE`, `MEMBER_LEFT` 사유를 추가했다. `MEMBER_LEFT`에는 퇴장 후 인원 및 완료 집계를 포함한다.
+
+#### DB 변경
+
+- `room_members.is_online`: 필수 온라인 여부 컬럼을 `FALSE` 기본값으로 추가.
+- `room_members.disconnected_at`: nullable 마지막 WebSocket 연결 종료 시각 추가.
+- `scripts/migrate_room_lifecycle.py`가 기존 MySQL의 `room_members` 테이블에도 두 컬럼을 추가하도록 확장됐다. 신규 DB는 `Base.metadata.create_all`로 새 구조를 생성한다.
+
+#### 검증
+
+- `python -m pytest -q tests/test_rooms.py tests/test_room_deletion.py -x`: 39개 통과. 직접 퇴장 권한, 방장 퇴장 거부, 주문서 삭제, 완료 상태 재계산, 퇴장 이벤트, 접속 유예, 재접속 취소, 오프라인 데이터 유지 및 정리 작업 복구를 검증했다.
+- `python -m pytest -q -rs`: 181개 통과, 1개 건너뜀. `MYSQL_TEST_DATABASE_URL`이 없어 MySQL 동시 참가 통합 테스트는 실행하지 않았다. 기존 경고 2건이 발생했다.
+- `python -m compileall -q app scripts tests`, `git diff --check`: 통과.
+
+#### 남은 작업 및 주의 사항
+
+- 배포 전 기존 MySQL에서 `python -m scripts.migrate_room_lifecycle`를 실행하고 새 컬럼 추가를 확인해야 한다. 이번 자동화 테스트는 인메모리 SQLite를 사용했다.
+- WebSocket 연결과 유예 예약은 애플리케이션 프로세스별 메모리에 있으므로 여러 서버 인스턴스의 즉시 이벤트 전달을 일관되게 하려면 Redis 같은 공유 상태 및 메시지 계층이 필요하다. DB 기반 정리 작업은 누락된 오프라인 전환을 보정한다.
 
 ### 방장 퇴장·연결 종료 및 1시간 만료 기반 방 자동 삭제
 
