@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     FRONTEND_BASE_URL: str = "https://whatbobfe-app.vercel.app"
     ROOM_TTL_SECONDS: int = 60 * 60
     ROOM_HOST_DISCONNECT_GRACE_SECONDS: int = 60
+    ROOM_MEMBER_DISCONNECT_GRACE_SECONDS: int = 60
     ROOM_CLEANUP_INTERVAL_SECONDS: int = 60
     KAKAO_REST_API_KEY: str
     KAKAO_REDIRECT_URI: str = "https://whatbobfe-app.vercel.app/auth/callback"

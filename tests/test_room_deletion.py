@@ -9,7 +9,11 @@ from app.rooms.service import (
     clear_host_disconnected,
     close_due_rooms,
     delete_closed_room,
+    mark_due_room_members_offline,
     mark_host_disconnected,
+    mark_room_member_disconnected,
+    mark_room_member_offline_after_grace,
+    mark_room_member_online,
 )
 from tests.test_rooms import add_user, build_client
 
@@ -127,3 +131,146 @@ def test_all_members_completed_does_not_delete_or_close_room():
     assert response.json()["all_members_completed"] is True
     room = db.query(Room).filter(Room.public_id == room_id).one()
     assert room.status == "WAITING"
+
+
+def test_member_can_leave_and_completion_is_recalculated():
+    client, db, host = build_client()
+    room_id = client.post("/api/rooms", json={"max_members": 3}).json()["room_id"]
+    assert client.post(f"/api/rooms/{room_id}/order-sheet/complete").status_code == 200
+
+    participant = add_user(db, 222222222, "participant")
+    client.app.dependency_overrides[get_current_user] = lambda: participant
+    assert client.post(f"/api/rooms/{room_id}/join").status_code == 201
+    assert db.query(RoomMember).count() == 2
+
+    response = client.delete(f"/api/rooms/{room_id}/members/{participant.id}")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "room_id": room_id,
+        "user_id": participant.id,
+        "deleted": True,
+        "member_count": 1,
+        "completed_member_count": 1,
+        "all_members_completed": True,
+    }
+    assert db.query(RoomMember).count() == 1
+    assert db.query(RoomMemberOrderSheet).count() == 1
+
+    client.app.dependency_overrides[get_current_user] = lambda: host
+    detail = client.get(f"/api/rooms/{room_id}").json()
+    assert detail["member_count"] == 1
+    assert detail["all_members_completed"] is True
+
+
+def test_member_leave_deletes_own_order_sheet():
+    client, db, _ = build_client()
+    room_id = client.post("/api/rooms", json={"max_members": 2}).json()["room_id"]
+    participant = add_user(db, 222222222, "participant")
+    client.app.dependency_overrides[get_current_user] = lambda: participant
+    assert client.post(f"/api/rooms/{room_id}/join").status_code == 201
+    assert client.post(f"/api/rooms/{room_id}/order-sheet/complete").status_code == 200
+
+    response = client.delete(f"/api/rooms/{room_id}/members/{participant.id}")
+
+    assert response.status_code == 200
+    assert db.query(RoomMemberOrderSheet).count() == 0
+
+
+def test_member_cannot_leave_as_another_user():
+    client, db, host = build_client()
+    room_id = client.post("/api/rooms", json={"max_members": 2}).json()["room_id"]
+    participant = add_user(db, 222222222, "participant")
+    client.app.dependency_overrides[get_current_user] = lambda: participant
+    assert client.post(f"/api/rooms/{room_id}/join").status_code == 201
+
+    response = client.delete(f"/api/rooms/{room_id}/members/{host.id}")
+
+    assert response.status_code == 403
+    assert db.query(RoomMember).count() == 2
+
+
+def test_host_cannot_leave_through_member_endpoint():
+    client, db, host = build_client()
+    room_id = client.post("/api/rooms", json={"max_members": 2}).json()["room_id"]
+
+    response = client.delete(f"/api/rooms/{room_id}/members/{host.id}")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "The room host must delete the room instead"
+    assert db.query(Room).count() == 1
+    assert db.query(RoomMember).count() == 1
+
+
+def test_member_presence_grace_preserves_membership_and_order_sheet(monkeypatch):
+    monkeypatch.setattr(settings, "ROOM_MEMBER_DISCONNECT_GRACE_SECONDS", 60)
+    client, db, _ = build_client()
+    room_id = client.post("/api/rooms", json={"max_members": 2}).json()["room_id"]
+    participant = add_user(db, 222222222, "participant")
+    client.app.dependency_overrides[get_current_user] = lambda: participant
+    assert client.post(f"/api/rooms/{room_id}/join").status_code == 201
+    assert client.post(f"/api/rooms/{room_id}/order-sheet/complete").status_code == 200
+
+    assert mark_room_member_online(db, room_id, participant.id) is True
+    disconnected_at = datetime.now(timezone.utc) - timedelta(seconds=61)
+    assert mark_room_member_disconnected(
+        db, room_id, participant.id, disconnected_at
+    ) is True
+    assert mark_room_member_offline_after_grace(
+        db, room_id, participant.id, now=datetime.now(timezone.utc)
+    ) is True
+
+    member = (
+        db.query(RoomMember)
+        .filter(RoomMember.user_id == participant.id)
+        .one()
+    )
+    assert member.is_online is False
+    assert member.disconnected_at is not None
+    assert db.query(RoomMember).count() == 2
+    assert db.query(RoomMemberOrderSheet).count() == 1
+
+
+def test_member_reconnect_cancels_offline_transition(monkeypatch):
+    monkeypatch.setattr(settings, "ROOM_MEMBER_DISCONNECT_GRACE_SECONDS", 60)
+    client, db, _ = build_client()
+    room_id = client.post("/api/rooms", json={"max_members": 2}).json()["room_id"]
+    participant = add_user(db, 222222222, "participant")
+    client.app.dependency_overrides[get_current_user] = lambda: participant
+    assert client.post(f"/api/rooms/{room_id}/join").status_code == 201
+
+    assert mark_room_member_online(db, room_id, participant.id) is True
+    assert mark_room_member_disconnected(db, room_id, participant.id) is True
+    assert mark_room_member_online(db, room_id, participant.id) is False
+    assert mark_room_member_offline_after_grace(
+        db,
+        room_id,
+        participant.id,
+        now=datetime.now(timezone.utc) + timedelta(minutes=2),
+    ) is False
+
+    member = db.query(RoomMember).filter(RoomMember.user_id == participant.id).one()
+    assert member.is_online is True
+    assert member.disconnected_at is None
+
+
+def test_cleanup_marks_overdue_members_offline(monkeypatch):
+    monkeypatch.setattr(settings, "ROOM_MEMBER_DISCONNECT_GRACE_SECONDS", 60)
+    client, db, _ = build_client()
+    room_id = client.post("/api/rooms", json={"max_members": 2}).json()["room_id"]
+    participant = add_user(db, 222222222, "participant")
+    client.app.dependency_overrides[get_current_user] = lambda: participant
+    assert client.post(f"/api/rooms/{room_id}/join").status_code == 201
+    assert mark_room_member_online(db, room_id, participant.id) is True
+    assert mark_room_member_disconnected(
+        db,
+        room_id,
+        participant.id,
+        datetime.now(timezone.utc) - timedelta(seconds=61),
+    ) is True
+
+    offline = mark_due_room_members_offline(db, now=datetime.now(timezone.utc))
+
+    assert [(item.room_id, item.user_id) for item in offline] == [
+        (room_id, participant.id)
+    ]

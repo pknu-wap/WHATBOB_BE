@@ -1,4 +1,4 @@
-"""Add room lifecycle columns to an existing MySQL database.
+"""Add room and member lifecycle columns to an existing MySQL database.
 
 Run once before deploying the room deletion feature:
     python -m scripts.migrate_room_lifecycle
@@ -16,6 +16,8 @@ def migrate_room_lifecycle() -> None:
     inspector = inspect(engine)
     if "rooms" not in inspector.get_table_names():
         raise RuntimeError("rooms table does not exist. Start the application first.")
+    if "room_members" not in inspector.get_table_names():
+        raise RuntimeError("room_members table does not exist. Start the application first.")
 
     columns = {column["name"] for column in inspector.get_columns("rooms")}
     with engine.begin() as connection:
@@ -44,6 +46,20 @@ def migrate_room_lifecycle() -> None:
         with engine.begin() as connection:
             connection.execute(text(
                 "CREATE INDEX ix_rooms_expires_at ON rooms (expires_at)"
+            ))
+
+    member_columns = {
+        column["name"] for column in inspect(engine).get_columns("room_members")
+    }
+    with engine.begin() as connection:
+        if "is_online" not in member_columns:
+            connection.execute(text(
+                "ALTER TABLE room_members "
+                "ADD COLUMN is_online BOOLEAN NOT NULL DEFAULT FALSE"
+            ))
+        if "disconnected_at" not in member_columns:
+            connection.execute(text(
+                "ALTER TABLE room_members ADD COLUMN disconnected_at DATETIME NULL"
             ))
 
 
