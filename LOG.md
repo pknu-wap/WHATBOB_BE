@@ -5,48 +5,51 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-05
 
-### 로그인 사용자 본인의 비선호 음식 조회·목록 저장·개별 삭제 API 추가
+### 방장 퇴장·연결 종료 및 1시간 만료 기반 방 자동 삭제
 
 #### 변경 이유 및 내용
 
-- 추천에서 `user_food_exclusions`의 비선호를 읽어 제외하는 기능은 있었으나 프론트에서 해당 목록을 조회·저장하는 API가 없었다. 기존 사용자 라우터에 서비스 JWT 인증이 필수인 본인 비선호 관리 API를 추가했다.
-- 목록 전체 저장은 본인의 `DISLIKE`만 교체한다. 유지한 항목의 ID는 보존하고 빈 배열로 비선호만 모두 해제할 수 있다. 같은 키워드의 알레르기·섭취 불가 설정과 다른 사용자의 설정은 유지한다.
-- 키워드는 공백 제거 후 1~100자 문자열, 요청당 최대 100개로 제한하고 공백·대소문자 중복을 제거한다. `user_id` 등 정의되지 않은 본문 필드는 거부하고 사용자 ID는 JWT에서만 읽는다.
-- 개별 삭제는 본인 소유의 비선호 항목 ID만 허용한다. 없는 항목·다른 사용자 항목·다른 제외 유형은 모두 404다. 목록 조회는 캐시하지 않도록 `Cache-Control: no-store`를 반환한다.
-- Controller → Service → Repository로 분리했다. 저장·삭제는 트랜잭션과 사용자 행 잠금으로 처리하고 실패 시 롤백한다. MySQL의 반복 읽기 격리에서도 갱신 중 최신 목록을 읽도록 변경용 조회에는 잠금을 사용한다.
-- 저장 후 동일한 JWT로 추천 요청 시 기존 후보 제외 로직에 자동 연결되는 것을 확인했다. 추천 결과의 싫어요 피드백과 명시적 비선호 등록은 별도로 유지한다.
+- 종료 수단이 없어 방과 참여자 데이터가 계속 남던 문제를 해결했다. 방장만 `DELETE /api/rooms/{room_id}`로 즉시 종료할 수 있으며, 종료 상태와 사유를 먼저 저장하고 연결된 참여자에게 `room.closed` 이벤트를 보낸 뒤 주문서·참여자·방 데이터를 순서대로 삭제한다.
+- 방 생성 시 설정 가능한 1시간 기본 유효기간을 저장하고, 서버 수명주기에 주기적인 정리 작업을 연결했다. 만료된 방, 방장의 재접속 유예 시간이 지난 방, 이전 삭제 실패로 `CLOSED`에 남은 방을 다시 정리한다. 일반 API 요청에서도 만료 여부를 확인해 사용을 차단한다.
+- 방장의 마지막 WebSocket 연결이 종료되면 시각을 DB에 기록하고 기본 60초 동안 재접속을 기다린다. 유예 시간 내 재접속하면 예약과 DB 표시를 취소하며, 일반 참여자 연결 종료나 전체 주문서 완료는 방 삭제 조건으로 사용하지 않는다.
+- DB 종류와 외래키 실행 설정에 관계없이 `room_member_order_sheets`, `room_members`, `rooms` 순서로 명시적으로 삭제한다. 동시 종료 처리는 방 행 잠금과 `CLOSED` 중간 상태로 직렬화하며, 중단된 작업은 정리 루프가 재처리한다.
+- 기존 MySQL `rooms` 테이블에 생명주기 컬럼과 만료 인덱스를 추가하는 일회성 마이그레이션 스크립트를 제공한다.
 
 #### 주요 변경 파일
 
-- `app/users/router.py`
-- `app/users/schemas.py`
-- `app/users/service.py`
-- `app/users/repository.py`
-- `tests/test_user_dislikes.py`
-- `docs/USER_DISLIKES_API.md`
-- `LOG.md`
+- `app/rooms/models.py`, `app/rooms/schemas.py`
+- `app/rooms/service.py`, `app/rooms/router.py`, `app/rooms/websocket.py`
+- `app/rooms/cleanup.py`, `app/main.py`
+- `app/core/config.py`, `.env.example`
+- `scripts/migrate_room_lifecycle.py`
+- `tests/test_room_deletion.py`, `LOG.md`
 
 #### API 변경
 
-- 추가 `GET /api/users/me/dislikes`: 본인의 비선호를 `success/data/message` 형식으로 200 반환. `data`는 `items: [{id, keyword}]`, `total_count`이며 미설정 시 빈 목록이다.
-- 추가 `PUT /api/users/me/dislikes`: `{"keywords": ["피자", "홍어"]}`로 본인 비선호 전체를 저장하고 최종 목록을 같은 형식으로 200 반환한다. `{"keywords": []}`는 비선호 전체 해제다. 누락·잘못된 형식·길이 초과·정의되지 않은 필드는 422다.
-- 추가 `DELETE /api/users/me/dislikes/{dislike_id}`: 본인 비선호 항목 하나 삭제 후 본문 없는 204. 본인 비선호가 아니거나 없는 ID는 404, 유효하지 않은 ID는 422다.
-- 세 API 모두 유효한 서비스 JWT 필수이며 토큰 누락·무효·만료·사용자 부재는 401이다. 기존 `/api/users/me` 프로필 응답 및 추천 API 계약 변경은 없다.
+- 추가: `DELETE /api/rooms/{room_id}` — 방장만 호출할 수 있다. 성공 시 `room_id`, `deleted`, `close_reason=HOST_LEFT`, `closed_at`을 반환하고 관련 데이터를 삭제한다. 비방장은 403, 없는 방은 404다.
+- 수정: `POST /api/rooms` 응답에 `expires_at`을 추가한다. 기본값은 생성 시각으로부터 3,600초 뒤이며 환경 변수로 조정할 수 있다.
+- 수정: `GET /api/rooms/{room_id}` 응답에 `expires_at`을 추가한다. 만료됐지만 아직 정리 주기가 실행되지 않은 방은 410으로 차단하고 `EXPIRED` 종료 상태를 기록한다.
+- 추가 WebSocket 이벤트: `room.closed` — `room_id`, `reason`, `closed_at`을 포함하며 이벤트 전송 후 해당 방 연결을 닫는다.
 
 #### DB 변경
 
-- 없음. 기존 `user_food_exclusions` 테이블의 `DISLIKE` 항목만 읽고 갱신한다. 테이블·컬럼·제약 조건, 마이그레이션 파일 및 외부 라이브러리 추가 없음. 운영 DB 접근·변경은 수행하지 않았다.
+- `rooms.expires_at`: 필수 만료 시각 및 인덱스 추가.
+- `rooms.closed_at`: nullable 종료 시각 추가.
+- `rooms.close_reason`: nullable 종료 사유(`HOST_LEFT`, `HOST_DISCONNECTED`, `EXPIRED`) 추가.
+- `rooms.host_disconnected_at`: nullable 방장 연결 종료 시각 추가.
+- 기존 MySQL에는 배포 전 `python -m scripts.migrate_room_lifecycle`를 한 번 실행해야 한다. 신규 DB는 `Base.metadata.create_all`로 새 구조를 생성한다.
 
 #### 검증
 
-- `.\.venv\Scripts\python.exe -m pytest -q tests/test_user_dislikes.py`: 43개 통과. 실제 앱과 인메모리 SQLite, 서비스 JWT로 인증·본인 데이터 격리·입력 경계·공백/대소문자 중복·반복 저장 ID 유지·목록 교체·개별 삭제·다른 제외 유형 보존·저장 실패 롤백·다음 추천의 제외/해제·후보 없음 처리를 검증했다.
-- `.\.venv\Scripts\python.exe -m pytest -q -rs`: 최종 변경 기준 165개 통과, 1개 건너뜀. MySQL 방 통합 테스트는 `MYSQL_TEST_DATABASE_URL` 미설정으로 건너뛰었다. 기존 경고 2건 유지(Starlette AnyIO, 요청 alias 메타데이터).
-- `git diff --check`: 통과.
+- `python -m pytest -q tests/test_rooms.py tests/test_room_deletion.py -x`: 31개 통과. 기존 방 생성·참여·조회·주문서·WebSocket 회귀와 방장 삭제, 비방장 거부, 연관 데이터 삭제, 만료 차단, 재접속 취소, 유예 만료, 전체 선택 완료 시 방 유지 동작을 검증했다.
+- `python -m pytest -q -rs`: 130개 통과, 1개 건너뜀. `MYSQL_TEST_DATABASE_URL`이 없어 MySQL 동시 참가 통합 테스트는 실행하지 않았다. 기존 경고 2건이 발생했다.
+- `python -m compileall -q app scripts tests`, `git diff --check`: 통과.
 
 #### 남은 작업 및 주의 사항
 
-- 백엔드 배포·재시작 후 사용 가능하며 비선호 API 추가를 위한 DB 재적재는 필요 없다. 프론트는 최종 선택 목록 전체를 PUT하고 조회 응답의 항목 ID로 개별 삭제해야 한다. 자세한 예시는 `docs/USER_DISLIKES_API.md`에 기록했다.
-- 운영 MySQL·실제 프론트 화면·동시 요청 검증 및 원격 배포는 미실행이다. 커밋·푸시는 수행하지 않았다.
+- 실제 MySQL에서 마이그레이션 스크립트와 만료·연쇄 삭제를 검증해야 한다. 이번 테스트는 인메모리 SQLite를 사용했다.
+- WebSocket 연결 상태는 애플리케이션 프로세스 메모리에 있으므로 여러 서버 인스턴스에서 정확한 실시간 접속 수가 필요하면 Redis 같은 공유 연결 상태 저장소가 필요하다. DB에 기록된 연결 종료 시각과 정리 작업은 서버 재시작 후에도 동작한다.
+- 프론트는 명시적 방 나가기에 DELETE API를 사용하고 `room.closed` 수신 시 방 화면을 종료해야 한다. 페이지 새로고침은 재접속 유예 시간 안에 WebSocket을 다시 연결해야 한다.
 
 ### 누락된 식사 후보 복구, 추천 종류 분산 및 질문 순환·상관없음 복원
 
