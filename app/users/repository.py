@@ -1,6 +1,8 @@
+from datetime import datetime
+
 from sqlalchemy.orm import Session
 
-from app.menus.models import UserFoodExclusion
+from app.menus.models import Menu, UserFoodExclusion, UserMeal
 from app.users.models import User
 
 DISLIKE_EXCLUSION_TYPE = "DISLIKE"
@@ -38,3 +40,47 @@ def add_disliked_food(db: Session, user_id: int, keyword: str) -> None:
 
 def remove_disliked_food(db: Session, exclusion: UserFoodExclusion) -> None:
     db.delete(exclusion)
+
+
+def find_menu_by_id(db: Session, menu_id: int) -> Menu | None:
+    return db.query(Menu).filter(Menu.id == menu_id).one_or_none()
+
+
+def create_user_meal(
+    db: Session,
+    user_id: int,
+    menu_id: int,
+    menu_name: str,
+    eaten_at: datetime,
+    created_at: datetime,
+) -> UserMeal:
+    meal = UserMeal(
+        user_id=user_id,
+        menu_id=menu_id,
+        menu_name=menu_name,
+        eaten_at=eaten_at,
+        created_at=created_at,
+    )
+    db.add(meal)
+    return meal
+
+
+def count_user_meals(db: Session, user_id: int) -> int:
+    return db.query(UserMeal).filter(UserMeal.user_id == user_id).count()
+
+
+def find_user_meals_with_menu(
+    db: Session,
+    user_id: int,
+    limit: int,
+    offset: int,
+) -> list[tuple[UserMeal, Menu | None]]:
+    return (
+        db.query(UserMeal, Menu)
+        .outerjoin(Menu, UserMeal.menu_id == Menu.id)
+        .filter(UserMeal.user_id == user_id)
+        .order_by(UserMeal.eaten_at.desc(), UserMeal.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )

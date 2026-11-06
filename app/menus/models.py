@@ -5,6 +5,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
@@ -58,6 +59,21 @@ class UserFoodExclusion(Base):
     exclusion_type = Column(String(20), index=True, nullable=False, default="ALLERGY")
     keyword = Column(String(100), nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class UserMeal(Base):
+    """사용자별 먹은 음식(식사 기록) 테이블"""
+    __tablename__ = "user_meals"
+    __table_args__ = (
+        Index("ix_user_meals_user_eaten_at", "user_id", "eaten_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    menu_id = Column(Integer, ForeignKey("menus.id", ondelete="SET NULL"), index=True, nullable=True)
+    menu_name = Column(String(200), nullable=False)
+    eaten_at = Column(DateTime, index=True, nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
 class OrderSheetQuestion(Base):

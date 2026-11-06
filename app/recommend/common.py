@@ -32,6 +32,15 @@ class RecommendationNotFoundException(RecommendationDomainException):
         )
 
 
+class FoodNotFoundException(RecommendationDomainException):
+    """요청한 메뉴(음식)를 찾을 수 없을 때 발생하는 예외"""
+    def __init__(self, menu_id: int):
+        super().__init__(
+            message=f"메뉴(id={menu_id})를 찾을 수 없습니다.",
+            status_code=404,
+        )
+
+
 class InvalidOrderSheetException(RecommendationDomainException):
     """잘못된 주문서 응답 입력 시 발생하는 예외"""
     def __init__(self, message: str = "유효하지 않은 주문서 응답입니다."):
