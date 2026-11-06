@@ -305,6 +305,8 @@ def fetch_llm_generated_questions(base_pool: list[dict[str, Any]]) -> list[dict[
         "각 클러스터당 2개씩 JSON 배열로 생성하세요. "
         "질문은 공백과 문장부호를 포함해 24자 이내여야 합니다. "
         "각 질문은 두 취향 선택지와 상관없어요 중 하나를 고를 수 있는 내용이어야 합니다. "
+        "취향 선택지는 화면에 예/아니요로 표시됩니다. 예가 첫 번째 선택지 조건에 해당하도록 "
+        "긍정형 질문을 작성하고 숫자 기준은 문구에 노출하지 마세요. "
         "출력 형식: [{\"cluster_key\": \"has_soup\", \"question_text\": \"...\"}]\n"
         f"클러스터별 선택지: {json.dumps(cluster_options_map, ensure_ascii=False)}"
     )
