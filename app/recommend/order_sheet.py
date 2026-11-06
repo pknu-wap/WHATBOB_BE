@@ -33,6 +33,7 @@ from app.recommend.schemas import (
     RecommendedMenuDTO,
 )
 from app.recommend.variety import select_diverse_menus
+from app.recommend.question_pool import get_question_display
 
 DEFAULT_TOTAL_QUESTIONS = 9
 DEFAULT_EXPLOITATION_COUNT = 7
@@ -50,8 +51,11 @@ def _to_question_dto(
     question: OrderSheetQuestion,
     is_exploration: bool = False,
 ) -> OrderSheetQuestionDTO:
+    source_options = _question_options(question)
+    display = get_question_display(question.question_code, question.cluster_key, source_options)
+    labels = {option["option_id"]: option["label"] for option in display["options"]} if display else {}
     options = []
-    for opt in _question_options(question):
+    for opt in source_options:
         rules = [
             FilterRuleDTO(
                 field=r["field"],
@@ -63,7 +67,7 @@ def _to_question_dto(
         options.append(
             QuestionOptionDTO(
                 option_id=opt["option_id"],
-                label=opt["label"],
+                label=labels.get(opt["option_id"], opt["label"]),
                 rules=rules,
             )
         )
@@ -71,7 +75,7 @@ def _to_question_dto(
         id=question.id,
         question_code=question.question_code,
         cluster_key=question.cluster_key,
-        question_text=question.question_text,
+        question_text=display["question_text"] if display else question.question_text,
         options=options,
         initial_score=round(float(question.initial_score), 4),
         importance_weight=round(float(question.importance_weight), 4),

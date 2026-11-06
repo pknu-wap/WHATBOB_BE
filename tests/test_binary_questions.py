@@ -49,6 +49,7 @@ def test_binary_options_cover_existing_menu_categories():
     for question in pool:
         assert 1 <= len(question["question_text"]) <= 24
         assert len(question["options"]) == 3
+        assert [o["label"] for o in question["options"]] == ["예", "아니요", "상관없어요"]
         assert len({o["option_id"] for o in question["options"]}) == 3
         assert question["options"][-1] == {"option_id": "any", "label": "상관없어요", "rules": []}
     # 같은 주제의 문구 변형은 동일한 두 선택지를 사용한다.
@@ -109,6 +110,7 @@ def test_llm_discards_overlong_questions_without_truncating(monkeypatch):
         prompt = json.loads(request.content)["messages"][0]["content"]
         assert "24자" in prompt
         assert "soup_yes" in prompt and "soup_no" in prompt
+        assert "예/아니요" in prompt and "긍정형" in prompt
         return httpx.Response(200, json={"choices": [{
             "message": {"content": json.dumps(items, ensure_ascii=False)},
         }]})

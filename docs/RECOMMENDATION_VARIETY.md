@@ -20,11 +20,15 @@ python -m scripts.export_recommend_data
 
 ## 프론트 연동
 
+예/아니요 표시 변경은 수정한 백엔드 배포·재시작 후 질문 목록을 새로 조회하면 적용된다. 표준 `q_binary_v1_` 질문은 기존 DB의 답변 ID와 조건을 확인해 응답 문구만 바꾸므로 이번 표시 변경을 위한 DB 재적재는 필요 없다. 알려진 주제의 LLM 질문도 같은 조건이면 표준 긍정형으로 표시한다. 수동으로 조건을 변경한 질문이나 알 수 없는 질문 코드는 기존 문구를 유지한다. DB의 표시 문구까지 갱신하려면 선택적으로 `python -m scripts.seed_menus --questions-only`를 사용할 수 있다.
+
 - 질문 조회, 추천 요청, 피드백 요청에 서비스 JWT를 `Authorization: Bearer <token>`으로 보낸다. 로그인 사용자의 질문 순환 상태와 최근 추천·싫어요를 연결한다. JWT가 있으면 본문 `user_id`는 생략할 수 있으며 다른 사용자 ID를 함께 보내면 403이다. 유효하지 않은 Bearer 토큰은 401이다.
 - 기존 토큰 없는 추천 요청도 유지한다. 기존 `user_id` 연동은 그대로 지원하지만 로그인 연동에는 JWT를 사용한다. 익명 추천은 메뉴 종류 중복 제거·추첨이 적용되며 사용자별 최근 메뉴·싫어요 반영은 사용자 식별이 필요하다.
 - `GET /api/recommendations/order-sheet/questions`는 매번 새로 요청한다. 응답은 `Cache-Control: no-store`다. 이전 응답을 프론트 상태에 계속 재사용하면 화면은 바뀌지 않는다.
 - 익명 질문 조회는 `question_session` HttpOnly 쿠키로 브라우저별 상태를 구분한다. 다른 출처의 API에 요청할 때 `fetch(..., { credentials: "include" })` 또는 Axios `withCredentials: true`가 필요하다. HTTPS에서는 `Secure; SameSite=None`, HTTP에서는 `SameSite=Lax`다. 쿠키 차단·삭제 또는 전송 생략 시 익명 질문 상태가 새로 시작할 수 있다.
 - `options` 전체를 렌더링한다. 두 취향 답변 뒤 세 번째 선택지 `{ "option_id": "any", "label": "상관없어요", "rules": [] }`가 추가됐다. `options.slice(0, 2)`처럼 두 개만 표시하지 않는다. 기존 두 취향 선택지 ID와 질문 ID는 유지한다.
+- 질문 문구는 예/아니요로 답할 수 있는 긍정형으로 제공하고 `options[].label`은 `예 / 아니요 / 상관없어요`로 표시한다. 숫자 기준 대신 ‘저탄수화물 식사를 하고 싶나요?’처럼 묻는다. 화면 버튼에는 `label`을 사용하고 선택 시 같은 객체의 `option_id`를 보낸다. `예`, `아니요`라는 글자나 공통 `yes`/`no` 값을 답변 ID로 보내지 않는다.
+- 예를 들어 저탄수 질문의 `예`는 `low_carb`(15g 이하), `아니요`는 `rich_carb`(15g 초과)다. 고기 질문은 각각 `meat`, `non_meat`다. 기존 ID·조건·중요도와 피드백 연결은 유지한다. `rules`는 기존 API 필드로 유지하지만 화면에 조건 수치를 표시할 필요는 없다.
 - `any`도 일반 답변처럼 `answers[].option_id`에 전송한다. 메뉴 점수는 0점 추가, 질문 일치 목록과 질문 중요도 학습에서는 제외한다. 전부 `any`인 경우에도 제외 조건을 지킨 후보에서 다양한 종류를 추천한다.
 - `recommended_menus`의 실제 개수로 렌더링한다. 같은 기본 메뉴 종류는 한 번에 하나만 반환하므로 종류가 부족하면 `top_k`보다 적게 반환할 수 있다.
 

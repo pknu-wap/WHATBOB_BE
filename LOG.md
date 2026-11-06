@@ -3,6 +3,48 @@
 WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 최신 작업을 위에 추가하며, 기록 방법은 같은 디렉터리의 `AGENTS.md`를 따른다.
 
+## 2026-11-06
+
+### 주문서 질문을 긍정형 문구와 예·아니요 답변으로 표시
+
+#### 변경 이유 및 내용
+
+- 저탄수·고단백 질문에 수치 범위를 직접 표시하던 선택지를 `예 / 아니요 / 상관없어요`로 통일해 읽기 쉽게 했다. ‘저탄수화물 식사를 하고 싶나요?’, ‘고기 요리를 먹고 싶나요?’처럼 긍정형 질문을 사용한다. 12개 주제의 204개 후보 전체에 적용해 상위 7개와 탐색 2개 모두 같은 표시 방식을 사용한다. 질문 최대 24자 제한을 유지하며 새 문구의 최대 길이는 23자다.
+- 기존 질문 코드·ID, 답변 `option_id`, 조건 `rules`, 추천 점수 및 피드백 연결을 유지한다. 저탄수 질문의 예는 `low_carb`/15g 이하, 아니요는 `rich_carb`/15g 초과다. 고기 질문은 `meat`/`non_meat`다. `any`의 중립 처리도 유지한다.
+- 응답 DTO를 만들 때 표준 질문 코드·주제·답변 ID·조건의 일치를 확인하고 문구와 표시 이름만 새 정의로 변환한다. 기존 DB를 재적재하거나 중요도를 초기화하지 않아도 배포·재시작 후 새 표시를 사용할 수 있다. 같은 조건의 이전 LLM 질문은 주제별 표준 긍정형으로 표시하고, 조건이 수동 변경됐거나 알 수 없는 질문은 기존 문구를 유지해 의미가 바뀌지 않게 한다.
+- 신규 시드·공유 JSON도 새 표시를 사용한다. LLM 질문 생성 안내에 예가 첫 번째 조건에 해당하는 긍정형 및 숫자 기준 비노출을 명시했다. 이번 변경에서 메뉴 데이터 파일은 수정하지 않았다.
+
+#### 주요 변경 파일
+
+- `app/recommend/question_pool.py`
+- `app/recommend/order_sheet.py`
+- `scripts/seed_menus.py`
+- `data/order_sheet_questions_pool.json`
+- `tests/test_binary_questions.py`, `tests/test_question_presentation.py`
+- `docs/RECOMMENDATION_VARIETY.md`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/recommendations/order-sheet/questions`: `question_text`를 긍정형으로, `options[].label`을 예·아니요·상관없어요로 표시한다. 기존 응답 JSON 구조와 답변 ID·조건 필드는 유지한다.
+- `POST /api/recommendations/order-sheet/weights`: `top_questions`에도 같은 표시를 적용한다. 요청 형식·가중치 계산 변경은 없다.
+- `POST /api/recommendations/order-sheet`: 계약 변경 없음. 프론트는 버튼의 표시 글자가 아닌 해당 선택지의 기존 `option_id`를 보낸다. `예`/`아니요`나 공통 `yes`/`no` 값을 새 답변 ID로 사용하지 않는다.
+
+#### DB 변경
+
+- 없음. 테이블·컬럼·제약 조건·마이그레이션 파일 변경과 실제 DB 갱신은 없다. DB 저장 문구까지 갱신하려는 경우 기존 `--questions-only` 시드를 선택적으로 사용할 수 있다.
+
+#### 검증
+
+- `.\.venv\Scripts\python.exe -m pytest -q tests/test_question_presentation.py tests/test_binary_questions.py tests/test_order_sheet_contract.py tests/test_question_selection.py`: 38개 통과. 숫자 경계·누락 정보, 고기 분류, 기존 DB 표시 변환과 비변경, 수동 조건·알 수 없는 코드 보호, 이전 LLM 긍정형 변환, HTTP 조회 후 기존 ID로 예·아니요·상관없음 제출 및 추천 점수, 재시드 시 사용 중인 ID·중요도 보존을 검증했다.
+- `.\.venv\Scripts\python.exe -m pytest -q -rs`: 199개 통과, 1개 건너뜀. MySQL 방 통합 테스트는 `MYSQL_TEST_DATABASE_URL` 미설정으로 실행하지 않았다. 기존 경고 2건 유지(Starlette AnyIO, 요청 alias 메타데이터).
+- 공유 JSON을 작업 전 HEAD와 비교해 204개 모두 질문 코드·주제·답변 ID·조건·초기 점수·중요도가 동일하고 표시 문구만 바뀐 것을 확인했다.
+- `git diff --check`: 통과.
+
+#### 남은 작업 및 주의 사항
+
+- 수정한 백엔드를 배포·재시작하고 프론트의 질문 목록을 다시 조회해야 한다. 프론트는 `question_text`, `options[].label`을 표시하고 기존 `option_id`를 보내야 한다. 실제 프론트 코드는 이번 작업 폴더에 없어 화면 검증은 미실행이다.
+- 운영 MySQL 및 실제 외부 LLM 호출, 원격 배포는 미실행이다. 검증은 인메모리 SQLite와 모의 LLM 응답을 사용했다. 커밋·푸시는 수행하지 않았다.
+
 ## 2026-11-05
 
 ### 음식 종류별 동일 확률 완전 랜덤 추천 API 추가
