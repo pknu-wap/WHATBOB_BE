@@ -118,39 +118,15 @@ class OrderSheetRecommendResponse(BaseModel):
     candidate_count: int
 
 
-class RandomRecommendRequest(BaseModel):
-    exclusions: list[str] = Field(
-        default_factory=list,
-        description="이번 랜덤 추천에서 추가로 제외할 음식 또는 재료 키워드",
-    )
-
-
 class RandomMenuDTO(BaseModel):
     menu_id: int
     food_code: str
     name: str
     base_name: str
-    category_large: str
-    category_medium: Optional[str] = None
-    meal_type: str
-    has_soup: bool
-    cooking_style: str
-    main_ingredient: str
-    flavor_intensity: str
-    temperature: str
-    heaviness: str
-    kcal: Optional[float] = None
-    protein_g: Optional[float] = None
-    fat_g: Optional[float] = None
-    carb_g: Optional[float] = None
-    sodium_mg: Optional[float] = None
 
 
 class RandomRecommendResponse(BaseModel):
     selected_menu: RandomMenuDTO
-    excluded_count: int
-    candidate_count: int
-    menu_type_count: int
 
 
 class RecommendationFeedbackRequest(BaseModel):

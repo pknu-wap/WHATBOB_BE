@@ -27,7 +27,6 @@ from app.recommend.schemas import (
     OrderSheetWeightTuneRequest,
     OrderSheetWeightTuneResponse,
     RandomMenuDTO,
-    RandomRecommendRequest,
     RandomRecommendResponse,
     RecommendationFeedbackRequest,
     RecommendationFeedbackResponse,
@@ -51,20 +50,6 @@ def _to_random_menu_dto(menu: Menu) -> RandomMenuDTO:
         food_code=menu.food_code,
         name=format_menu_name(menu.name),
         base_name=menu.base_name,
-        category_large=menu.category_large,
-        category_medium=menu.category_medium,
-        meal_type=menu.meal_type,
-        has_soup=menu.has_soup,
-        cooking_style=menu.cooking_style,
-        main_ingredient=menu.main_ingredient,
-        flavor_intensity=menu.flavor_intensity,
-        temperature=menu.temperature,
-        heaviness=menu.heaviness,
-        kcal=menu.kcal,
-        protein_g=menu.protein_g,
-        fat_g=menu.fat_g,
-        carb_g=menu.carb_g,
-        sodium_mg=menu.sodium_mg,
     )
 
 
@@ -87,29 +72,31 @@ def get_official_allergens():
     )
 
 
-@router.post(
+@router.get(
     "/random",
     response_model=ApiResponse[RandomRecommendResponse],
     status_code=status.HTTP_200_OK,
 )
 def get_random_recommendation(
-    request: RandomRecommendRequest,
+    response: Response,
+    exclusions: list[str] | None = Query(
+        default=None,
+        description="이번 랜덤 추천에서 추가로 제외할 음식 또는 재료 키워드",
+    ),
     db: Session = Depends(get_db),
     current_user: User | None = Depends(get_optional_current_user),
 ):
     """제외 조건을 적용한 뒤 음식 종류와 실제 메뉴를 차례로 무작위 선택한다."""
+    response.headers["Cache-Control"] = "no-store"
     result = pick_random_menu(
         db=db,
         user_id=current_user.id if isinstance(current_user, User) else None,
-        extra_exclusions=request.exclusions,
+        extra_exclusions=exclusions,
     )
     return ApiResponse(
         success=True,
         data=RandomRecommendResponse(
             selected_menu=_to_random_menu_dto(result.menu),
-            excluded_count=result.excluded_count,
-            candidate_count=result.candidate_count,
-            menu_type_count=result.menu_type_count,
         ),
         message=None,
     )

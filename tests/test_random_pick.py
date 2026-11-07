@@ -145,6 +145,7 @@ def test_random_api_uses_authenticated_users_exclusions(db):
     db.add_all([
         make_menu("pizza-1", "피자_치즈", "피자"),
         make_menu("rice-1", "비빔밥_전주", "비빔밥", kcal=500.0),
+        make_menu("noodle-1", "국수_잔치국수", "국수"),
     ])
     db.commit()
 
@@ -154,12 +155,22 @@ def test_random_api_uses_authenticated_users_exclusions(db):
     app.dependency_overrides[get_optional_current_user] = lambda: user
 
     with TestClient(app) as client:
-        response = client.post("/api/recommendations/random", json={})
+        response = client.get(
+            "/api/recommendations/random",
+            params=[("exclusions", "국수")],
+        )
+        old_method_response = client.post("/api/recommendations/random", json={})
 
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
     body = response.json()
     assert body["success"] is True
-    assert body["data"]["selected_menu"]["base_name"] == "비빔밥"
-    assert body["data"]["excluded_count"] == 1
-    assert body["data"]["candidate_count"] == 1
-    assert body["data"]["menu_type_count"] == 1
+    assert body["data"] == {
+        "selected_menu": {
+            "menu_id": body["data"]["selected_menu"]["menu_id"],
+            "food_code": "rice-1",
+            "name": "전주비빔밥",
+            "base_name": "비빔밥",
+        },
+    }
+    assert old_method_response.status_code == 405

@@ -3,6 +3,43 @@
 WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 최신 작업을 위에 추가하며, 기록 방법은 같은 디렉터리의 `AGENTS.md`를 따른다.
 
+## 2026-11-07
+
+### 완전 랜덤 추천을 GET 조회 API와 최소 메뉴 응답으로 변경
+
+#### 변경 이유 및 내용
+
+- 추천 이력을 저장하거나 서버 상태를 변경하지 않는 완전 랜덤 추천의 성격에 맞게 HTTP 메서드를 `POST`에서 `GET`으로 변경했다. 기존 요청 본문의 추가 제외 조건은 같은 기능을 유지하도록 반복 가능한 `exclusions` 쿼리 파라미터로 옮겼다. 로그인 사용자의 알레르기·섭취 불가·비선호 자동 제외와 음식 종류 우선 무작위 선택 로직은 변경하지 않았다.
+- 랜덤 결과 화면에서 사용하는 메뉴 식별·표시 정보만 제공하도록 `selected_menu`를 `menu_id`, `food_code`, `name`, `base_name` 네 필드로 축소했다. 외부 응답에서 후보·제외·종류 수를 제거했지만 내부 계산은 추천 로직과 단위 테스트를 위해 유지한다.
+- 매번 다른 결과를 조회하는 API가 중간 캐시에 저장되지 않도록 `Cache-Control: no-store`를 추가했다.
+
+#### 주요 변경 파일
+
+- `app/recommend/router.py`
+- `app/recommend/schemas.py`
+- `tests/test_random_pick.py`
+- `LOG.md`
+
+#### API 변경
+
+- 수정: `POST /api/recommendations/random`을 `GET /api/recommendations/random`으로 교체했다. 이전 JSON 요청 본문 `{ "exclusions": [...] }`은 `?exclusions=값1&exclusions=값2` 형식의 선택적 쿼리 파라미터로 변경했다. 기존 POST 호출은 `405 Method Not Allowed`를 반환한다.
+- 수정: 성공 응답의 `data`는 `selected_menu`만 포함하고, `selected_menu`는 `menu_id`, `food_code`, `name`, `base_name`만 반환한다. 기존 `category_large`부터 `sodium_mg`까지의 상세 속성과 `excluded_count`, `candidate_count`, `menu_type_count`는 랜덤 API 응답에서 제거했다. 공통 `success`, `data`, `message` 래퍼는 유지한다.
+
+#### DB 변경
+
+- 없음. 기존 `menus`, `user_food_exclusions` 조회 방식과 스키마는 변경하지 않았다.
+
+#### 검증
+
+- `python -m pytest -q tests/test_random_pick.py tests/test_menu_display.py`: 30개 통과. GET 호출, 사용자·쿼리 제외 조건 동시 적용, 네 필드 응답, 캐시 방지 헤더, 기존 POST의 405 응답과 메뉴 표시명 규칙을 검증했다.
+- `python -m pytest -q -rs`: 238개 통과, 2개 실패, 1개 건너뜀. 실패한 `tests/test_user_meals.py` 2건은 이번 변경 파일과 무관한 기존 식사 기록 표시명 기대값과 현재 `format_menu_name` 결과의 불일치다. MySQL 방 통합 테스트 1건은 `MYSQL_TEST_DATABASE_URL` 미설정으로 건너뛰었다. 기존 경고 2건이 발생했다.
+- `python -m compileall -q app tests`, `git diff --check`: 통과.
+
+#### 남은 작업 및 주의 사항
+
+- 프론트엔드 호출을 GET과 쿼리 파라미터 방식으로 변경해야 한다. 상세 메뉴 속성이나 후보 통계를 사용하던 호출부가 있다면 제거된 응답 필드에 맞춰 수정해야 한다.
+- 전체 테스트의 기존 식사 기록 표시명 실패 2건은 별도 작업에서 기대 계약을 확인한 뒤 수정해야 한다. 운영 MySQL 및 실제 프론트엔드 연동 검증, 배포·커밋·푸시는 수행하지 않았다.
+
 ## 2026-11-06
 
 ### 주문서 질문을 긍정형 문구와 예·아니요 답변으로 표시
