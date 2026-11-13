@@ -1,13 +1,26 @@
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.orm import Session
 from app.auth.schemas import KakaoLoginRequest, TokenResponse
 from app.auth.service import process_kakao_login
 from app.core.config import settings
 from app.core.database import get_db
+from app.auth.errors import AuthError
 
 router = APIRouter(prefix="/api/auth/kakao", tags=["Auth"])
+
+
+def require_standalone_kakao_login(request: Request):
+    # Until T06 implements authenticated record migration, do not silently
+    # replace a browser's UUID identity with an unrelated provider login.
+    if settings.AUTH_COOKIE_NAME in request.cookies:
+        raise AuthError("ACCOUNT_LINKING_NOT_AVAILABLE", "현재 사용자 기록의 카카오 연결은 아직 지원하지 않습니다.", 409)
+
+
+def prevent_token_caching(response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
 
 
 @router.get("/login/url")
@@ -29,20 +42,26 @@ def get_kakao_login_url(
 
 
 @router.get("/callback", response_model=TokenResponse)
-async def kakao_callback_test(code: str = Query(..., description="카카오 인가 코드"), db: Session = Depends(get_db)):
+async def kakao_callback_test(request: Request, response: Response,
+                              code: str = Query(..., description="카카오 인가 코드"), db: Session = Depends(get_db)):
     """
     기존 백엔드 콜백 테스트용 경로입니다.
     프론트 콜백 구성에서는 이 경로 대신 프론트가 POST /login으로 코드를 전달합니다.
     이 경로를 직접 사용하려면 Redirect URI 설정도 이 주소로 맞춰야 합니다.
     """
+    require_standalone_kakao_login(request)
+    prevent_token_caching(response)
     return await process_kakao_login(code, db)
 
 
 @router.post("/login", response_model=TokenResponse)
-async def kakao_login(request: KakaoLoginRequest, db: Session = Depends(get_db)):
+async def kakao_login(request: KakaoLoginRequest, http_request: Request, response: Response,
+                      db: Session = Depends(get_db)):
     """
     [프론트엔드 연동용 엔드포인트]
     프론트엔드에서 카카오 인가 코드를 받아 JSON 본문으로 전달할 때 사용합니다.
     """
+    require_standalone_kakao_login(http_request)
+    prevent_token_caching(response)
     return await process_kakao_login(request.code, db)
 

@@ -1,7 +1,9 @@
 from sqlalchemy.orm import Session
+from datetime import timedelta
+from app.auth.errors import database_errors
+from app.auth.sessions import new_session, token_response, create_uuid_user, utc_now, SESSION_SECONDS
 from app.auth.kakao import get_kakao_access_token, get_kakao_user_info
-from app.auth.schemas import TokenResponse, UserResponse
-from app.core.security import create_access_token
+from app.auth.schemas import TokenResponse
 from app.users.models import User
 
 
@@ -19,42 +21,29 @@ async def process_kakao_login(code: str, db: Session) -> TokenResponse:
     kakao_profile = await get_kakao_user_info(kakao_access_token)
     kakao_id = kakao_profile["kakao_id"]
 
-    # 3. DB 조회 및 회원가입/로그인 분기 처리
-    user = db.query(User).filter(User.kakao_id == kakao_id).first()
-    is_new_user = False
-
-    if not user:
-        # [신규 회원 -> 회원가입]
-        user = User(
-            kakao_id=kakao_id,
-            nickname=kakao_profile["nickname"],
-            email=kakao_profile["email"],
-            profile_image=kakao_profile["profile_image"],
-        )
-        db.add(user)
+    with database_errors(db):
+        record, _ = new_session()
+        db.add(record)
+        db.flush()
+        user = db.query(User).filter(User.kakao_id == kakao_id).first()
+        is_new_user = user is None
+        if user is None:
+            nickname = kakao_profile["nickname"]
+            key = nickname.strip().encode("utf-8") if nickname and nickname.strip() else None
+            if key is not None and db.query(User.id).filter(User.nickname_key == key).first():
+                user = create_uuid_user(db)
+                user.kakao_id = kakao_id
+                user.email = kakao_profile["email"]
+                user.profile_image = kakao_profile["profile_image"]
+            else:
+                user = User(kakao_id=kakao_id, nickname=nickname, nickname_key=key,
+                            email=kakao_profile["email"], profile_image=kakao_profile["profile_image"])
+                db.add(user)
+            db.flush()
+        # A provider login must not replace an existing WhatBap profile.
+        record.user_id = user.id
+        record.expires_at = utc_now() + timedelta(seconds=SESSION_SECONDS)
+        result = token_response(user, record, is_new_user=is_new_user)
         db.commit()
-        db.refresh(user)
-        is_new_user = True
-    else:
-        # [기존 회원 -> 정보 동기화 및 로그인]
-        user.nickname = kakao_profile["nickname"] or user.nickname
-        user.profile_image = kakao_profile["profile_image"] or user.profile_image
-        if kakao_profile["email"]:
-            user.email = kakao_profile["email"]
-        db.commit()
-        db.refresh(user)
-
-    # 4. 서비스 자체 JWT 발급
-    jwt_payload = {
-        "sub": str(user.id),
-        "kakao_id": user.kakao_id,
-    }
-    jwt_token = create_access_token(data=jwt_payload)
-
-    return TokenResponse(
-        access_token=jwt_token,
-        token_type="bearer",
-        user=UserResponse.model_validate(user),
-        is_new_user=is_new_user,
-    )
+        return result
 

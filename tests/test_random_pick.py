@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.auth.dependencies import get_optional_current_user
+from app.auth.dependencies import get_current_user
 from app.core.database import Base, get_db
 from app.menus.models import Menu, UserFoodExclusion
 from app.recommend.common import NoAvailableFoodException
@@ -152,7 +152,7 @@ def test_random_api_uses_authenticated_users_exclusions(db):
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_db] = lambda: db
-    app.dependency_overrides[get_optional_current_user] = lambda: user
+    app.dependency_overrides[get_current_user] = lambda: user
 
     with TestClient(app) as client:
         response = client.get(

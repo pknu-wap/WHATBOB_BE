@@ -165,6 +165,84 @@ OFFICIAL_ALLERGEN_ITEMS: list[dict[str, Any]] = [
     },
 ]
 
+for _item in OFFICIAL_ALLERGEN_ITEMS:
+    _item["code"] = _item["id"]
+    _item["label"] = _item["name"]
+
+ALLERGEN_CATALOG_VERSION = 1
+UNABLE_CATALOG_VERSION = 1
+
+ALLERGEN_BY_CODE: dict[str, dict[str, Any]] = {item["id"]: item for item in OFFICIAL_ALLERGEN_ITEMS}
+
+UNABLE_INGREDIENT_ITEMS: list[dict[str, Any]] = [
+    {
+        "id": "pork",
+        "code": "pork",
+        "name": "돼지고기",
+        "label": "돼지고기",
+        "category": "육류",
+        "description": "삼겹살, 제육, 돈까스, 보쌈, 족발, 햄, 베이컨, 소시지, 순대 등",
+    },
+    {
+        "id": "beef",
+        "code": "beef",
+        "name": "소고기",
+        "label": "소고기",
+        "category": "육류",
+        "description": "소고기, 한우, 불고기, 갈비, 육회, 설렁탕, 곰탕, 차돌박이 등",
+    },
+    {
+        "id": "poultry",
+        "code": "poultry",
+        "name": "닭·가금류",
+        "label": "닭·가금류",
+        "category": "육류",
+        "description": "닭고기, 치킨, 삼계탕, 닭갈비, 백숙, 오리고기, 칠면조 등",
+    },
+    {
+        "id": "seafood",
+        "code": "seafood",
+        "name": "해산물·어패류",
+        "label": "해산물·어패류",
+        "category": "수산",
+        "description": "생선, 회, 초밥, 새우, 게, 오징어, 낙지, 문어, 조개, 굴, 전복, 홍합, 어묵 등",
+    },
+    {
+        "id": "egg",
+        "code": "egg",
+        "name": "달걀(난류)",
+        "label": "달걀(난류)",
+        "category": "난류·유제품",
+        "description": "달걀, 계란, 메추리알, 오믈렛, 에그, 마요네즈, 지단 등",
+    },
+    {
+        "id": "dairy",
+        "code": "dairy",
+        "name": "유제품",
+        "label": "유제품",
+        "category": "난류·유제품",
+        "description": "우유, 치즈, 버터, 크림, 요거트, 연유, 라떼 등",
+    },
+    {
+        "id": "wheat",
+        "code": "wheat",
+        "name": "밀·글루텐",
+        "label": "밀·글루텐",
+        "category": "곡류·면·빵",
+        "description": "밀가루, 빵, 면, 국수, 라면, 파스타, 우동, 만두, 피자, 튀김, 전 등",
+    },
+    {
+        "id": "soybean",
+        "code": "soybean",
+        "name": "대두·콩류",
+        "label": "대두·콩류",
+        "category": "콩·두부",
+        "description": "두부, 순두부, 콩, 된장, 청국장, 콩나물, 유부, 두유, 콩비지 등",
+    },
+]
+
+UNABLE_BY_CODE: dict[str, dict[str, Any]] = {item["id"]: item for item in UNABLE_INGREDIENT_ITEMS}
+
 OFFICIAL_ALLERGEN_RULES: dict[str, tuple[str, ...]] = {
     "알류(달걀)": ("달걀", "계란", "메추리알", "에그", "마요"),
     "우유": ("우유", "치즈", "크림", "버터", "요거트", "라떼", "유제품"),
@@ -205,12 +283,140 @@ def derive_allergens_from_text(text: str) -> list[str]:
     return tags
 
 
+def _menu_search_blob(menu: Menu) -> tuple[str, str, set[str]]:
+    fields = [
+        menu.name or "",
+        menu.base_name or "",
+        menu.category_large or "",
+        menu.category_medium or "",
+        menu.category_small or "",
+    ]
+    allergen_list = menu.allergen_tags if isinstance(menu.allergen_tags, list) else []
+    allergen_set = {str(t).strip() for t in allergen_list if str(t).strip()}
+    raw_text = " ".join(fields + list(allergen_set)).lower()
+    no_stingray = raw_text.replace("가오리", "")
+    return raw_text, no_stingray, allergen_set
+
+
+ALLERGEN_MAIN_INGREDIENT_MAP: dict[str, set[str]] = {
+    "pork": {"pork"},
+    "beef": {"beef"},
+    "chicken": {"chicken"},
+    "wheat": {"flour_wheat", "flour"},
+}
+
+UNABLE_RULE_SPEC: dict[str, dict[str, Any]] = {
+    "pork": {
+        "main_ingredients": {"pork"},
+        "allergen_tags": {"돼지고기"},
+        "keywords": OFFICIAL_ALLERGEN_RULES["돼지고기"],
+    },
+    "beef": {
+        "main_ingredients": {"beef"},
+        "allergen_tags": {"쇠고기(소고기)", "쇠고기", "소고기"},
+        "keywords": OFFICIAL_ALLERGEN_RULES["쇠고기(소고기)"] + ("쇠고기", "스테이크", "사골"),
+    },
+    "poultry": {
+        "main_ingredients": {"chicken"},
+        "allergen_tags": {"닭고기"},
+        "keywords": OFFICIAL_ALLERGEN_RULES["닭고기"] + ("오리고기", "오리", "가금류"),
+        "strip_stingray": True,
+    },
+    "seafood": {
+        "main_ingredients": {"seafood"},
+        "allergen_tags": {"고등어", "게", "새우", "오징어", "조개류(굴/전복/홍합 포함)", "조개류", "해산물"},
+        "keywords": OFFICIAL_ALLERGEN_RULES["해산물"] + ("해산물", "어패류", "초밥", "문어", "멸치", "북어", "복어", "추어", "메기"),
+    },
+    "egg": {
+        "main_ingredients": set(),
+        "allergen_tags": {"알류(달걀)", "알류", "난류", "달걀", "계란"},
+        "keywords": OFFICIAL_ALLERGEN_RULES["알류(달걀)"] + ("난류", "오믈렛", "스크램블", "지단", "수란"),
+    },
+    "dairy": {
+        "main_ingredients": set(),
+        "allergen_tags": {"우유"},
+        "keywords": OFFICIAL_ALLERGEN_RULES["우유"] + ("요구르트", "연유", "생크림", "모짜렐라", "체다", "파르메산", "밀크"),
+    },
+    "wheat": {
+        "main_ingredients": {"flour_wheat", "flour"},
+        "allergen_tags": {"밀"},
+        "keywords": OFFICIAL_ALLERGEN_RULES["밀"] + ("밀", "글루텐", "짜장면", "짬뽕", "칼국수", "수제비", "버거", "햄버거", "샌드위치", "토스트", "베이글", "도넛", "쿠키", "부침개"),
+    },
+    "soybean": {
+        "main_ingredients": set(),
+        "allergen_tags": {"대두(콩)", "대두"},
+        "keywords": OFFICIAL_ALLERGEN_RULES["대두(콩)"] + ("대두", "유부", "두유", "비지", "낫또", "춘장", "짜장"),
+    },
+}
+
+
+def matches_allergen_code(menu: Menu, code: str) -> bool:
+    item = ALLERGEN_BY_CODE.get(code)
+    if item is None:
+        return False
+    allergen_name = item["name"]
+    raw_text, no_stingray, allergen_set = _menu_search_blob(menu)
+    if allergen_name in allergen_set or item["legal_name"] in allergen_set:
+        return True
+    main_ings = ALLERGEN_MAIN_INGREDIENT_MAP.get(code)
+    if main_ings and (menu.main_ingredient or "") in main_ings:
+        return True
+    keywords = OFFICIAL_ALLERGEN_RULES.get(allergen_name, ())
+    target_text = no_stingray if code == "chicken" else raw_text
+    return any(kw.lower() in target_text for kw in keywords)
+
+
+def matches_unable_code(menu: Menu, code: str) -> bool:
+    spec = UNABLE_RULE_SPEC.get(code)
+    if spec is None:
+        return False
+    raw_text, no_stingray, allergen_set = _menu_search_blob(menu)
+    if (menu.main_ingredient or "") in spec["main_ingredients"]:
+        return True
+    if allergen_set & spec["allergen_tags"]:
+        return True
+    target_text = no_stingray if spec.get("strip_stingray") else raw_text
+    return any(kw.lower() in target_text for kw in spec["keywords"])
+
+
+def inspect_menu_catalog_coverage(menus: Iterable[Menu]) -> dict[str, Any]:
+    """
+    [M2A] 7,503개 메뉴 데이터에 대해 19종 알레르기와 8종 섭취불가 규칙의 매칭 분포와
+    main_ingredient='other' 및 빈 allergen_tags 미검증 메뉴 건수를 집계한다.
+    """
+    menu_list = list(menus)
+    allergen_counts = {code: 0 for code in ALLERGEN_BY_CODE}
+    unable_counts = {code: 0 for code in UNABLE_BY_CODE}
+    unverified_other_menus = 0
+
+    for menu in menu_list:
+        matched_any = False
+        for code in ALLERGEN_BY_CODE:
+            if matches_allergen_code(menu, code):
+                allergen_counts[code] += 1
+                matched_any = True
+        for code in UNABLE_BY_CODE:
+            if matches_unable_code(menu, code):
+                unable_counts[code] += 1
+                matched_any = True
+        tags = menu.allergen_tags if isinstance(menu.allergen_tags, list) else []
+        if not matched_any and (menu.main_ingredient or "other") == "other" and not tags:
+            unverified_other_menus += 1
+
+    return {
+        "total_menus": len(menu_list),
+        "allergen_code_counts": allergen_counts,
+        "unable_code_counts": unable_counts,
+        "unverified_other_menus": unverified_other_menus,
+    }
+
+
 def collect_user_exclusion_keywords(
     db: Session,
     user_id: Optional[int] = None,
     extra_exclusions: Optional[Iterable[str]] = None,
 ) -> set[str]:
-    """DB에 저장된 사용자의 알레르기/섭취불가/비선호 키워드와 요청의 추가 제외 키워드를 통합합니다."""
+    """DB에 저장된 사용자의 알레르기/섭취불가/비선호 코드·키워드와 요청의 추가 제외 키워드를 통합합니다."""
     keywords: set[str] = set()
     if user_id is not None:
         rows = (
@@ -219,6 +425,14 @@ def collect_user_exclusion_keywords(
             .all()
         )
         for row in rows:
+            exc_type = (row.exclusion_type or "").upper()
+            code = (row.catalog_code or "").strip()
+            if exc_type == "ALLERGY" and code in ALLERGEN_BY_CODE:
+                keywords.add(f"allergy_code:{code}")
+                continue
+            if exc_type == "UNABLE" and code in UNABLE_BY_CODE:
+                keywords.add(f"unable_code:{code}")
+                continue
             cleaned = (row.keyword or "").strip()
             if cleaned:
                 keywords.add(cleaned)
@@ -226,14 +440,19 @@ def collect_user_exclusion_keywords(
     if extra_exclusions:
         for item in extra_exclusions:
             cleaned = (item or "").strip()
-            if cleaned:
-                keywords.add(cleaned)
+            if not cleaned:
+                continue
+            if cleaned in ALLERGEN_BY_CODE:
+                keywords.add(f"allergy_code:{cleaned}")
+            if cleaned in UNABLE_BY_CODE:
+                keywords.add(f"unable_code:{cleaned}")
+            keywords.add(cleaned)
 
     return keywords
 
 
 def is_menu_excluded(menu: Menu, exclusion_keywords: set[str]) -> bool:
-    """메뉴가 사용자의 알레르기/비선호/섭취불가 키워드에 해당하는지 판별합니다."""
+    """메뉴가 사용자의 알레르기/비선호/섭취불가 코드 또는 키워드에 해당하는지 판별합니다."""
     if not exclusion_keywords:
         return False
 
@@ -249,6 +468,16 @@ def is_menu_excluded(menu: Menu, exclusion_keywords: set[str]) -> bool:
     searchable_text = " ".join(searchable_fields + [str(t) for t in allergen_list]).lower()
 
     for kw in exclusion_keywords:
+        if kw.startswith("allergy_code:"):
+            code = kw.split(":", 1)[1]
+            if matches_allergen_code(menu, code):
+                return True
+            continue
+        if kw.startswith("unable_code:"):
+            code = kw.split(":", 1)[1]
+            if matches_unable_code(menu, code):
+                return True
+            continue
         kw_lower = kw.lower()
         if kw_lower in searchable_text:
             return True

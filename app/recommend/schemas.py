@@ -50,14 +50,34 @@ class OrderSheetQuestionDTO(BaseModel):
 
 class AllergenItemDTO(BaseModel):
     id: str = Field(description="알레르기 고유 코드 (예: egg, milk, peanut)")
+    code: str = Field(description="알레르기 카탈로그 코드 (id와 동일)")
     name: str = Field(description="화면 표시용 이름 (예: 알류(달걀), 우유, 땅콩)")
+    label: str = Field(description="화면 표시용 라벨 (name과 동일)")
     legal_name: str = Field(description="식약처 고시 법정 명칭")
     description: str = Field(description="해당 재료 및 대표 가공식품 예시")
 
 
 class AllergenListResponse(BaseModel):
+    catalog_version: int = Field(default=1, description="알레르기 카탈로그 버전")
     total_count: int = Field(description="알레르기 유발물질 총 개수 (식약처 고시 19종)")
     allergens: list[AllergenItemDTO]
+    items: list[AllergenItemDTO] = Field(default_factory=list)
+
+
+class UnableIngredientItemDTO(BaseModel):
+    id: str = Field(description="섭취불가 재료군 고유 코드 (예: pork, beef, poultry)")
+    code: str = Field(description="섭취불가 재료군 카탈로그 코드 (id와 동일)")
+    name: str = Field(description="화면 표시용 이름")
+    label: str = Field(description="화면 표시용 라벨 (name과 동일)")
+    category: str = Field(description="재료 대분류")
+    description: str = Field(description="해당 재료군 대표 식품 예시")
+
+
+class UnableIngredientListResponse(BaseModel):
+    catalog_version: int = Field(default=1, description="섭취불가 재료군 카탈로그 버전")
+    total_count: int = Field(description="섭취불가 재료군 총 개수 (8종)")
+    unable_ingredients: list[UnableIngredientItemDTO]
+    items: list[UnableIngredientItemDTO] = Field(default_factory=list)
 
 
 class OrderSheetQuestionsResponse(BaseModel):
@@ -68,12 +88,15 @@ class OrderSheetQuestionsResponse(BaseModel):
 
 
 class AnswerItemRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     question_id: int
     option_id: str
 
 
 class OrderSheetRecommendRequest(BaseModel):
-    user_id: Optional[int] = None
+    model_config = ConfigDict(extra="forbid")
+
     exclusions: list[str] = Field(
         default_factory=list,
         description="추가로 제외할 알레르기/섭취불가/비선호 음식 또는 재료 키워드",
@@ -130,7 +153,8 @@ class RandomRecommendResponse(BaseModel):
 
 
 class RecommendationFeedbackRequest(BaseModel):
-    user_id: Optional[int] = None
+    model_config = ConfigDict(extra="forbid")
+
     selected_menu_id: Optional[int] = None
     is_satisfied: bool
 

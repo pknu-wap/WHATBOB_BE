@@ -10,6 +10,8 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base, get_db
 from app.core.security import create_access_token
+from app.auth.models import AuthSession
+from tests.auth_helpers import session_token
 from app.main import app
 from app.menus.models import Menu, UserMeal
 from app.users import repository
@@ -115,8 +117,8 @@ def api():
                     "chicken": menu_chicken,
                     "pasta": menu_pasta,
                 },
-                headers={"Authorization": f'Bearer {create_access_token({"sub": str(user.id)})}'},
-                other_headers={"Authorization": f'Bearer {create_access_token({"sub": str(other.id)})}'},
+                headers={"Authorization": f'Bearer {session_token(db, user)}'},
+                other_headers={"Authorization": f'Bearer {session_token(db, other)}'},
             )
     finally:
         app.dependency_overrides.clear()
@@ -306,6 +308,8 @@ def test_referential_integrity_preserves_meal_snapshot_on_menu_delete_and_cascad
     assert items[0]["menu_name"] == "토마토파스타"
     assert items[0]["menu"] is None
 
+    # Authentication references must be explicitly removed before deleting a user.
+    api.db.query(AuthSession).filter(AuthSession.user_id == api.user.id).delete()
     # 사용자가 삭제되면 해당 사용자의 user_meals만 CASCADE 삭제된다.
     api.db.delete(api.user)
     api.db.commit()

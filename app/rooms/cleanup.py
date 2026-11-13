@@ -15,19 +15,23 @@ logger = logging.getLogger("uvicorn")
 
 
 async def cleanup_due_rooms_once() -> int:
-    """Close, notify, and physically delete every due room."""
+    """Close, notify, and physically delete every due room, and auto-remove overdue members."""
     with SessionLocal() as db:
-        offline_members = await asyncio.to_thread(mark_due_room_members_offline, db)
-    for member in offline_members:
+        left_members = await asyncio.to_thread(mark_due_room_members_offline, db)
+    for member in left_members:
         await room_connection_manager.broadcast(
             member.room_id,
             {
                 "type": "room.updated",
                 "room_id": member.room_id,
-                "reason": "MEMBER_OFFLINE",
+                "reason": "MEMBER_LEFT",
                 "user_id": member.user_id,
+                "member_count": member.member_count,
+                "completed_member_count": member.completed_member_count,
+                "all_members_completed": member.all_members_completed,
             },
         )
+        await room_connection_manager.close_user_connections(member.room_id, member.user_id)
 
     with SessionLocal() as db:
         closed_rooms = await asyncio.to_thread(close_due_rooms, db)

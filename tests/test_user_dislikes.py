@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base, get_db
 from app.core.security import create_access_token
+from tests.auth_helpers import session_token
 from app.main import app
 from app.menus.models import Menu, OrderSheetQuestion, UserFoodExclusion
 from app.recommend.question_pool import build_candidate_question_pool
@@ -34,8 +35,8 @@ def api():
             app.dependency_overrides[get_db] = lambda: db
             yield SimpleNamespace(
                 client=TestClient(app), db=db, user=user, other=other,
-                headers={"Authorization": f'Bearer {create_access_token({"sub": str(user.id)})}'},
-                other_headers={"Authorization": f'Bearer {create_access_token({"sub": str(other.id)})}'},
+                headers={"Authorization": f'Bearer {session_token(db, user)}'},
+                other_headers={"Authorization": f'Bearer {session_token(db, other)}'},
             )
     finally:
         app.dependency_overrides.clear()

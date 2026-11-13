@@ -1,8 +1,17 @@
+from datetime import datetime, timezone
 import math
 import random
 from typing import Any
 from sqlalchemy.orm import Session
 
+from app.auth.operations import (
+    acquire_or_inspect_operation,
+    compute_payload_hash,
+    get_user_session_id,
+    lock_user_and_verify_session,
+    normalize_idempotency_key,
+)
+from app.auth.sessions import utc_now
 from app.menus.display import format_menu_name
 from app.menus.models import (
     Menu,
@@ -10,15 +19,19 @@ from app.menus.models import (
     QuestionSelectionState,
     Recommendation,
     RecommendationFeedback,
+    RecommendationFeedbackState,
+    RecommendationItemSnapshot,
 )
 from app.recommend.common import (
     InvalidOrderSheetException,
     QuestionPoolEmptyException,
+    RecommendationDomainException,
     RecommendationNotFoundException,
     collect_user_exclusion_keywords,
     evaluate_option_rules,
     filter_available_menus,
 )
+from app.recommend.personal_model import FEATURE_SCHEMA_VERSION
 from app.recommend.schemas import (
     FilterRuleDTO,
     OrderSheetQuestionDTO,
@@ -32,8 +45,9 @@ from app.recommend.schemas import (
     RecommendationFeedbackResponse,
     RecommendedMenuDTO,
 )
-from app.recommend.variety import select_diverse_menus
 from app.recommend.question_pool import get_question_display
+from app.recommend.variety import menu_group, select_diverse_menus_with_snapshots
+from app.users.models import User
 
 DEFAULT_TOTAL_QUESTIONS = 9
 DEFAULT_EXPLOITATION_COUNT = 7
@@ -260,22 +274,32 @@ def select_order_sheet_questions(
 def create_order_sheet_recommendation(
     db: Session,
     request: OrderSheetRecommendRequest,
+    user_id: int | None = None,
+    current_user: User | None = None,
 ) -> OrderSheetRecommendResponse:
     """
     [5단계 주문서 답변 기반 메뉴 추천]
     1. 사용자 알레르기/비선호/섭취불가 메뉴를 먼저 제외(Hard Filter)
     2. 제출된 질문별 선택지 조건식(rules)을 평가하여 질문의 importance_weight 가중치 합산
-    3. 상위 top_k 메뉴를 추천하고 추천 기록을 MySQL에 저장
+    3. 상위 top_k 메뉴를 추천하고 추천 기록과 메뉴별 스냅샷을 저장
     """
+    effective_user_id = user_id
+    if current_user is not None:
+        locked_user = lock_user_and_verify_session(db, current_user)
+        effective_user_id = locked_user.id
+
+    question_ids = [ans.question_id for ans in request.answers]
+    if len(set(question_ids)) != len(question_ids):
+        raise InvalidOrderSheetException("동일한 질문에 중복 응답할 수 없습니다.")
+
     all_menus = db.query(Menu).all()
     exclusion_keywords = collect_user_exclusion_keywords(
         db=db,
-        user_id=request.user_id,
+        user_id=effective_user_id,
         extra_exclusions=request.exclusions,
     )
     available_menus, excluded_count = filter_available_menus(all_menus, exclusion_keywords)
 
-    question_ids = [ans.question_id for ans in request.answers]
     questions = (
         db.query(OrderSheetQuestion)
         .filter(OrderSheetQuestion.id.in_(question_ids))
@@ -313,48 +337,77 @@ def create_order_sheet_recommendation(
                 matched_codes.append(q.question_code)
         scored_candidates.append((round(score, 4), matched_codes, menu))
 
-    top_items = select_diverse_menus(
-        db, scored_candidates, request.user_id, request.top_k,
+    top_details = select_diverse_menus_with_snapshots(
+        db=db,
+        candidates=scored_candidates,
+        user_id=effective_user_id,
+        top_k=request.top_k,
         total_weight=sum(float(q.importance_weight) for q, opt in validated_answers if opt.get("rules")),
     )
 
     rec_record = Recommendation(
-        user_id=request.user_id,
+        user_id=effective_user_id,
         shown_question_ids=[q.id for q, _ in validated_answers],
         answers_json=[
             {"question_id": q.id, "option_id": opt["option_id"]}
             for q, opt in validated_answers
         ],
-        recommended_menu_ids=[menu.id for _, _, menu in top_items],
+        recommended_menu_ids=[d.menu.id for d in top_details],
     )
     db.add(rec_record)
+    db.flush()
+
+    if effective_user_id is not None:
+        now = datetime.now(timezone.utc)
+        for rank_idx, detail in enumerate(top_details, start=1):
+            m = detail.menu
+            mkey = menu_group(m)
+            snapshot = RecommendationItemSnapshot(
+                recommendation_id=rec_record.id,
+                user_id=effective_user_id,
+                menu_id=m.id,
+                menu_key=mkey,
+                menu_base_name=(m.base_name or m.name or "").strip() or mkey,
+                menu_main_ingredient=(m.main_ingredient or "other").strip() or "other",
+                rank_position=rank_idx,
+                rule_score=detail.rule_score,
+                recent_meal_adjustment=detail.personal_result.recent_meal_adjustment,
+                personal_adjustment=detail.personal_result.personal_adjustment,
+                final_score=detail.final_score,
+                draw_weight=detail.personal_result.draw_weight,
+                feature_schema_version=FEATURE_SCHEMA_VERSION,
+                features_json=dict(detail.personal_result.features),
+                created_at=now,
+            )
+            db.add(snapshot)
+
     db.commit()
     db.refresh(rec_record)
 
     recommended_dtos = [
         RecommendedMenuDTO(
-            menu_id=menu.id,
-            food_code=menu.food_code,
-            name=format_menu_name(menu.name),
-            base_name=menu.base_name,
-            category_large=menu.category_large,
-            category_medium=menu.category_medium,
-            meal_type=menu.meal_type,
-            has_soup=menu.has_soup,
-            cooking_style=menu.cooking_style,
-            main_ingredient=menu.main_ingredient,
-            flavor_intensity=menu.flavor_intensity,
-            temperature=menu.temperature,
-            heaviness=menu.heaviness,
-            kcal=menu.kcal,
-            protein_g=menu.protein_g,
-            fat_g=menu.fat_g,
-            carb_g=menu.carb_g,
-            sodium_mg=menu.sodium_mg,
-            match_score=score,
-            matched_question_codes=matched_codes,
+            menu_id=d.menu.id,
+            food_code=d.menu.food_code,
+            name=format_menu_name(d.menu.name),
+            base_name=d.menu.base_name,
+            category_large=d.menu.category_large,
+            category_medium=d.menu.category_medium,
+            meal_type=d.menu.meal_type,
+            has_soup=d.menu.has_soup,
+            cooking_style=d.menu.cooking_style,
+            main_ingredient=d.menu.main_ingredient,
+            flavor_intensity=d.menu.flavor_intensity,
+            temperature=d.menu.temperature,
+            heaviness=d.menu.heaviness,
+            kcal=d.menu.kcal,
+            protein_g=d.menu.protein_g,
+            fat_g=d.menu.fat_g,
+            carb_g=d.menu.carb_g,
+            sodium_mg=d.menu.sodium_mg,
+            match_score=d.rule_score,
+            matched_question_codes=d.matched_codes,
         )
-        for score, matched_codes, menu in top_items
+        for d in top_details
     ]
 
     return OrderSheetRecommendResponse(
@@ -365,25 +418,31 @@ def create_order_sheet_recommendation(
     )
 
 
-def recalculate_question_weights(db: Session) -> dict[str, float]:
+def recalculate_question_weights(db: Session, *, commit: bool = True) -> dict[str, float]:
     """
     [4·5단계 피드백 누적 데이터 기반 ML 가중치 재학습]
-    누적된 RecommendationFeedback 로그의 (answer_match_results X, is_satisfied y)를 학습하여
-    질문별 조건 일치 시 만족 확률 향상도(Empirical Lift + L2 정규화 로지스틱 가중치)를 계산하고,
-    초기 initial_score와 결합해 MySQL의 importance_weight를 업데이트합니다.
+    추천×음식(menu_key) 단위 현재 유효 상태(RecommendationFeedbackState)를 우선 사용하여
+    동일 추천·음식의 재전송이나 수정으로 인해 전역 통계가 중복 가산되지 않도록 보장한다.
     """
     questions = db.query(OrderSheetQuestion).all()
-    feedbacks = [fb for fb in db.query(RecommendationFeedback).all() if fb.answer_match_results]
+    state_rows = db.query(RecommendationFeedbackState).all()
+    state_rec_ids = {st.recommendation_id for st in state_rows}
+    legacy_rows = [
+        fb
+        for fb in db.query(RecommendationFeedback).all()
+        if fb.recommendation_id not in state_rec_ids and fb.answer_match_results
+    ]
+    effective_votes = [st for st in state_rows if st.answer_match_results] + legacy_rows
 
-    if not feedbacks:
+    if not effective_votes:
         return {q.question_code: round(float(q.importance_weight), 4) for q in questions}
 
-    total_fb = len(feedbacks)
-    global_pos = sum(1 for fb in feedbacks if fb.is_satisfied)
+    total_fb = len(effective_votes)
+    global_pos = sum(1 for fb in effective_votes if fb.is_satisfied)
     base_rate = (global_pos + 1.0) / (total_fb + 2.0)
 
     stats: dict[str, dict[str, float]] = {}
-    for fb in feedbacks:
+    for fb in effective_votes:
         vec = fb.answer_match_results or {}
         y = 1.0 if fb.is_satisfied else 0.0
         for q_id_str, match_val in vec.items():
@@ -417,7 +476,10 @@ def recalculate_question_weights(db: Session) -> dict[str, float]:
         q.importance_weight = round(max(0.05, min(2.0, new_weight)), 4)
         updated[q.question_code] = q.importance_weight
 
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return updated
 
 
@@ -425,13 +487,33 @@ def record_recommendation_feedback(
     db: Session,
     recommendation_id: int,
     request: RecommendationFeedbackRequest,
+    user_id: int | None = None,
+    current_user: User | None = None,
+    idempotency_key: str | None = None,
 ) -> RecommendationFeedbackResponse:
     """
-    추천 결과에 대한 사용자(또는 4단계 개발팀) 피드백을 기록하고,
-    즉시 질문 가중치 ML 재학습을 수행해 MySQL에 반영합니다.
+    추천 결과에 대한 사용자 피드백 이력(RecommendationFeedback)과 현재 유효 상태(RecommendationFeedbackState)를
+    단일 트랜잭션으로 저장하고 질문 가중치를 재계산한다.
     """
-    rec = db.query(Recommendation).filter(Recommendation.id == recommendation_id).first()
+    effective_user_id = user_id
+    if current_user is not None:
+        locked_user = lock_user_and_verify_session(db, current_user)
+        effective_user_id = locked_user.id
+
+    try:
+        op_key = normalize_idempotency_key(idempotency_key)
+    except ValueError as exc:
+        raise RecommendationDomainException(str(exc), status_code=400) from exc
+
+    rec = (
+        db.query(Recommendation)
+        .filter(Recommendation.id == recommendation_id)
+        .with_for_update()
+        .first()
+    )
     if not rec:
+        raise RecommendationNotFoundException(recommendation_id)
+    if effective_user_id is not None and rec.user_id != effective_user_id:
         raise RecommendationNotFoundException(recommendation_id)
 
     target_menu_id = request.selected_menu_id
@@ -439,14 +521,45 @@ def record_recommendation_feedback(
         target_menu_id = rec.recommended_menu_ids[0]
     if target_menu_id not in (rec.recommended_menu_ids or []):
         raise InvalidOrderSheetException("해당 추천 결과에 포함된 메뉴만 평가할 수 있습니다.")
-    if request.user_id is not None and rec.user_id != request.user_id:
-        raise InvalidOrderSheetException("추천을 요청한 사용자와 피드백 사용자가 다릅니다.")
+
+    owner_user_id = effective_user_id if effective_user_id is not None else rec.user_id
+    payload_hash = compute_payload_hash(
+        {
+            "recommendation_id": int(recommendation_id),
+            "selected_menu_id": int(target_menu_id) if target_menu_id is not None else None,
+            "is_satisfied": bool(request.is_satisfied),
+        }
+    )
+
+    operation = None
+    if op_key is not None and owner_user_id is not None:
+        operation, is_existing = acquire_or_inspect_operation(
+            db,
+            user_id=owner_user_id,
+            auth_session_id=get_user_session_id(current_user) if current_user is not None else None,
+            scope="RECOMMENDATION_FEEDBACK",
+            operation_key=op_key,
+            payload_hash=payload_hash,
+        )
+        if is_existing:
+            if operation.payload_hash != payload_hash:
+                db.rollback()
+                raise RecommendationDomainException(
+                    "동일한 Idempotency-Key로 다른 피드백 내용을 전송할 수 없습니다. (IDEMPOTENCY_KEY_REUSED)",
+                    status_code=409,
+                )
+            if operation.status == "SUCCEEDED" and operation.response_json:
+                db.rollback()
+                return RecommendationFeedbackResponse(**operation.response_json)
 
     target_menu = (
         db.query(Menu).filter(Menu.id == target_menu_id).first()
         if target_menu_id is not None
         else None
     )
+    mkey = menu_group(target_menu) if target_menu is not None else f"menu:{target_menu_id}"
+    m_base = (target_menu.base_name or target_menu.name or mkey).strip() if target_menu is not None else mkey
+    m_ing = (target_menu.main_ingredient or "other").strip() if target_menu is not None else "other"
 
     answers = rec.answers_json or []
     q_ids = [a["question_id"] for a in answers if "question_id" in a]
@@ -458,6 +571,7 @@ def record_recommendation_feedback(
     q_map = {q.id: q for q in questions}
 
     answer_match_results: dict[str, float] = {}
+    matched_questions: list[OrderSheetQuestion] = []
     for ans in answers:
         qid = ans.get("question_id")
         opt_id = ans.get("option_id")
@@ -466,7 +580,6 @@ def record_recommendation_feedback(
             continue
         opt = next((o for o in (q.options_json or []) if o.get("option_id") == opt_id), None)
         rules = opt.get("rules", []) if opt else []
-        # 상관없음은 취향 신호가 아니므로 질문 중요도 학습에서 제외한다.
         if not rules:
             continue
 
@@ -475,28 +588,92 @@ def record_recommendation_feedback(
             matched = evaluate_option_rules(target_menu, rules)
 
         answer_match_results[str(q.id)] = 1.0 if matched else 0.0
-        if request.is_satisfied and matched:
-            q.positive_count = int(q.positive_count or 0) + 1
+        if matched:
+            matched_questions.append(q)
 
     feedback = RecommendationFeedback(
         recommendation_id=rec.id,
-        user_id=request.user_id or rec.user_id,
+        user_id=owner_user_id,
         selected_menu_id=target_menu_id,
+        menu_key=mkey,
+        menu_base_name=m_base,
+        menu_main_ingredient=m_ing,
+        operation_key=op_key,
         is_satisfied=request.is_satisfied,
         answer_match_results=answer_match_results,
     )
     db.add(feedback)
-    db.commit()
-    db.refresh(feedback)
+    db.flush()
 
-    updated_weights = recalculate_question_weights(db)
+    if owner_user_id is not None:
+        existing_state = (
+            db.query(RecommendationFeedbackState)
+            .filter(
+                RecommendationFeedbackState.recommendation_id == rec.id,
+                RecommendationFeedbackState.menu_key == mkey,
+            )
+            .with_for_update()
+            .first()
+        )
+        now = datetime.now(timezone.utc)
+        if existing_state is None:
+            state = RecommendationFeedbackState(
+                recommendation_id=rec.id,
+                user_id=owner_user_id,
+                selected_menu_id=target_menu_id,
+                menu_key=mkey,
+                menu_base_name=m_base,
+                menu_main_ingredient=m_ing,
+                is_satisfied=bool(request.is_satisfied),
+                answer_match_results=answer_match_results,
+                latest_feedback_id=feedback.id,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(state)
+            if request.is_satisfied:
+                for q in matched_questions:
+                    q.positive_count = int(q.positive_count or 0) + 1
+        else:
+            prev_satisfied = bool(existing_state.is_satisfied)
+            new_satisfied = bool(request.is_satisfied)
+            existing_state.selected_menu_id = target_menu_id
+            existing_state.menu_base_name = m_base
+            existing_state.menu_main_ingredient = m_ing
+            existing_state.is_satisfied = new_satisfied
+            existing_state.answer_match_results = answer_match_results
+            existing_state.latest_feedback_id = feedback.id
+            if prev_satisfied != new_satisfied:
+                existing_state.updated_at = now
+                for q in matched_questions:
+                    if new_satisfied:
+                        q.positive_count = int(q.positive_count or 0) + 1
+                    else:
+                        q.positive_count = max(0, int(q.positive_count or 0) - 1)
+    else:
+        if request.is_satisfied:
+            for q in matched_questions:
+                q.positive_count = int(q.positive_count or 0) + 1
 
-    return RecommendationFeedbackResponse(
+    db.flush()
+    updated_weights = recalculate_question_weights(db, commit=False)
+
+    response = RecommendationFeedbackResponse(
         feedback_id=feedback.id,
         recommendation_id=rec.id,
         is_satisfied=feedback.is_satisfied,
         updated_weights=updated_weights,
     )
+
+    if operation is not None:
+        operation.status = "SUCCEEDED"
+        operation.resource_id = str(feedback.id)
+        operation.response_status = 200
+        operation.response_json = response.model_dump()
+        operation.updated_at = utc_now()
+
+    db.commit()
+    return response
 
 
 def tune_question_weights(

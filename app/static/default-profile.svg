@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="WhatBap default profile">
+  <rect width="128" height="128" rx="64" fill="#fff1d6"/>
+  <circle cx="64" cy="64" r="41" fill="white" stroke="#e79c35" stroke-width="5"/>
+  <circle cx="51" cy="59" r="4" fill="#69421e"/>
+  <circle cx="77" cy="59" r="4" fill="#69421e"/>
+  <path d="M49 75 Q64 90 79 75" fill="none" stroke="#69421e" stroke-width="5" stroke-linecap="round"/>
+</svg>

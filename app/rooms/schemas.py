@@ -1,9 +1,12 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class RoomCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     max_members: int = Field(default=8, ge=2, le=100)
 
 
@@ -84,3 +87,12 @@ class RoomMemberLeaveResponse(BaseModel):
     member_count: int
     completed_member_count: int
     all_members_completed: bool
+
+
+class RoomOperationResponse(BaseModel):
+    operation_key: str
+    status: str
+    scope: str | None = None
+    room_id: str | None = None
+    room_status: str | None = None
+    result: dict[str, Any] | None = None

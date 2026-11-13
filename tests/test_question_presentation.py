@@ -7,6 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from app.auth.dependencies import get_current_user
 from app.core.database import Base, get_db
 from app.main import handle_recommendation_domain_exception
 from app.menus.models import Menu, OrderSheetQuestion
@@ -14,6 +15,7 @@ from app.recommend.common import RecommendationDomainException, evaluate_option_
 from app.recommend.order_sheet import _to_question_dto, calculate_question_entropy_score
 from app.recommend.question_pool import build_candidate_question_pool
 from app.recommend.router import router
+from app.users.models import User
 from scripts.seed_menus import seed_question_pool
 
 
@@ -112,11 +114,15 @@ def test_http_legacy_labels_display_yes_no_and_submit_original_ids():
                      for index, (name, carbs) in enumerate((("메뉴A", 14), ("메뉴B", 16)))]
             db.add_all([row, *menus])
             db.commit()
+            user = User(kakao_id=701999, nickname="표시테스터")
+            db.add(user)
+            db.commit()
             before = deepcopy(row.options_json)
             app = FastAPI()
             app.include_router(router)
             app.add_exception_handler(RecommendationDomainException, handle_recommendation_domain_exception)
             app.dependency_overrides[get_db] = lambda: db
+            app.dependency_overrides[get_current_user] = lambda: user
             with TestClient(app) as client:
                 response = client.get("/api/recommendations/order-sheet/questions")
                 assert response.status_code == 200

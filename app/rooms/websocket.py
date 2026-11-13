@@ -2,23 +2,25 @@ import asyncio
 from collections import defaultdict
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
-from jwt import InvalidTokenError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.security import decode_access_token
+from app.auth.errors import AuthError
+from app.auth.sessions import authenticate_access_token
+from app.auth.websocket_auth import ConnectionAuthentication
+from app.auth.cookie_router import allowed_web_origins
 from app.rooms.models import Room, RoomMember
 from app.rooms.service import (
     clear_host_disconnected,
     close_room_after_host_disconnect,
     delete_closed_room,
+    expire_room_member_after_grace,
     mark_host_disconnected,
     mark_room_member_disconnected,
     mark_room_member_offline_after_grace,
     mark_room_member_online,
 )
-from app.users.models import User
 
 
 AUTH_TIMEOUT_SECONDS = 5
@@ -36,6 +38,7 @@ class RoomConnectionManager:
             lambda: defaultdict(set)
         )
         self._host_disconnect_tasks: dict[str, asyncio.Task] = {}
+        self._auth_states: dict[WebSocket, ConnectionAuthentication] = {}
         self._member_disconnect_tasks: dict[tuple[str, int], asyncio.Task] = {}
 
     def connect(
@@ -43,9 +46,12 @@ class RoomConnectionManager:
         room_public_id: str,
         user_id: int,
         websocket: WebSocket,
+        auth_state: ConnectionAuthentication | None = None,
     ) -> None:
         self._connections[room_public_id].add(websocket)
         self._user_connections[room_public_id][user_id].add(websocket)
+        if auth_state is not None:
+            self._auth_states[websocket] = auth_state
 
     def disconnect(
         self,
@@ -53,6 +59,7 @@ class RoomConnectionManager:
         user_id: int,
         websocket: WebSocket,
     ) -> bool:
+        self._auth_states.pop(websocket, None)
         room_connections = self._connections.get(room_public_id)
         if room_connections is None:
             return False
@@ -138,7 +145,7 @@ class RoomConnectionManager:
         async def send(websocket: WebSocket) -> None:
             try:
                 await asyncio.wait_for(
-                    websocket.send_json(message),
+                    self._auth_states.get(websocket, websocket).send_json(message),
                     timeout=SEND_TIMEOUT_SECONDS,
                 )
             except Exception:
@@ -155,6 +162,9 @@ class RoomConnectionManager:
         for _, user_id in member_task_keys:
             self.cancel_member_disconnect(room_public_id, user_id)
         for websocket in connections:
+            state = self._auth_states.pop(websocket, None)
+            if state is not None:
+                state.closed = True
             try:
                 await websocket.close(code=4000, reason="Room closed")
             except Exception:
@@ -177,6 +187,9 @@ class RoomConnectionManager:
         if not users:
             self._user_connections.pop(room_public_id, None)
         for websocket in connections:
+            state = self._auth_states.pop(websocket, None)
+            if state is not None:
+                state.closed = True
             try:
                 await websocket.close(code=4001, reason="Room member left")
             except Exception:
@@ -227,34 +240,32 @@ async def mark_member_offline_after_grace(
     try:
         await asyncio.sleep(settings.ROOM_MEMBER_DISCONNECT_GRACE_SECONDS)
         with Session(bind=database_bind) as db:
-            changed = await asyncio.to_thread(
-                mark_room_member_offline_after_grace,
+            left_member = await asyncio.to_thread(
+                expire_room_member_after_grace,
                 db,
                 room_public_id,
                 user_id,
             )
-        if changed:
+        if left_member is not None:
             await room_connection_manager.broadcast(
                 room_public_id,
                 {
                     "type": "room.updated",
                     "room_id": room_public_id,
-                    "reason": "MEMBER_OFFLINE",
+                    "reason": "MEMBER_LEFT",
                     "user_id": user_id,
+                    "member_count": left_member.member_count,
+                    "completed_member_count": left_member.completed_member_count,
+                    "all_members_completed": left_member.all_members_completed,
                 },
             )
+            await room_connection_manager.close_user_connections(room_public_id, user_id)
     except asyncio.CancelledError:
         return
 
 
 def is_allowed_origin(origin: str | None) -> bool:
-    if origin is None:
-        return True
-    return origin in {
-        settings.FRONTEND_BASE_URL.rstrip("/"),
-        "http://localhost:8081",
-        "http://127.0.0.1:8081",
-    }
+    return origin in allowed_web_origins()
 
 
 async def close_websocket(websocket: WebSocket, code: int, reason: str) -> None:
@@ -294,15 +305,11 @@ async def room_websocket(
             return
 
         try:
-            payload = decode_access_token(auth_message["access_token"])
-            user_id = int(payload["sub"])
-        except (InvalidTokenError, KeyError, TypeError, ValueError):
-            await close_websocket(websocket, 4401, "Invalid access token")
-            return
-
-        user = db.get(User, user_id)
-        if user is None:
-            await close_websocket(websocket, 4401, "Invalid access token")
+            user, payload = authenticate_access_token(db, auth_message["access_token"])
+        except AuthError as error:
+            await websocket.send_json({"type": "auth.error", "request_id": None,
+                                       "code": error.code, "message": error.detail["message"]})
+            await close_websocket(websocket, 1011 if error.status_code >= 500 else 4401, "Authentication failed")
             return
 
         room = (
@@ -348,13 +355,15 @@ async def room_websocket(
                 )
         # A long-lived socket must not hold a database connection after auth.
         db.close()
+        auth_state = ConnectionAuthentication(websocket, payload, auth_message["access_token"], database_bind)
         room_connection_manager.connect(
             room_id,
             authenticated_user_id,
             websocket,
+            auth_state,
         )
         connected = True
-        await websocket.send_json(
+        await auth_state.send_json(
             {
                 "type": "connection.ready",
                 "room_id": room_id,
@@ -373,9 +382,20 @@ async def room_websocket(
             )
 
         while True:
-            message = await websocket.receive_json()
+            try:
+                message = await asyncio.wait_for(websocket.receive_json(), timeout=auth_state.remaining_seconds)
+            except asyncio.TimeoutError:
+                await auth_state.expire_if_due()
+                break
+            except (ValueError, TypeError):
+                await close_websocket(websocket, 4400, "Invalid message")
+                break
             if isinstance(message, dict) and message.get("type") == "ping":
-                await websocket.send_json({"type": "pong"})
+                await auth_state.send_json({"type": "pong"})
+            elif isinstance(message, dict) and message.get("type") == "auth.refresh":
+                await auth_state.refresh(message)
+                if auth_state.closed:
+                    break
     except WebSocketDisconnect:
         pass
     finally:

@@ -5,6 +5,1190 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-13
 
+### #39 T02~T09 개인 데이터·방 유예/취소·프로필·계정 전환/병합/로그아웃·MySQL 마이그레이션 및 동시성 검증 구현
+
+#### 변경 이유 및 내용
+
+- `docs/plans/39-design-baseline.md`와 확정된 공통 선택(`R1A`~`R5A`, `M1A`~`M4A`)을 기준으로 기존 T01 및 사용자 변경을 보존하면서 T02~T09를 의존 순서대로 구현했다.
+- **T02 (개인 데이터·추천·피드백·개인화 모델)**:
+  - 추천·질문·피드백 API에 Bearer JWT 인증을 필수로 적용하고 요청 본문 `user_id`를 제거했다.
+  - 식약처 19대 알레르기 및 8대 섭취불가 재료군(`M2A`) 표준 카탈로그 조회·유형별 전체 교체 API(`GET/PUT /api/users/me/allergies`, `GET/PUT /api/users/me/unables`)와 미매핑 레거시 제외 항목 보호(`409 EXCLUSION_MAPPING_REQUIRED`)·배치 매핑 스크립트(`scripts/map_legacy_exclusions.py`)를 구현했다.
+  - 추천 생성 시점 특징 스냅샷(`RecommendationItemSnapshot`)과 추천·메뉴별 최신 유효 1표 상태(`RecommendationFeedbackState`)를 분리해 피드백 수정 시 원본 이력(`RecommendationFeedback`)을 보존하면서 유효 상태와 전역 질문 통계만 단일 트랜잭션으로 재계산하도록 변경했다.
+  - 다중 신호 개인화 로지스틱 추론(`±5%` 보정 상한, 90일 반감기, 수축 `k=5`, 최근 3일 동일 식사 특징 반영, 근접 후보 가중 추첨 `beta=0.5`, 아티팩트 검증 실패 시 자동 폴백)과 오프라인 학습 CLI(`scripts/train_personal_model.py`)를 구현했다.
+- **T03 (방 60초 재접속 유예·재시작 복구·방 작업 취소)**:
+  - 다중 WebSocket 연결 중 마지막 연결 종료 시에만 `disconnected_at`을 기록하고, 60초 경과 시 일반 멤버 자동 퇴장(주문서 삭제·인원 재계산·`member_left` 브로드캐스트) 및 호스트 방 종료(`HOST_DISCONNECTED`)를 수행하도록 구현했다.
+  - 앱 시작 시 `recover_rooms_after_restart`로 인메모리 연결이 없는 온라인 멤버들을 유예 상태로 전환하도록 구성하고, `Idempotency-Key` 기반 방 생성/참여 및 방 작업 상태 조회·취소 API(`GET /api/room-operations/{operation_key}`, `POST /api/room-operations/{operation_key}/cancellation`)를 추가했다.
+- **T04 & T05 (닉네임 편집 및 프로필 사진 업로드/삭제/서빙/고아 정리)**:
+  - `PATCH /api/users/me/nickname`(앞뒤 공백 제거 후 2~20자 한글/영문/숫자/공백 및 `nickname_key` 전역 유일성 검증, 출처 플래그 기록)을 구현했다.
+  - `PUT /api/users/me/profile-image`, `DELETE /api/users/me/profile-image`, `GET /uploads/profile-images/{filename}`(`R5A`)을 구현했다. 5MB 스트리밍 제한, `BoundedSemaphore(1)` 기반 동시 디코딩 제한, `JPEG`/`PNG`/`WebP` 정지 이미지·1,200만 픽셀 상한 검증, EXIF 회전 반영 및 메타데이터 제거(`Image.new` + `paste`), 긴 변 512px 리사이즈, 임시 파일 원자적 교체, 참조 카운트 기반 삭제 및 고아 파일 정리(`cleanup_orphan_profile_images`)를 적용했다.
+- **T06, T07, T08 (계정 전환 2단계 Prepare/Commit·무손실 이관/병합·로그아웃 왕복·응답 유실 복구)**:
+  - `POST /api/auth/transitions`, `POST /api/auth/transitions/{transition_id}/commit`, `GET /api/auth/transitions/{transition_id}`, `POST /api/auth/transitions/{transition_id}/recovery`를 구현했다.
+  - `KAKAO_LINK` 확정 시 `KakaoLinkGuard(kakao_id) -> User(id ASC) -> AuthSession(id ASC) -> Room/Task` 고정 잠금 순서 아래 방 참여·유예 여부를 검증하고, 제외 조건 합집합(100개 초과 보존)·식사 기록·추천/피드백/스냅샷/유효 상태·질문 선택 상태·멱등 작업 기록·필드별 프로필 우선순위(`is_legacy_kakao`/`*_edited` 최우선, 이후 최초 생성 UUID 출처 오름차순)를 무손실 병합한 뒤 원본 UUID 사용자의 세션과 `User` 행을 물리 삭제(`R3A`)하도록 구현했다.
+  - MySQL InnoDB `REPEATABLE READ`에서 잠금 대기 후 상대 트랜잭션의 커밋 결과를 즉시 관측하도록 `commit_account_transition`, `lock_user_and_verify_session`, `has_active_or_pending_room_activity` 내부 조회를 잠금 읽기(`FOR UPDATE`)로 통일했다.
+  - `LOGOUT` 확정 시 카카오 계정 데이터와 타 기기 세션은 보존하고 현재 브라우저 세션만 폐기한 뒤 새 UUID 사용자와 정식 세션을 원자적으로 발급하도록 구현했다.
+- **T09 (명시적·재개 가능 MySQL 마이그레이션 및 동시성/E2E 검증)**:
+  - `scripts/migrate_issue39.py`(`--check`, `--apply --maintenance-confirmed`, `--verify`)를 구현해 레거시 스키마에서 T01~T08 전체 테이블·컬럼·인덱스 전환과 유효 피드백 상태 백필 및 부분 실패 후 재개·원본 데이터 지문 검증을 지원했다.
+
+#### 주요 변경 파일
+
+- `app/core/config.py`, `app/main.py`
+- `app/auth/models.py`, `app/auth/schemas.py`, `app/auth/dependencies.py`, `app/auth/sessions.py`, `app/auth/operations.py`, `app/auth/cookie_router.py`, `app/auth/transitions.py`, `app/auth/transition_router.py`
+- `app/users/models.py`, `app/users/schemas.py`, `app/users/repository.py`, `app/users/service.py`, `app/users/router.py`, `app/users/exclusion_mapping.py`, `app/users/profile_image.py`
+- `app/menus/models.py`, `app/recommend/common.py`, `app/recommend/schemas.py`, `app/recommend/order_sheet.py`, `app/recommend/variety.py`, `app/recommend/personal_model.py`, `app/recommend/router.py`
+- `app/rooms/schemas.py`, `app/rooms/service.py`, `app/rooms/router.py`, `app/rooms/websocket.py`, `app/rooms/cleanup.py`
+- `scripts/map_legacy_exclusions.py`, `scripts/train_personal_model.py`, `scripts/migrate_issue39.py`
+- `tests/test_t02_personal_data.py`, `tests/test_t03_rooms.py`, `tests/test_t04_t05_profile.py`, `tests/test_t06_t07_t08_transitions.py`, `tests/test_issue39_mysql_concurrency.py`
+- `docs/USER_EXCLUSIONS_API.md`, `docs/UUID_AUTH_API.md`, `LOG.md`
+
+#### API 변경
+
+- 추가:
+  - `GET /api/recommendations/unable-ingredients`
+  - `GET /api/users/me/allergies`, `PUT /api/users/me/allergies`
+  - `GET /api/users/me/unables`, `PUT /api/users/me/unables`
+  - `PATCH /api/users/me/nickname`
+  - `PUT /api/users/me/profile-image`, `DELETE /api/users/me/profile-image`, `GET /uploads/profile-images/{filename}`
+  - `GET /api/room-operations/{operation_key}`, `POST /api/room-operations/{operation_key}/cancellation`
+  - `POST /api/auth/transitions`, `POST /api/auth/transitions/{transition_id}/commit`, `GET /api/auth/transitions/{transition_id}`, `POST /api/auth/transitions/{transition_id}/recovery`
+- 수정:
+  - `GET /api/recommendations/random`, `GET /api/recommendations/order-sheet/questions`, `POST /api/recommendations/order-sheet`, `POST /api/recommendations/{recommendation_id}/feedback`: Bearer JWT 필수화 및 요청 본문·쿼리 `user_id` 거절, 피드백 `Idempotency-Key` 지원 (`GET /api/recommendations/random` 쿼리·최소 메뉴 응답·`no-store` 헤더 유지)
+  - `POST /api/users/me/meals`, `POST /api/rooms`, `POST /api/rooms/{room_id}/join`: 선택 헤더 `Idempotency-Key` 지원
+  - `POST /api/auth/tokens`: 선택 헤더 `X-Whatbob-Auth-Context` 검증 지원
+
+#### DB 변경
+
+- `users`: 프로필 편집/출처 컬럼 추가 (`nickname_edited`, `nickname_source_edited`, `nickname_source_uuid`, `nickname_source_id`, `nickname_source_created_at`, `profile_image_edited`, `profile_image_source_edited`, `profile_image_source_uuid`, `profile_image_source_id`, `profile_image_source_created_at`)
+- `user_food_exclusions`: `catalog_code`, `catalog_version` 컬럼 및 `ix_user_food_exclusions_catalog_code` 인덱스 추가
+- `recommendation_feedbacks`: `menu_key`, `menu_base_name`, `menu_main_ingredient`, `operation_key` 컬럼 및 인덱스 추가
+- 신규 테이블: `request_operations`, `account_transitions`, `kakao_link_guards`, `recommendation_feedback_states`, `recommendation_item_snapshots`
+- 마이그레이션 스크립트: `scripts/migrate_issue39.py`
+
+#### 검증
+
+- 실행 완료:
+  - 기능별 및 신규 통합 테스트(SQLite): `tests/test_t02_personal_data.py`(11 passed), `tests/test_t03_rooms.py`(6 passed), `tests/test_t04_t05_profile.py`(6 passed), `tests/test_t06_t07_t08_transitions.py`(5 passed), 추천/방/인증 회귀 스위트 전체 통과.
+  - 실제 MySQL 8.4.13 동시성·마이그레이션·E2E 검증: `MYSQL_TEST_DATABASE_URL` 기준 `tests/test_issue39_mysql_concurrency.py`, `tests/test_uuid_auth_mysql.py`, `tests/test_rooms_mysql.py` 실행 → `13 passed` (준비 쿠키 동시 사용자 생성, 동시 동일 닉네임 저장, 동시 제외 교체, 동시 피드백 수정, 서로 다른 2개 UUID의 동일 신규 `kakao_id` 동시 연결, 방 생성/참여와 계정 전환 동시 경합, 원본 이관과 식사 저장/토큰 갱신/닉네임 선점 4자 동시 경합, 마지막 연결 종료·재접속·만료 정리 동시 경합, 레거시 스키마 마이그레이션·부분 실패 재개·무손실 검증, T01~T08 전체 사용자 여정 E2E).
+  - 전체 테스트 스위트(`.tools\venv\Scripts\python.exe -m pytest -q -rs`, `MYSQL_TEST_DATABASE_URL` 포함): 총 344개 테스트 중 342개 전부 통과 (`342 passed, 2 failed`; 실패 2건은 기존 `app/menus/display.py` 변경으로 인한 `tests/test_user_meals.py`의 `'파스타 (토마토)' != '토마토파스타'` 기존 기준선 실패로 보존됨).
+- 미실행 및 사유:
+  - 실제 교차 사이트 HTTPS 브라우저 쿠키 수용/차단 검증: 로컬 백엔드 전용 작업 환경이며 배포된 프론트엔드-백엔드 HTTPS 교차 도메인 브라우저 환경이 연결되어 있지 않음.
+  - 실제 1GB RAM 운영 서버 환경의 부하·메모리 실측 검증: 로컬 Windows 개발 환경에서 검증했으며 운영 1GB 리눅스 인스턴스 및 운영 DB에는 접근하지 않음.
+
+#### 남은 작업 및 주의 사항
+
+- 스테이징/운영 배포 시 점검 모드에서 DB 백업 후 `python -m scripts.migrate_issue39 --check`, `--apply --maintenance-confirmed`, `--verify` 순서로 스키마 전환을 수행하고, 필요 시 `python -m scripts.map_legacy_exclusions --apply --maintenance-confirmed`로 레거시 제외 키워드를 매핑한다.
+- 프론트엔드 통합 후 실제 HTTPS 환경에서 교차 사이트 쿠키(`SameSite=None; Secure`) 동작과 1GB 운영 인스턴스 메모리 사용량을 확인한다.
+
+### #39 주요 아키텍처 선택과 통합 설계의 구현 인계 정리
+
+#### 변경 이유 및 내용
+
+- 사용자가 처리 시나리오를 이해했음을 확인한 뒤 T02~T09 주요 선택·통합 설계·검증 계획의 읽기 순서와 다음 구현 기준을 한 문서로 정리했다. 이미 선택한 R/M 항목을 재질문하지 않는다.
+- 설계에서 정한 규칙과 실제 기존 값 대응·메뉴 재료 연결·학습 데이터/품질·MySQL/브라우저/1GB 검증을 구분했다. 세부 기술 초안 전체를 사용자가 개별 승인했거나 구현 완료한 것으로 기록하지 않았다.
+- 다음 작업 예정일과 순서를 기록했으며 자동 실행 예약·코드 구현·운영 변경은 수행하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-design-baseline.md`, `docs/plans/39-design-completion-plan.md`, `docs/plans/39-handoff-2026-11-13.md`, `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 인계 문서 로컬 링크·T02~T09 범위/선택 요약·공백 및 `git diff --check` 검사 통과. 앱·DB·브라우저·학습·1GB 부하 테스트 미실행: 설계 인계 문서만 정리했다.
+
+#### 남은 작업 및 주의 사항
+
+- 2026-11-14 구현 및 실제 검증. 기존 사용자 변경·T01 구현을 보존하고 기준선 테스트부터 확인한다. 설계 문서 작성 완료를 운영 안정성/추천 품질 검증으로 보고하지 않는다.
+
+### #39 M1A·M2A·M3A·M4A 설계 선택 확정과 처리 시나리오 설명
+
+#### 변경 이유 및 내용
+
+- 사용자가 M1A·M2A·M3A·M4A를 선택했다. 개인 보정 최대 ±5점·90일 반감기·k=5·근접 추첨 beta=0.5, 섭취 불가 8재료군, 별도 기존 환경 주 1회 점검/수동 학습, 사진 5MB·1,200만 픽셀 이하/긴 변 512px 정지 이미지 정규화를 설계 기준으로 기록했다.
+- 기존 최신 불만족 0.35 감점 교체·모델 불가 시 개인 보정 없는 기본 추천도 M1A 범위로 기록했다. 작은 평가 증거의 완화, 이력 보존, 현재 개인 입력 갱신과 모델 전체 재학습을 구분했다.
+- 선택 문서·통합 설계·T02 D15·진행표·인계·ADR의 현재 상태를 갱신했다. 사용자가 구체화한 핵심의 의미를 질문해 평가 수정/누적, 추천 당시 기록, 계정 이관/응답 유실, 방 마감 시각, 테스트 계획을 사용자 사례로 설명한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-final-design-choices.md`, `docs/plans/39-implementation-architecture.md`, `docs/plans/39-design-completion-plan.md`, `docs/plans/39-t02-personal-data-architecture.md`, `docs/plans/39-handoff-2026-11-13.md`, `docs/plans/39-cross-feature-architecture-checklist.md`, `docs/plans/39-validation-and-handoff.md`, `docs/adr/0003-account-transition-and-runtime-decisions.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. 평가/사진 정책은 구현 전 설계 확정이다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- M1A·M2A·M3A·M4A 선택 상태, 8개 문서 로컬 링크·코드 블록 짝·공백 및 `git diff --check` 검사 통과. 앱·DB·학습·사진 처리·브라우저·1GB 부하 검증 미실행: 설계 문서만 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- 기술 초안의 처리 순서·실패 시나리오 설명과 최종 검토. 실제 기존 값 대응·재료 매핑·모델 품질·환경 용량은 내일 구현 후 검증한다. 선택을 구현 완료로 기록하지 않는다.
+
+### #39 T02~T09 통합 기술 아키텍처와 T09 검증 계획 초안 작성
+
+#### 변경 이유 및 내용
+
+- 승인된 T02 10항목과 R1A·R2A·R3A·R4A·R5A를 바탕으로 DB 확장·API·트랜잭션/잠금·멱등 작업·추천 시점 학습 입력·모델 교체/대체·방 복구·프로필/파일 실패·계정 전환/원본 삭제의 기술 초안을 통합했다. 선택 정책은 ADR-0003에 따로 기록했다.
+- 실제 코드는 평가/질문 통계/인증의 중간 commit과 인메모리 방 연결을 사용한다. 이를 구현 완료로 간주하지 않고 Service 최상위 원자성·일관된 잠금·복구 작업·고아 파일 정리의 후속 변경으로 명시했다.
+- 로컬 메뉴 JSON/CSV 7,503행의 스키마·대표 재료 분류 7종·other 2,166행·빈 태그 736행을 확인했다. 전체 원재료표가 없으므로 코드 catalog와 실제 재료 매핑의 검증을 분리했다. 운영 DB는 조회하지 않았다.
+- T09에 명세 대응·실제 MySQL 경쟁 11종·응답 유실·마이그레이션 재실행·브라우저·1GB 용량 검증과 내일 구현 순서를 작성했다. 새 테스트 통과나 실제 추천 품질을 주장하지 않았다.
+- 초기 보정 강도/최근성·재료 범위·학습 위치·사진 픽셀/정규화의 M1~M4를 모두 미선택으로 제시한다. 기존 5MB 제한에 새 픽셀 제한을 사용자 선택 없이 추가하지 않았다. T02/공통 선택/인계/설계 진행표에 최신 링크를 연결했다.
+- 기존 10% 근접 후보 균등 추첨은 작은 학습 보정만으로 실제 선택 확률이 바뀌지 않을 수 있어, M1 안에 상한이 있는 가중 추첨 전환을 명시적 추가 선택으로 포함했다. 기존 종류별 중복 방지·근접 범위·최근 노출 규칙은 보존하는 제안이며 실행·승인으로 간주하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/adr/0003-account-transition-and-runtime-decisions.md`
+- `docs/plans/39-implementation-architecture.md`, `docs/plans/39-final-design-choices.md`, `docs/plans/39-validation-and-handoff.md`
+- `docs/plans/39-design-completion-plan.md`, `docs/plans/39-t02-personal-data-architecture.md`, `docs/plans/39-handoff-2026-11-13.md`, `docs/plans/39-cross-feature-architecture-checklist.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. 경로/DTO/오류/작업 키는 통합 기술 초안에 기록했다.
+
+#### DB 변경
+
+- 없음. 스키마 표·guard·상태/스냅샷·작업 이력과 마이그레이션 절차는 설계 제안이며 적용하지 않았다.
+
+#### 검증
+
+- 실제 코드·명세·로컬 메뉴 스키마와 Google·scikit-learn·MySQL·Pillow 공식 자료를 대조했다. 8개 문서 링크·코드 블록 짝/공백, R 5개 선택·M 4묶음/8개 미선택, 점수/가중치 예시·로컬 데이터 수와 `git diff --check` 검사 통과. 앱·DB·브라우저·모델·1GB 부하 테스트 미실행: 설계 문서만 작성했다.
+
+#### 남은 작업 및 주의 사항
+
+- M1~M4 선택·질문과 통합 기술 초안 검토. 실제 기존 값 대응·재료 매핑·모델 품질·MySQL/브라우저/1GB 용량 검증은 내일 구현 후 수행한다. GitHub 이슈 게시·커밋·배포·운영 DB 변경은 수행하지 않았다.
+
+### #39 R5A 사진 URL 선택으로 공통 아키텍처 5묶음 결정 완료
+
+#### 변경 이유 및 내용
+
+- 사용자가 R5A를 선택해 사진 조회 URL에는 별도 인증·방 참여 검사·서명 만료를 적용하지 않는 정책을 기록했다. 본인 화면·방 참여자 표시만 제공하고 클릭·확대·공유 기능을 만들지 않는 UI 요구는 유지한다.
+- 업로드·교체·삭제의 본인 인증·소유권 검사와 안전한 파일 검증·참조 보존은 그대로 유지한다. R5B·R5C는 비교 제안으로 남기고 채택하지 않았다. 주소 자체의 비노출이나 외부 접근 차단을 보장하는 것으로 기록하지 않았다.
+- 최종 공통 선택 R1A·R2A·R3A·R4A·R5A를 정리했다. 정책 선택 완료와 세부 기술 계약·구현 완료를 구분한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-cross-feature-architecture-checklist.md`, `docs/plans/39-design-completion-plan.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. 사진 조회 정책만 설계 문서에 확정했다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- R1A·R2A·R3A·R4A·R5A의 5개 선택 상태, 로컬 링크 및 `git diff --check` 통과. 앱·DB 테스트 미실행: 설계 문서만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- T02~T09 데이터·API·상태 전이·실패/동시성·자원 예산과 검증 계획 구체화. 오늘 설계·내일 구현 일정을 유지한다.
+
+### #39 단일 API 프로세스 선택과 비공개 프로필 이미지 접근 대안 보완
+
+#### 변경 이유 및 내용
+
+- 사용자가 R1A를 선택해 단일 API 프로세스를 설계 기준으로 기록했다. RAM 1GB·MySQL 동시 실행 제약을 유지하며 운영 설정 변경이나 처리 용량 검증은 수행하지 않았다.
+- 프로필 사진 주소를 외부에 배포하는 기능을 의도하지 않는다는 설명을 반영했다. 사진은 본인·방 참여자 화면에 표시하고 클릭·확대·공유 기능을 만들지 않는다.
+- 앞선 A/B 선택지가 요청마다 조회 권한을 검사하는 방식을 빠뜨린 점을 보완해 R5C를 추가 제안했다. 주소 비노출의 절대 보장과 주소만으로 접근할 수 없게 하는 인가를 구분했다. R5C는 사용자 선택 전이며 코드 구현은 하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-cross-feature-architecture-checklist.md`, `docs/plans/39-design-completion-plan.md`, `LOG.md`
+
+#### API 변경
+
+- 없음. 보호 이미지 API는 추가 설계 제안이다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- MDN Fetch·Blob URL 공식 자료 확인. R1A·R2A·R3A·R4A 선택과 R5C 미선택 상태, 로컬 링크 및 `git diff --check` 통과. 앱·DB 테스트 미실행: 설계 문서만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- R5 접근 정책 선택과 전체 기술 계약·검증 계획 통합. 사진을 이미 수신한 사람의 저장·재배포 방지를 보장하는 설계로 표현하지 않는다.
+
+### #39 1GB 백엔드·DB 동시 운영 제약과 프로필 사진 표시 범위 확인
+
+#### 변경 이유 및 내용
+
+- 사용자가 백엔드와 MySQL이 같은 1GB 서버에서 실행됨을 확인했다. 다중 API 프로세스·동일 호스트 메시지 시스템이 메모리·연결 풀 비용을 늘릴 수 있음을 설계 제약으로 기록했다. R1A를 추천하지만 사용자의 선택이나 실제 용량 검증으로 기록하지 않았다.
+- 프로필 사진은 본인 화면과 방 참여자 표시만 제공하고 클릭·확대·상세 보기는 제공하지 않는 요구를 기록했다. 비클릭 이미지도 표시용 요청이 필요하므로 R5 링크 접근 정책과 구분했다. R5A/B는 아직 미선택이다.
+- 모델 학습을 요청 밖에서 실행하는 것과 1GB 호스트 자원 분리는 별개임을 명시했다. 학습 실행 자원과 운영 메모리는 미측정이며 실행 코드는 변경하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-cross-feature-architecture-checklist.md`, `docs/plans/39-design-completion-plan.md`, `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 저장소 실행 관련 설정·의존성과 FastAPI·MDN 공식 설명을 확인했다. 문서 제약·기존 3개 선택 유지·로컬 링크 및 `git diff --check` 검사 통과. 실제 운영 worker 수·메모리·부하 테스트는 미실행: 운영 접근 없이 설계 제약만 기록했다.
+
+#### 남은 작업 및 주의 사항
+
+- R1·R5 선택과 1GB 자원 예산·부하 검증 계획 구체화. 코드 구현·운영 설정 변경은 수행하지 않았다.
+
+### #39 두 단계 계정 전환·원본 UUID 물리 삭제·탭 동기화 설계 선택
+
+#### 변경 이유 및 내용
+
+- 사용자가 R2A·R3A·R4A를 선택했다. 전환 전 복구용 준비 비밀값을 전달하고 확정하는 방식, 기록 이관·참조·인증 정리 후 원본 사용자 행 삭제, 탭 알림과 서버 인증 재확인을 설계 정책으로 기록했다.
+- 원본 삭제 후에도 성공 작업·대상 인증의 복구 근거가 유지돼야 한다는 R2A/R3A 결합 조건을 명시했다. 세부 API·작업 수명·테이블과 실제 삭제는 구현하지 않았다.
+- R1은 단일/복수 프로세스의 전달 흐름·장애 범위·전체 연결 확인·유실 복구·운영 비용을 보충했다. R5는 사진 조회 권한과 만료 링크 예시·다운로드 후 한계를 보충했다. 두 항목은 사용자 선택 대기로 유지한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-cross-feature-architecture-checklist.md`, `docs/plans/39-account-transition-contract.md`, `docs/plans/39-design-completion-plan.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. R2A·R4A의 정책 선택만 기록했다.
+
+#### DB 변경
+
+- 없음. R3A의 물리 삭제와 복구 참조 정책은 설계이며 아직 실행하지 않았다.
+
+#### 검증
+
+- 실제 연결 관리자와 FastAPI·Redis·AWS 공식 자료를 확인했다. R2A·R3A·R4A만 선택된 상태와 3개 문서의 로컬 링크 검사 및 `git diff --check` 통과. 앱·DB 테스트 미실행: 설계 문서만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- R1·R5 선택 후 구체 기술 계약과 T09 검증 계획을 통합한다. 오늘 설계·내일 구현 일정을 유지한다.
+
+### #39 T03~T08 공통 미결정 아키텍처의 일괄 검토안 작성
+
+#### 변경 이유 및 내용
+
+- T02 주요 선택을 반복하지 않고 남은 서버 연결 구조·전환 복구·원본 UUID 폐기·현재 웹 탭 대응·업로드 사진 조회의 5묶음을 R1~R5 체크리스트로 작성했다. 각 대안의 장점·비용과 기존 정책에 미치는 영향을 구분했다.
+- 원본 사용자 비활성화, 두 단계 전환, 단일 프로세스, 탭 알림·서명 이미지 URL은 아직 미승인 제안이다. 앱 형태·운영 클라우드·테스트 통과나 구현 완료로 해석하지 않았다.
+- 전환 경계 문서에 남아 있던 단일 질문 지시를 최신 체크리스트 방식으로 정정했다. 오늘 설계·내일 구현 일정을 유지하며 실행 코드는 변경하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-cross-feature-architecture-checklist.md`, `docs/plans/39-account-transition-contract.md`, `docs/plans/39-design-completion-plan.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 코드 변경 없음. API·조회 권한의 대안은 사용자 선택 전이다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 실제 연결 관리자·ADR·전환 문서와 공식 자료를 대조했다. `git diff --check`와 3개 문서 로컬 링크, 5묶음·10개 미선택 대안·본문 공백 검사 통과. 앱·DB 테스트 미실행: 설계 검토안만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- 사용자의 선택·보류·질문에 따라 R1~R5를 정리한 뒤 T02~T09의 구체 데이터·API·상태 전이·실패/경합·검증 계획을 통합한다. 보류를 추천대로 확정하지 않는다.
+
+### #39 T02 마지막 선택과 설계·구현 일정 정정
+
+#### 변경 이유 및 내용
+
+- 사용자가 9B·10A를 선택해 T02 주요 체크리스트 10항목을 마쳤다. 기존 목록 밖 값은 정확히 정식 항목과 대응한 뒤 편집하며 불명확한 원본은 보존한다. 주문서·피드백 본문 `user_id`는 제거하고 JWT 검증 결과로 본인을 확인하도록 설계한다.
+- 사용자의 2시간 제한을 구현까지로 잘못 해석한 것을 정정했다. 오늘은 T02~T09 아키텍처 설계, 내일(2026-11-14)은 구현·실제 검증이라는 일정을 기록했다.
+- 병렬 구현을 즉시 중단했다. 두 에이전트 모두 파일 수정·테스트 실행이 없었음을 보고했다. 루트가 추가한 User 필드 4개·의존성 2줄·`.data/` ignore 1줄만 정밀 제거했고 기존 T01·사용자 변경은 유지했다. 의존성 설치 명령은 실행 도구 경로를 찾지 못해 설치를 시작하지 않았고 DB 변경도 없었다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t02-architecture-checklist.md`, `docs/plans/39-t02-personal-data-architecture.md`, `docs/plans/39-design-completion-plan.md`, `docs/plans/39-uuid-user-tickets.md`, `docs/specs/39-uuid-users-and-kakao-migration.md`, `docs/plans/39-handoff-2026-11-13.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 코드 변경 없음. 10A의 본문 사용자 번호 제거는 설계에만 반영했다.
+
+#### DB 변경
+
+- 없음. 기존 제외 항목 대응·스키마 변경을 실행하지 않았다.
+
+#### 검증
+
+- `requirements.txt`에 순변경이 없고 추가 코드 부분만 제거했는지 확인했다. 문서 `git diff --check`와 6개 문서의 로컬 링크, 정확한 10개 선택·일정·본문 공백·T01 유지 검사 통과. 앱·DB·모델 학습 테스트 미실행: 오늘은 설계만 진행한다.
+
+#### 남은 작업 및 주의 사항
+
+- T02의 구체적인 데이터·학습·API 계약, T03~T08 상태 전이·실패/경합 처리, T09 검증 계획을 오늘 설계로 정리한다. 체크리스트 선택 완료를 전체 설계나 구현 완료로 안내하지 않는다.
+
+### #39 T02 학습형 추천 체크리스트 1~8번 선택과 9·10번 보류
+
+#### 변경 이유 및 내용
+
+- 사용자의 명시 응답 `1A,2A,3A,4A,5B,6A,7A,8B`를 체크하고 D13에 기록했다. 오늘 점수의 제한 재정렬, 명시적 평가를 학습하는 공용 로지스틱 모델, 주기 학습과 개인 입력 갱신, 현재 백엔드 예측·별도 학습, 기존 추천 대체 경로와 최근 평가 중시를 선택했다.
+- 9번 기존 목록 밖 값의 취급과 10번 요청 본문 사용자 번호 호환은 사용자가 설명을 요청했으므로 보류했다. 추천안이나 질문을 승인으로 간주하지 않았다.
+- 실제 특징·계수·시간 가중·학습 주기·검증·모델 교체·트랜잭션 계약은 후속 초안으로 남겼다. 코드·DB·학습 모델·라이브러리·사용자 기록은 변경하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t02-architecture-checklist.md`, `docs/plans/39-t02-personal-data-architecture.md`, `docs/plans/39-uuid-user-tickets.md`, `docs/specs/39-uuid-users-and-kakao-migration.md`, `docs/plans/39-handoff-2026-11-13.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 코드 변경 없음. 요청 본문 `user_id`의 처리 방식은 아직 보류다.
+
+#### DB 변경
+
+- 없음. 기존 목록 밖 제외 항목을 삭제·변환하지 않았다.
+
+#### 검증
+
+- 변경 문서 `git diff --check`와 5개 문서의 로컬 링크, 8개 선택 코드의 정확한 일치·9/10 미선택·본문 공백 검사 통과. 앱·DB·모델 학습 테스트 미실행: 설계 선택 기록만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- 9·10번을 기존 데이터와 JWT 본인 확인 예시로 설명한다. 답변 후 전체 구현 계약·검증 계획·작업 분할을 정리하며 체크리스트 선택을 구현 완료로 안내하지 않는다.
+
+### #39 T02 여러 신호 학습형 추천 방향과 체크 응답 설계 방식 합의
+
+#### 변경 이유 및 내용
+
+- 사용자가 여러 신호를 학습하는 추천 모델을 사용하고 실제 사용자 피드백으로 조정하는 방향을 선택해 D11로 기록했다. 기존 단순 누적 보정 외에 학습 데이터·학습·검증·예측 연결이 필요한 범위 확장을 명시했다.
+- 사용자는 개별 질문이 오래 걸려 체크리스트와 trade-off를 한 번에 보고 선택·보류·질문하는 방식으로 바꾸도록 요청했다. D12와 10개 미선택 항목을 담은 체크리스트를 추가하고 기존 단일 질문 지시를 최신 문서에서 대체했다.
+- 기존 인증·소유권·이력·제외 설정은 유지한다. D10의 영향 제한을 자동 폐기하거나 수동 예시 수식을 새 모델에 강제하지 않으며, 모델과의 연결을 별도 선택하도록 했다. 모든 추천안·계수·학습 주기·인프라·배포는 아직 미승인이다.
+- 현재 라이브러리와 추천 코드, 공식 모델·이벤트 반영 문서를 확인했다. 실행 코드·DB·모델 파일·라이브러리·외부 서비스·원격 이슈는 변경하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t02-architecture-checklist.md`, `docs/plans/39-t02-personal-data-architecture.md`, `docs/plans/39-uuid-user-tickets.md`, `docs/specs/39-uuid-users-and-kakao-migration.md`
+- `docs/plans/39-architecture-status.md`, `docs/plans/39-handoff-2026-11-13.md`, `docs/plans/39-t02-recommendation-industry-research.md`, `LOG.md`
+
+#### API 변경
+
+- 없음. 체크리스트의 호환 처리·학습·예측 계약은 아직 선택되지 않았다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 변경 문서 `git diff --check`와 7개 문서의 로컬 링크, 신규 체크리스트 10묶음·22개 미선택 옵션·본문 공백 검사 통과. 최신 진행표·인계·T02 문서에서 구 단일 질문 지시를 대체했는지 확인했다. 앱·DB·모델 학습 테스트 미실행: 설계와 검토 방식만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- 체크리스트의 응답·보류를 바탕으로 구체적인 설계와 검증 계획·구현 작업 범위를 정리한다. 사용자가 건너뛴 항목을 추천대로 확정하거나 실제 피드백 없이 성능이 검증됐다고 안내하지 않는다.
+
+### #39 T02 개인화 가중치에 관한 빅테크 공식 사례 조사
+
+#### 변경 이유 및 내용
+
+- 사용자의 실제 업계 방식 질문에 따라 공식 도움말·기업 연구·AWS 제품 문서를 교차 확인하고 조사 노트를 추가했다. YouTube의 화면별 주요 신호, Netflix의 최근 행동 반영, Google의 후보 생성·순위화·다중 목표와 실제 실험, Amazon Personalize 이벤트 가중치·실시간 기능의 조건을 구분했다.
+- 2016·2017 공개 사례를 현행 전체 구현으로 일반화하지 않고 2026 공개 YouTube Music 실험도 참고했다. 서비스의 현행 전체 계수·모델은 확인한 자료만으로 재현할 수 없다는 한계를 명시했다.
+- 기존 제안 5%·10%·20%와 기준 건수 4는 빅테크 공통 공식이나 WhatBap에서 검증된 값이 아니다. D10의 방식 승인만 유지하고 실제 강도·실험·학습 모델·신규 측정 정책을 승인으로 기록하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t02-recommendation-industry-research.md`, `docs/plans/39-t02-personal-data-architecture.md`, `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 공식 자료의 본문·발행 연도와 주장을 대조했다. 변경 문서 `git diff --check`와 조사·설계 문서의 로컬 링크·행 끝 공백·새 정책 미승인 상태 검사 통과. 앱·DB 테스트 미실행: 조사 문서만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- 실제 반영 강도는 미결정이다. WhatBap의 목표·데이터·비교 검증을 바탕으로 초기 가설과 효과 검증을 구분해 설계한다. 조사 결과를 딥러닝·외부 추천 서비스·운영 실험 도입 승인으로 해석하지 않는다.
+
+### #39 T02 누적 개인 선호의 제한된 보조 점수 방식 합의
+
+#### 변경 이유 및 내용
+
+- 사용자가 ②를 선택해 오늘 주문서 점수를 기본으로 하고 개인 평가의 유효 건수·만족 비율을 참고하는 보조 점수에 영향 한도를 두는 D10을 기록했다.
+- 실제 반영 강도·수식은 같은 T02에서 구현 전에 설계한다. 예시의 100점·±10점·기준 건수 4와 계산식을 확정값으로 사용하지 않으며 고정 90:10 비율이나 오늘 답변의 무조건 우선을 승인한 것으로 해석하지 않았다.
+- 평가가 적을 때 약하게 반영하고 강제 제외를 먼저 적용하는 방향을 명시했다. 최근 추천·다양성·공통 질문 통계·랜덤 적용 변경은 별도이며 실행 코드·DB·기존 평가를 변경하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t02-personal-data-architecture.md`, `docs/plans/39-uuid-user-tickets.md`, `docs/specs/39-uuid-users-and-kakao-migration.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 코드 변경 없음. 주문서 추천 개인 보정 방식의 설계 승인만 기록했다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 변경 문서 `git diff --check`와 T02·작업 계획·명세의 로컬 링크, T02 승인 상태·행 끝 공백 검사 통과. 앱·DB 테스트 미실행: 설계 기록만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- D10 실제 반영 강도를 구현 전 정한다. 후보 점수 차이·평가 건수·수정·상한·제외 조건 보존을 검증하고 같은 2번 묶음에서 적용 범위와 중복 처리 등을 정리한다.
+
+### #39 T02 섭취 불가 선택 단위의 재료 중심 방식 합의
+
+#### 변경 이유 및 내용
+
+- 사용자가 섭취 불가를 개별 메뉴 대신 재료 중심으로 선택하는 D09를 승인했다. 선택한 재료를 메뉴 분류·태그·키워드와 연결해 제외하며 서버 목록 제한과 마지막 저장 우선을 유지하도록 기록했다.
+- 제안한 초기 8개 재료는 실제 매핑을 점검할 초안으로 구분했다. 현재 대표 주재료가 한 값이고 태그가 추정값이라는 한계, 넓은 재료 선택이 후보를 많이 줄일 수 있다는 비용을 명시했다.
+- 실제 재료 목록·매핑·필터와 기존 사용자 데이터는 변경하지 않았다. 비선호 입력 변경이나 Amazon Personalize 도입으로 해석하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t02-personal-data-architecture.md`, `docs/plans/39-uuid-user-tickets.md`, `docs/specs/39-uuid-users-and-kakao-migration.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 코드 변경 없음. 섭취 불가 선택 단위를 재료 중심으로 설계했다.
+
+#### DB 변경
+
+- 없음. 기존 메뉴와 사용자 설정을 수정하지 않았다.
+
+#### 검증
+
+- 변경 문서 `git diff --check`와 T02·작업 계획·명세의 로컬 링크, T02 승인 상태·행 끝 공백 검사 통과. 앱·DB 테스트 미실행: 설계 기록만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- 재료 목록·고정 코드 매핑과 나머지 제외 조건 계약, 기존 데이터 호환, 피드백 계산·재전송과 기록·연동 검증을 기존 5묶음 안에서 정리한다.
+
+### #39 T02 섭취 불가 신규 등록의 서버 선택 목록 제한 합의
+
+#### 변경 이유 및 내용
+
+- 사용자가 ①을 선택해 섭취 불가도 서버가 제공하는 음식·재료 선택 목록에서만 신규 등록하고 자유 입력을 허용하지 않는 D08을 기록했다.
+- 실제 선택 항목·범위·고정 코드 매핑은 다음 검토 대상으로 남겼다. 알레르기 목록을 그대로 쓰거나 기존 비선호 입력까지 제한하는 것으로 해석하지 않았다.
+- 서버 검증과 유효하지 않은 저장의 전체 거절, D06의 마지막 저장 우선을 유지한다. 기존 목록 밖 섭취 불가 데이터는 임의 삭제·변환하지 않으며 실제 전용 선택 목록·API 구현은 아직 없다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t02-personal-data-architecture.md`, `docs/plans/39-uuid-user-tickets.md`, `docs/specs/39-uuid-users-and-kakao-migration.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 코드 변경 없음. 섭취 불가 신규 저장의 입력 범위를 서버 선택 목록으로 제한하는 설계만 기록했다.
+
+#### DB 변경
+
+- 없음. 기존 사용자 제외 설정과 메뉴 데이터는 변경하지 않았다.
+
+#### 검증
+
+- 변경 문서 `git diff --check`와 T02·작업 계획·명세의 로컬 링크, T02 승인 상태·행 끝 공백 검사 통과. 앱·DB 테스트 미실행: 설계 기록만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- 섭취 불가 목록 구성, 기존 목록 밖 값의 호환과 제외 조건의 나머지 계약을 정리한다. 이번 선택을 실제 목록·API·필터 구현 완료로 안내하지 않는다.
+
+### #39 T02 알레르기 신규 등록의 서버 선택 목록 제한 합의
+
+#### 변경 이유 및 내용
+
+- 사용자가 ①을 선택해 알레르기 신규 등록은 서버의 선택 목록에 있는 항목만 받고 자유 입력을 허용하지 않는 D07을 기록했다. 고정 코드와 표시 이름을 구분하고 서버에서 허용 항목을 검증해 기존 제외 조건으로 연결하도록 정리했다.
+- 유효하지 않은 항목이 든 저장 요청은 일부 항목만 버린 성공으로 처리하지 않는다. D06의 마지막 저장 우선은 유지하며 기존 목록 밖 알레르기 데이터의 삭제·변환과 섭취 불가·비선호 입력 범위는 이번 승인에 포함하지 않았다.
+- 코드 선택과 메뉴 재료 데이터의 완전성은 별개임을 기록했다. 코드·필터 매핑, 기존 데이터 호환과 실제 API 구현은 아직 수행하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t02-personal-data-architecture.md`, `docs/plans/39-uuid-user-tickets.md`, `docs/specs/39-uuid-users-and-kakao-migration.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 코드 변경 없음. 알레르기 신규 저장은 서버 선택 항목만 허용하도록 설계했다.
+
+#### DB 변경
+
+- 없음. 기존 알레르기·메뉴 데이터를 변경하지 않았다.
+
+#### 검증
+
+- 변경 문서 `git diff --check`와 T02·작업 계획·명세의 로컬 링크, T02 승인 상태·행 끝 공백 검사 통과. 앱·DB 테스트 미실행: 설계 기록만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- 기존 목록 밖 알레르기의 호환, 섭취 불가 입력과 나머지 제외 조건 계약을 정리한다. 선택 목록 제한을 실제 재료 식별의 정확성이나 알레르기 API 구현 완료로 안내하지 않는다.
+
+### #39 T02 제외 조건 전체 목록의 마지막 저장 우선 합의
+
+#### 변경 이유 및 내용
+
+- 사용자가 목록 버전 검증 대신 마지막 저장 우선을 선택해 D06으로 기록했다. 알레르기·섭취 불가·비선호의 유형별 목록은 기존 비선호의 전체 교체 방식과 사용자 행 잠금 직렬화를 따르며 마지막 성공 저장이 최종 상태를 결정한다.
+- 오래된 화면의 저장이 앞선 항목 추가·삭제를 덮어쓸 수 있는 비용을 기록했다. 자동 합집합이나 버전 불일치 거절을 적용하지 않으며 다른 유형·사용자의 목록은 유지한다.
+- 실제 DB 저장 순서와 클라이언트 클릭·응답 순서를 구분하고 실패한 요청은 이전 성공 상태를 변경하지 않는다는 조건을 명시했다. 기존 비선호 구현은 재사용 대상이며 이번에는 실행 코드를 수정하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t02-personal-data-architecture.md`, `docs/plans/39-uuid-user-tickets.md`, `docs/specs/39-uuid-users-and-kakao-migration.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 코드 변경 없음. 제외 조건 유형별 전체 목록 교체·마지막 성공 저장 우선의 설계 결정이다. 기존 비선호에 없는 버전 요구를 추가하지 않는다.
+
+#### DB 변경
+
+- 없음. 버전 컬럼이나 데이터 수정은 수행하지 않았다.
+
+#### 검증
+
+- 변경 문서 `git diff --check`와 T02·작업 계획·명세의 로컬 링크, T02 승인 상태·행 끝 공백 검사 통과. 앱·DB 테스트 미실행: 설계 기록만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- 제외 조건 관리의 나머지 계약과 피드백 계산·중복 처리, 기록 저장·연동 검증을 이어간다. D06을 알레르기·섭취 불가 API 구현 완료로 안내하지 않는다.
+
+### #39 T02 수정 평가의 최신 상태와 다른 추천 평가의 누적 단위 합의
+
+#### 변경 이유 및 내용
+
+- 사용자가 D05 누적 단위 제안을 승인했다. 같은 사용자·추천·메뉴의 수정 이력은 보존하되 개인 선호에는 최신 유효 상태 한 건만 기여하고, 서로 다른 추천에서 받은 유효 평가를 누적한다.
+- 통신 재전송은 새 평가로 추가하지 않는 원칙을 명시했다. 작업 키·보관·동시 수정과 점수 공식·공통 통계·적용 범위는 아직 미결정이며 임의 확정하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t02-personal-data-architecture.md`, `docs/plans/39-uuid-user-tickets.md`, `docs/specs/39-uuid-users-and-kakao-migration.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 코드 변경 없음. 개인 선호 집계 단위의 설계만 기록했다.
+
+#### DB 변경
+
+- 없음. 기존 피드백을 수정·삭제·재집계하지 않았다.
+
+#### 검증
+
+- 변경 문서 `git diff --check`와 T02·작업 계획·명세의 로컬 링크, T02 행 끝 공백·다음 결정 미확정 상태 검사 통과. 앱·DB 테스트 미실행: 설계 기록만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- 제외 조건 관리 설계를 이어간다. 피드백의 남은 계산·통계·재전송 세부는 기존 2번 묶음에 유지하며 완료 처리하지 않는다. T02 실행 코드는 아직 변경하지 않았다.
+
+### #39 T02 평가 변경·이력 보존 선택과 개인 메뉴 선호 누적 요구 반영
+
+#### 변경 이유 및 내용
+
+- 사용자가 평가 변경 허용·이력 보존 방향을 선택하여 D04로 기록했다. 개인 메뉴 선호를 누적 반영하겠다는 추가 요구는 D05로 기록하고 기존 T02의 알고리즘 유지 범위에 해당 예외를 명시했다.
+- 실제 주문서 추천 코드는 사용자·메뉴별 최신 평가의 불만족 감점을 사용하며 다음 한 번의 추천 뒤 평가를 소비하지 않는다. 공통 질문 가중치는 이미 누적 피드백을 사용하고 랜덤 추천은 위 개인 평가 감점을 사용하지 않는다는 차이를 확인했다.
+- 같은 평가의 수정은 최신 상태만 기여하고 서로 다른 추천의 평가를 누적하는 방식은 에이전트 미승인 제안으로 구분했다. 계산식·수정 집계·재전송·공통 통계·랜덤 적용은 확정하지 않았고 실행 코드·DB·기존 평가 데이터는 변경하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t02-personal-data-architecture.md`, `docs/plans/39-uuid-user-tickets.md`, `docs/specs/39-uuid-users-and-kakao-migration.md`, `LOG.md`
+
+#### API 변경
+
+- 없음. 평가 변경·누적 반영은 설계 중이며 세부 계약 미확정이다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 실제 주문서·랜덤 추천과 개인 선호 코드를 정적으로 확인했다. 변경 문서 `git diff --check`와 T02·작업 계획·명세의 로컬 링크, T02 승인 상태·행 끝 공백 검사 통과. 앱·DB 테스트 미실행: 설계 기록만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- 수정 이력의 보존과 집계 기여를 구분하여 사용자와 누적 단위를 검토한다. 고정 5묶음을 유지하며 피드백 묶음 안에서 다룬다. D05의 방향 승인을 특정 알고리즘·통계 정책 승인으로 해석하지 않는다.
+
+### #39 T02 설계 진행표와 남은 네 묶음 정리
+
+#### 변경 이유 및 내용
+
+- 사용자의 남은 분량 질문에 답하기 위해 기존 T02 설계를 5묶음으로 정리했다. 인증·소유권은 D01~D03 승인, 피드백 반복·중복 처리 / 제외 조건 관리 / 기록·기존 데이터 / 연동 계약·검증 계획의 4묶음은 남은 상태로 표시했다.
+- 묶음 수를 구현 완료율·같은 작업량·질문 개수로 해석하지 않으며 세부 구현 필드마다 새 승인 항목을 늘리지 않도록 명시했다. 피드백 반복·중복 처리의 정책은 아직 승인되지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t02-personal-data-architecture.md`, `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- `git diff --check`와 T02 문서의 로컬 링크·행 끝 공백·D04 미확정 상태 검사 통과. 앱·DB 테스트 미실행: 진행표만 추가했다.
+
+#### 남은 작업 및 주의 사항
+
+- T02 구현은 아직 시작하지 않았다. 이번에는 피드백 변경과 재전송의 차이를 설명하고 사용자 결정을 받는다. 기존 비선호·식사·추천 구현의 존재를 T02 전체 검증 완료로 기록하지 않는다.
+
+### #39 T02 피드백 JWT 인증·추천 소유권 검증 합의
+
+#### 변경 이유 및 내용
+
+- 사용자가 피드백의 JWT 인증 필수·현재 본인 소유 추천만 평가하는 제안을 승인했다. 인증된 사용자와 추천 소유자 일치, 평가 메뉴의 추천 포함 여부를 저장 전에 검사하도록 설계에 반영했다.
+- 거절된 요청은 피드백·통계를 변경하지 않는다. 사용자 없는 기존 추천은 보존하되 일반 사용자 피드백을 받지 않고 추천 번호만으로 소유권을 부여하지 않는다.
+- JWT 갱신 후에도 같은 사용자면 본인 추천을 평가할 수 있다. 반복 평가·수정·중복 전송·트랜잭션·오류 계약은 별도 검토하며 기존 추천 알고리즘 변경이나 T02 구현 시작으로 해석하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t02-personal-data-architecture.md`, `docs/plans/39-uuid-user-tickets.md`, `docs/specs/39-uuid-users-and-kakao-migration.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 코드 변경 없음. 설계: `POST /api/recommendations/{recommendation_id}/feedback`에 JWT 인증·추천 소유권·메뉴 포함 검증을 필수로 적용 예정. 기존 비인증 피드백 호출·관련 테스트 변경 필요.
+
+#### DB 변경
+
+- 없음. 기존 추천·피드백의 삭제·귀속 변경은 수행하지 않았다.
+
+#### 검증
+
+- 변경 문서 `git diff --check`와 T02 문서의 승인 상태·로컬 링크·행 끝 공백 검사 통과. 앱·DB 테스트 미실행: 설계 결정 기록만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- 피드백 반복·수정·중복 전송, 요청·오류 계약, 기존 비인증 질문 상태의 취급과 제외 조건·기록 저장 설계를 이어간다. 현재 실행 코드는 아직 이 결정을 반영하지 않았다.
+
+### #39 T02 주문서 질문 조회의 JWT 필수 정책(①) 합의
+
+#### 변경 이유 및 내용
+
+- 사용자가 질문 단계부터 인증하는 ①을 선택했다. 주문서 질문과 메뉴 추천이 같은 사용자 기준으로 질문 선택 이력·추천 기록을 이어 쓰도록 설계에 반영했다.
+- 유효한 JWT를 질문·추천 요청에 재사용하며 매번 새로 발급하지 않는다. 질문 조회는 인증 없는 `question_session` 경로로 우회하지 않도록 설계했다.
+- 현재 상위 7개·탐색 2개의 질문 선택 방식은 유지한다. 모든 질문의 점수를 낮추는 방식이 아니라 탐색 단계에서 직전 주제·사용자별 누적 횟수·가중 추첨을 반영한다는 설명을 남겼다.
+- 인증 준비가 질문 조회의 선행 조건이 되는 비용과 기존 비인증 호출의 변경을 기록했다. 기존 비인증 이력의 삭제·이관, 피드백 세부 정책은 승인으로 간주하지 않았다. 실행 코드·DB·원격 이슈는 변경하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t02-personal-data-architecture.md`, `docs/plans/39-uuid-user-tickets.md`, `docs/specs/39-uuid-users-and-kakao-migration.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 코드 변경 없음. 설계: `GET /api/recommendations/order-sheet/questions`의 인증을 필수로 변경 예정. 신규 요청은 인증된 사용자로 질문 상태를 관리하고 기존 비인증 경로로 우회하지 않는다.
+
+#### DB 변경
+
+- 없음. 기존 비인증 질문 이력의 삭제·귀속 변경은 수행하지 않았다.
+
+#### 검증
+
+- 변경 문서 `git diff --check`와 T02 문서의 상태 표기·로컬 링크·행 끝 공백 검사 통과. 앱·DB 테스트 미실행: 설계 기록만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- 피드백 소유권·인증 계약, 기존 비인증 이력의 취급, 제외 조건과 기록 저장 설계를 이어간다. 현재 코드의 질문 조회는 여전히 선택적 인증이며 이번 결정을 구현 완료로 안내하지 않는다.
+
+### #39 T02 메뉴 추천 전 JWT 인증 필수 정책(B) 합의
+
+#### 변경 이유 및 내용
+
+- 사용자와 인증 선택·필수 방식의 차이를 검토한 뒤 사용자가 B를 선택했다. 랜덤·주문서 메뉴 추천 전에 요청의 서비스 JWT와 T01 DB 인증 세션을 검증하도록 설계를 기록했다.
+- 카카오 로그인은 필수가 아니며 UUID 사용자도 동일하게 이용한다. 기존 JWT 없는 추천 호출의 변경, 인증 준비 실패 시 추천 불가라는 비용과 비인증 추천으로 자동 우회하지 않는 흐름을 명시했다.
+- T02 설계부터 함께 진행한다는 요청을 유지한다. 이 선택을 나머지 정책 승인이나 구현 시작으로 해석하지 않았고 실행 코드·DB·원격 이슈는 변경하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t02-personal-data-architecture.md`, `docs/plans/39-uuid-user-tickets.md`, `docs/specs/39-uuid-users-and-kakao-migration.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 코드 변경 없음. 설계: `POST /api/recommendations/random`, `POST /api/recommendations/order-sheet`의 선택적 인증을 필수 인증으로 변경 예정. 프론트 호출 순서·기존 테스트 갱신 필요.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 실제 사용자·추천·피드백 코드와 기존 기록을 정적으로 대조했다. 변경 문서 `git diff --check`와 신규 T02 문서의 로컬 링크·행 끝 공백 검사 통과.
+- 앱·DB 테스트 미실행: 이번 변경은 설계 결정 기록이며 실행 코드를 수정하지 않았다.
+
+#### 남은 작업 및 주의 사항
+
+- 질문·피드백 경로와 소유권, 제외 조건 관리·동시 저장, 기록 저장과 통합 검증을 한 번에 하나씩 검토한다. 현재 추천 API에는 선택적 인증 경로가 남아 있으므로 B가 이미 적용됐다고 안내하지 않는다.
+
+### #39 T01 UUID 사용자 생성·복원과 세션 인증 구현 및 격리 MySQL 검증
+
+#### 변경 이유 및 내용
+
+- 사용자의 T01 시작 지시에 따라 준비 쿠키 발급 → UUID 사용자 생성 → 같은 인증 복원의 세 API를 구현했다. 중복 생성 요청은 인증 행 잠금으로 한 사용자에 수렴시키고, 닉네임·UUID 충돌 재시도와 사용자·인증 연결의 원자적 롤백을 적용했다.
+- 복원 비밀값은 HttpOnly·Secure 쿠키로만 전달하고 서버에는 SHA-256 32바이트 해시만 저장한다. 준비 5분·정식 30일·JWT 1시간, 발급 성공 시 30일 연장, Origin·추가 헤더 검사, 상태별 오류·캐시 금지를 연결했다.
+- 일반 API와 WebSocket의 최초·재인증에서 JWT의 서명·필수 클레임·사용자·DB 세션을 함께 검증한다. WebSocket 동일 인증 교체·중복 성공 확인·이전 상태 비퇴행·만료 종료와 보호 데이터 전송 검사를 추가했다.
+- 기존 카카오 사용자 ID·프로필·기록은 보존하고 로그인 때 기존 프로필을 덮어쓰지 않는다. 단독 카카오 경로는 새 세션 JWT를 발급하되 복원 쿠키·기록 이관을 제공하지 않는다. 복원 쿠키를 가진 브라우저의 단독 카카오 로그인은 T06 전까지 거절해 UUID 기록 이관이 된 것처럼 처리하지 않는다.
+- 기존 PK·기록을 보존하는 명시적 MySQL 사전 점검·적용·보존 검증, 중간 단계 재실행과 종료·만료 인증 총 100건 정리 명령을 추가했다. 600초 정리 실행 주체·요청 제한·운영 배포 정책은 확정하지 않았다.
+- JWT_SECRET의 코드 기본값을 제거하고 최소 32자를 요구한다. 격리 Python·MySQL 도구는 Git에서 제외한 `.tools/`에 마련했으며 일반 테스트는 테스트 DB·키를 사용한다. 외부 라이브러리 요구 목록은 변경하지 않았다.
+- 초기 점검에서 이전 T02 로그와 현재 코드의 차이를 재확인했다. 현재 알레르기·섭취 불가·통합 API 및 비인증 user_id 보완은 코드에 없고 관련 신규 문서·테스트 파일은 비어 있다. 이전 이력·사용자 변경을 삭제하거나 완료로 재해석하지 않았다.
+
+#### 주요 변경 파일
+
+- `app/auth/models.py`, `repository.py`, `sessions.py`, `errors.py`, `cookie_router.py`, `websocket_auth.py`
+- `app/auth/router.py`, `service.py`, `dependencies.py`, `schemas.py`
+- `app/core/config.py`, `app/core/security.py`, `app/main.py`
+- `app/users/models.py`, `app/users/schemas.py`, `app/users/router.py`, `app/static/default-profile.svg`
+- `app/rooms/websocket.py`
+- `scripts/migrate_uuid_auth.py`, `scripts/cleanup_auth_sessions.py`
+- `tests/test_uuid_auth.py`, `tests/test_uuid_websocket_auth.py`, `tests/test_uuid_auth_mysql.py`, `tests/auth_helpers.py`, `tests/conftest.py` 및 기존 인증·개인 기능·방 테스트
+- `docs/UUID_AUTH_API.md`, `docs/plans/39-architecture-status.md`, T01 계약·인계·작업 계획 문서, `.gitignore`, `LOG.md`
+
+#### API 변경
+
+- 추가: `POST /api/auth/preparations` — 200, `CREATE_USER`/`ISSUE_TOKEN`과 선택적 이전 인증 복원 불가 안내.
+- 추가: `POST /api/auth/anonymous-users` — 신규 201·같은 쿠키 복구 200. 별도 UUID나 사용자 ID를 입력 인증으로 받지 않는다.
+- 추가: `POST /api/auth/tokens` — 200, 유효 정식 쿠키로 동일 사용자 JWT 발급·30일 연장. 준비 상태는 409.
+- 수정: 사용자 응답에 `uuid` 추가·`kakao_id` nullable 확장, 토큰 응답에 `expires_in=3600` 추가. `GET /api/users/me` 캐시 금지.
+- 수정: Bearer 인증은 새 `sid` 기반 세션 검증과 구조화한 오류 코드를 사용한다. 인식 가능한 서명 유효 구형 JWT는 `REAUTHENTICATION_REQUIRED`로 재로그인한다.
+- 수정: 기존 카카오 경로는 유지하되 기존 프로필 보존·세션 JWT를 적용하고 복원 쿠키 존재 시 409 `ACCOUNT_LINKING_NOT_AVAILABLE`로 거절한다. 단독 로그인에는 쿠키 복원 기능을 추가하지 않았다.
+- 수정: `/ws/rooms/{room_id}`에 Origin 필수 검사·DB 세션 검증, `auth.refresh`/`auth.refreshed`/`auth.error`와 JWT 만료 시 4408 종료를 추가했다. 프론트 갱신·재연결 시간 한도 구현은 별도다.
+- 추가: 기본 이미지 `GET /static/default-profile.svg`. CORS 허용 헤더에 `X-Whatbob-Request` 추가.
+
+#### DB 변경
+
+- 모델·마이그레이션 `scripts/migrate_uuid_auth.py`: 기존 정수 `users.id`·FK·프로필·기록 보존. `users.uuid` CHAR(36) NOT NULL·유일 인덱스, `nickname_key` VARBINARY(400) nullable·유일 인덱스, `is_legacy_kakao` BOOLEAN 추가, `kakao_id` NULL 허용.
+- `auth_sessions`: BIGINT PK, nullable INTEGER 사용자 FK `RESTRICT`, 유일 BINARY(32) 해시, UTC DATETIME(6) 생성·만료·종료 시각과 사용자·만료/ID·종료/ID 인덱스 추가.
+- 격리 MySQL에서만 적용·보존·재실행을 검증했다. 운영 DB 변경·실제 데이터 사전 점검은 미실행이다. MySQL DDL 전체 롤백을 보장하지 않으며 별도 백업·쓰기 차단이 필요하다.
+
+#### 검증
+
+- 수정 전 기준선: `.tools/venv/Scripts/python.exe -m pytest -q` — **225 passed, 1 skipped, 2 failed**. 두 실패는 기존 `tests/test_user_meals.py`의 `파스타 (토마토)`/`토마토파스타` 표시명 차이였다.
+- 실제 Python 3.11.15, requirements.txt 환경과 격리 MySQL 8.4.13에서 `.tools/venv/Scripts/python.exe -m pytest -q tests/test_uuid_auth.py tests/test_uuid_websocket_auth.py tests/test_uuid_auth_mysql.py tests/test_rooms_mysql.py --tb=short` — **80 passed**.
+- HTTP 쿠키 상태·CSRF·생성 응답 유실 복구·사용자 격리·만료·종료·DB 장애·저장 실패 롤백·닉네임 충돌·정리 100건 상한, WebSocket 재인증·중복·구형 응답·인증 불일치·만료 종료를 확인했다.
+- 실제 MySQL에서 기존 데이터·FK·시간 보존, check/apply/verify CLI·점검 확인 강제, 중간 UUID 채움·누락 인증 인덱스 재실행, 닉네임 충돌·잘못된 스키마 중단, 동시 사용자 생성·갱신/종료·정리/연장 경합을 검증했다.
+- 전체 회귀 `.tools/venv/Scripts/python.exe -m pytest -q --tb=short` (`MYSQL_TEST_DATABASE_URL`은 위 격리 MySQL) — **305 passed, 2 failed**. 실패 두 건은 기준선과 같으며 새 실패는 없었다.
+- `python -m compileall -q app scripts tests`, `git diff --check`, 변경 문서 로컬 링크 39개·신규 파일 공백·기본 SVG XML 검사 통과. 짧은 JWT 키 거부 시 설정 오류에 입력 비밀값이 노출되지 않는 것도 확인했다.
+- 검증용 MySQL은 정상 종료했다. 다운로드·임시 데이터는 Git 제외 `.tools/` 아래에만 남겼으며 Windows 서비스나 자동 실행 작업은 등록하지 않았다.
+- 미실행: 프론트 실제 구현, 서로 다른 사이트의 HTTPS 브라우저 쿠키 수용·차단, 운영 DB·배포 환경 검증.
+
+#### 남은 작업 및 주의 사항
+
+- T01은 백엔드 구현·격리 검증 상태다. 실제 프론트 연동·브라우저 검증과 미결정 여러 탭·전환·운영·배포 설계는 남아 있다. 사용자 지시를 새 플랫폼·탭 정책 승인으로 기록하지 않는다.
+- 배포 전 환경의 JWT_SECRET·발급자·대상, 기존 사용자 재로그인·프론트 오류 처리, 명시적 DB 전환·백업·복구를 맞춘다. 현재 구현을 운영에 자동 배포하지 않았다.
+- 기존 메뉴 표시명 테스트 2건과 T02 로그·코드 차이를 후속 작업에서 확인한다. T03의 유예 후 일반 참여자 자동 퇴장, T06~T08 이관·계정 전환·카카오 쿠키 복원은 이번 작업의 완료 범위가 아니다.
+
+### #39 아키텍처 결정 권한과 미승인 제안 표시 정정
+
+#### 변경 이유 및 내용
+
+- 사용자가 아키텍처를 직접 선택해야 한다고 지적하여 앱 형태 미정 답변을 진행 방향의 승인으로 해석한 설명을 정정했다. 공통 서버 우선·플랫폼 선택 유보·클라이언트별 보관 분리는 사용자 미승인 제안으로 표시했다.
+- 기존 동일 인증 복원 계약과 새 탭·추가 실행 환경의 사용자 정책을 구분했다. 후자는 미결정이며 에이전트가 특정 방향으로 바꾸지 않겠다고 한 설명을 사용자 선택으로 기록하지 않는다.
+- 선택지·trade-off·현업 근거를 설명하고 한 번에 하나의 결정만 받으며 채택·변경·유보를 임의로 확정하지 않도록 명시했다. 기존 승인 정책과 진행표의 남은 3묶음은 유지한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-account-transition-contract.md`
+- `docs/plans/39-architecture-status.md`
+- `docs/plans/39-handoff-2026-11-13.md`
+- `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 설계 문서 3개의 공백·로컬 링크 19개 검사와 `git diff --check` 통과.
+- 앱·DB·브라우저 테스트 미실행: 결정 권한·제안 상태를 정정했으며 이번 작업에서는 실행 코드를 변경하지 않았다.
+
+#### 남은 작업 및 주의 사항
+
+- 새 탭·추가 실행 환경의 사용자 정책을 선택지와 영향으로 비교해 사용자 결정을 받는다. 기존 병행 작업과 이력은 보존한다.
+
+### #39 앱 형태 미정과 웹 탭 검토의 적용 범위 명시
+
+#### 변경 이유 및 내용
+
+- 사용자가 앱 형태를 아직 정하지 않았다고 재확인하여 현재 웹 쿠키·여러 탭 검토를 모든 앱의 필수 구조로 해석하지 않도록 명시했다. 서버의 공통 사용자·인증 규칙과 향후 클라이언트별 보관·전달을 구분했다.
+- 실행·화면 추가 자체로 새 사용자를 만들거나 모든 탭의 사용자 일치를 보장하는 정책은 채택하지 않았다. 기존 동일 인증 복원·기록 보존·방 참여 중 전환 금지는 유지했다.
+- 설명은 선택지·trade-off·현업 근거를 포함하되 결정 질문은 한 번에 하나만 제시하도록 최신 사용자 요구를 기록했다. 탭 전환 대응과 두 단계 전환은 미승인 검토 상태이며 남은 설계는 기존 3묶음을 유지한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-account-transition-contract.md`
+- `docs/plans/39-architecture-status.md`
+- `docs/plans/39-handoff-2026-11-13.md`
+- `LOG.md`
+
+#### API 변경
+
+- 없음. 앱 전용 인증 전달 API를 추가하거나 승인하지 않았다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 설계 문서 3개의 공백·로컬 링크 19개 검사와 `git diff --check` 통과.
+- 앱·DB·브라우저 테스트 미실행: 적용 범위·검토 방식만 문서화했으며 이번 작업에서는 실행 코드를 변경하지 않았다.
+
+#### 남은 작업 및 주의 사항
+
+- 여러 탭·계정 전환의 미승인 정책을 하나씩 검토하고 운영·배포 복구 설계를 이어간다. 앱별 보관·전달은 앱 형태 확정 후 구체화하며 새 T01 선행 묶음을 추가하지 않는다. 병행 작업의 T02 구현 변경과 기록은 유지한다.
+
+### #39 T02 음식 제외 조건(알레르기·섭취 불가·통합 조회) API 추가 및 개인 추천 소유자 검증 보완
+
+#### 변경 이유 및 내용
+
+- T01(UUID 사용자 생성·인증 세션) 구현 전 선행 가능한 T02 범위를 먼저 구현했다. 기존에는 `user_food_exclusions` 테이블과 추천 제외 로직이 `ALLERGY`, `UNABLE`, `DISLIKE` 3종류를 모두 처리하지만 REST API는 `/api/users/me/dislikes`만 존재했다.
+- `app/users/`의 비선호 조회·교체·삭제 로직을 제외 유형(`ALLERGY`, `UNABLE`, `DISLIKE`)별 공통 헬퍼로 통합해 중복을 제거하고, 알레르기(`/api/users/me/allergies`), 섭취 불가(`/api/users/me/unables`), 전체 제외 요약 조회(`/api/users/me/exclusions`) API를 추가했다.
+- `POST /api/recommendations/order-sheet`와 `POST /api/recommendations/{recommendation_id}/feedback`에서 비인증 요청이 요청 본문 `user_id`를 전달해 타인의 제외 조건·이력을 조회하거나 저장할 수 있던 허점(`_bind_user`)을 차단(`401`)하고, 사용자 소유 추천(`rec.user_id != null`)에 비인증 호출자가 피드백을 남기지 못하도록 소유자 검증을 보완했다.
+
+#### 주요 변경 파일
+
+- `app/users/schemas.py`
+- `app/users/repository.py`
+- `app/users/service.py`
+- `app/users/router.py`
+- `app/recommend/router.py`
+- `app/recommend/order_sheet.py`
+- `docs/USER_EXCLUSIONS_API.md`
+- `docs/USER_DISLIKES_API.md`
+- `tests/test_user_exclusions_and_t02.py`
+- `LOG.md`
+
+#### API 변경
+
+- 추가: `GET /api/users/me/exclusions` (인증 사용자의 `allergies`, `unables`, `dislikes` 전체 요약 조회, `Cache-Control: no-store`)
+- 추가: `GET /api/users/me/allergies`, `PUT /api/users/me/allergies`, `DELETE /api/users/me/allergies/{exclusion_id}` (`ALLERGY` 전용, `DISLIKE`와 동일한 입력·중복 제거·ID 유지·404 격리 규칙 적용)
+- 추가: `GET /api/users/me/unables`, `PUT /api/users/me/unables`, `DELETE /api/users/me/unables/{exclusion_id}` (`UNABLE` 전용, `DISLIKE`와 동일한 규칙 적용)
+- 수정: `POST /api/recommendations/order-sheet` 및 `POST /api/recommendations/{recommendation_id}/feedback`에서 비인증 HTTP 요청의 `user_id` 지정 시 `401 Unauthorized`, 사용자 소유 추천에 대한 비인증 피드백 시 `400` 거절
+
+#### DB 변경
+
+- 없음 (기존 `user_food_exclusions`, `user_meals`, `recommendations`, `recommendation_feedbacks`, `question_selection_states` 스키마 유지).
+
+#### 검증
+
+- `.venv` 가상환경(`Python 3.11.9`, `requirements.txt` 설치)에서 `KAKAO_REST_API_KEY=test-kakao-key` 환경으로 인메모리 SQLite 테스트 실행:
+  - T02·비선호·추천 관련 묶음(`tests/test_user_exclusions_and_t02.py`, `test_user_dislikes.py`, `test_recommend.py`, `test_recommend_variety.py`, `test_random_pick.py`, `test_question_selection.py`, `test_binary_questions.py`, `test_order_sheet_contract.py`): **139 passed**
+  - 전체 테스트(`pytest -q`): **274 passed, 1 skipped(MySQL 전용), 2 failed** — 2건 실패는 작업 전 기준선부터 존재하던 `tests/test_user_meals.py`의 `파스타 (토마토)` vs `토마토파스타` 표시명 차이 때문이며 본 작업과 무관하다.
+- `git diff --check -- app/ tests/ docs/USER_DISLIKES_API.md docs/USER_EXCLUSIONS_API.md` 통과.
+- 미실행: T01 기반 실제 UUID 생성·재방문 쿠키 복원 E2E 통합 테스트(T01 미구현), 실제 MySQL 환경 검증.
+
+#### 남은 작업 및 주의 사항
+
+- T01(`users.uuid`, `kakao_id` nullable, `auth_sessions`, 익명 준비/생성/토큰 API, `sid` 기반 JWT 검증) 구현이 완료되면 실제 UUID 생성·재방문 복원 경계를 통과하는 T02 E2E 검증을 연결해 T02를 최종 완료 처리한다.
+- 기존 `tests/test_user_meals.py`의 2건 실패는 별도 확인 대상이며 이번 작업에서 임의 수정하지 않았다.
+
+### #39 여러 탭·계정 전환과 응답 유실 복구의 묶음 검토안 작성
+
+#### 변경 이유 및 내용
+
+- 자세한 설명과 진행 요청에 따라 탭별 메모리 JWT와 공유 쿠키의 불일치, 전환 중 요청·늦은 응답, 방 참여·전환 서버 경계와 응답 유실 복구를 한 문서로 정리했다.
+- BroadcastChannel 힌트와 서버 재검증·응답 세대, 기대 인증 문맥, 사용자 잠금, 같은 작업 키와 참여 요청 종결, 별도 보호 준비 쿠키 후 계정 전환 확정을 제시했다. 최초 UUID 다중 생성 허용·방 참여 중 전환 금지·기록 보존은 유지한다.
+- 보호 요청 보류·사용자 확인과 두 단계 전환은 검토할 사용자 경험임을 명시했다. 새 헤더·전환 및 작업 확인 인터페이스는 사용자 최종 승인이나 구현 완료로 기록하지 않았다. 후속 표·API 구현은 T03/T06~T08 범위를 유지한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-account-transition-contract.md`
+- `docs/plans/39-architecture-status.md`
+- `docs/plans/39-handoff-2026-11-13.md`
+- `LOG.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. 기대 인증 문맥 헤더·`AUTH_CONTEXT_CHANGED`와 작업 키·결과 조회·취소·전환 준비/확정의 인터페이스는 검토안이다.
+
+#### DB 변경
+
+- 실제 변경 없음. 참여 작업·전환 전용 준비와 결과 보관은 후속 기능 설계안이며 마이그레이션 파일을 추가하지 않았다.
+
+#### 검증
+
+- 기존 방 API·인증 서비스·ADR·HTTP/DB 계약을 읽고 대조했다. 문서 로컬 링크·공백·JSON 구문과 `git diff --check` 검사 통과.
+- 앱·DB·브라우저 테스트 미실행: 검토안 작성이며 실제 쿠키·탭·잠금·복구의 동작은 확인하지 않았다.
+
+#### 남은 작업 및 주의 사항
+
+- 진행표의 3번 검토 후 운영 설정·배포 복구를 정리한다. 복구 기록 보관과 인증 증명은 구현 시 함께 검증하며 작업 번호만으로 인증하지 않는다. 코드·DB 변경·커밋·푸시·배포는 수행하지 않았다.
+
+### #39 DB 구조·기존 사용자 보존 전환 계약 정리 완료
+
+#### 변경 이유 및 내용
+
+- 실제 사용자·메뉴 기록·방 Entity와 기존 마이그레이션을 확인하고, 기존 정수 PK·FK·프로필·기록을 유지하는 UUID·별도 인증 표 구조와 전환 단계를 기술 설계로 정리했다.
+- 문자형 UUIDv4, NULL 허용 카카오 ID, 닉네임 중복 키·기존 카카오 구분, `auth_sessions` 자료형·FK RESTRICT·해시와 만료 인덱스·UTC 시간을 명시했다. 준비 생성 원자성·중복 생성·갱신과 종료 경합·정리 순서를 구체화했다.
+- check/apply/verify는 구현 예정 명령임을 명시하고 사전 점검·단계 재실행·기존 데이터 보존·실제 충돌 시 중단 기준을 정리했다. 기존 닉네임 자동 수정·사용자 삭제는 승인하지 않았다.
+- 고정 진행표에서 DB를 설계 정리 완료·구현 전으로 표시해 남은 설계를 3묶음으로 줄였다. 다음은 여러 탭·계정 전환이다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t01-database-contract.md`
+- `docs/plans/39-architecture-status.md`
+- `docs/plans/39-t01-auth-architecture.md`
+- `docs/plans/39-handoff-2026-11-13.md`
+- `LOG.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. 구현 시 사용자 DTO에 UUID를 추가하고 `kakao_id`를 nullable로 확장할 연결 지점을 명시했다.
+
+#### DB 변경
+
+- 실제 변경 없음. `users.uuid`·`nickname_key`·`is_legacy_kakao` 추가, `kakao_id` NULL 허용, `auth_sessions`와 인덱스·FK 추가를 설계했다. 마이그레이션 파일은 아직 작성하지 않았다.
+
+#### 검증
+
+- 실제 Entity·FK·프로필 DTO·마이그레이션 선례를 읽고 대조했다. 설계 문서 로컬 링크·공백·JSON 예시 구문과 `git diff --check` 검사 통과.
+- MySQL·앱·브라우저 테스트 미실행: 실제 DB 버전·데이터 충돌·DDL·잠금·성능은 확인하지 않았고 운영 DB에 접속하지 않았다.
+
+#### 남은 작업 및 주의 사항
+
+- 고정 진행표의 여러 탭·전환, 운영 설정, 배포·복구 3묶음 정리 후 T01 구현·격리 검증을 진행한다. 충돌 데이터는 실제 점검 시 별도 확인하며 임의 보정하지 않는다. 코드 변경·커밋·푸시·배포는 수행하지 않았다.
+
+### #39 인증 통신 계약을 묶음으로 마무리하고 고정 설계 진행표 추가
+
+#### 변경 이유 및 내용
+
+- 사용자 요청에 따라 세부 항목마다 승인 질문을 반복하는 대신 기존 합의 안의 기술 세부를 한 번에 정리했다. 같은 화면의 HTTP·WebSocket 갱신은 하나의 토큰 발급을 공유하고 연결별 성공 확인을 분리하며, 늦은 응답과 이전 JWT가 최신 인증을 덮어쓰지 않게 계약을 구체화했다.
+- 요청 번호·날짜 형식, `auth.error`·오류 코드·연결 유지와 종료, Origin·인증 전 데이터·만료 타이머 경계를 명시했다. 사용자 승인된 정책과 에이전트가 구체화한 구현 세부를 구분했다.
+- 고정된 5묶음 진행표를 만들고 인증 통신을 설계 정리 완료·구현 전으로 표시했다. 남은 4묶음은 DB·여러 탭과 전환·설정 운영·배포 복구이며 다음은 DB다. 과거 미정 요약을 최신 계약과 맞췄다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t01-websocket-auth-contract.md`
+- `docs/plans/39-architecture-status.md`
+- `docs/plans/39-t01-auth-architecture.md`
+- `docs/plans/39-handoff-2026-11-13.md`
+- `LOG.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. 설계상 `auth.error`, 요청 번호·UTC 만료 형식, 중복·동시 갱신과 오류별 WebSocket 종료 처리를 구체화했다. 기존 HTTP 쿠키 상태·오류·사용자 데이터 보존 정책은 유지한다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 기존 WebSocket 종료 코드와 HTTP 오류 계약을 대조했다. 문서 로컬 링크·공백과 JSON 예시 구문 검사, `git diff --check` 통과.
+- 애플리케이션·DB·브라우저 테스트 미실행: 설계 계약만 정리했으며 동작 검증 결과로 보고하지 않는다.
+
+#### 남은 작업 및 주의 사항
+
+- 고정 진행표의 4묶음을 정리한 후 T01 구현·격리 테스트로 이동한다. 다른 탭 전환과 예외적 운영 폐기는 담당 묶음에서 다룬다. 실행 코드 변경·운영 DB 접속·배포·커밋·푸시는 수행하지 않았다.
+
+### #39 방 재접속 유예를 60초로 변경하고 자동 재연결을 3회·10초로 제한
+
+#### 변경 이유 및 내용
+
+- 사용자 결정에 따라 최신 ADR·명세·작업 계획·설계·인계의 방 재접속 유예를 30초에서 60초로 변경했다. 유예 중 계정 전환 금지와 만료 후 일반 참여자 자동 퇴장·방장 종료 정책은 유지한다. 과거 LOG 기록은 보존했다.
+- 자동 재연결은 최초 포함 최대 3회·각 시도 최대 3초·전체 최대 10초와 기존 지터를 적용하기로 확정했다. 연결 열기부터 최초 인증·준비 완료 확인까지 한 시도이며, 성공 후 방 상태를 재조회한다. 실패하면 자동 반복을 중단하고 수동 재시도를 제공한다.
+- 재연결로 기존 유예를 초기화하거나 갱신 단계부터 무한 반복하지 않도록 명시했다. 복구 불가 오류는 즉시 중단한다.
+
+#### 주요 변경 파일
+
+- `docs/UUID_USER_DESIGN.md`
+- `docs/adr/0002-room-reconnect-and-account-switching.md`
+- `docs/specs/39-uuid-users-and-kakao-migration.md`
+- `docs/plans/39-uuid-user-tickets.md`
+- `docs/plans/39-t01-auth-architecture.md`
+- `docs/plans/39-t01-websocket-auth-contract.md`
+- `docs/plans/39-handoff-2026-11-13.md`
+- `LOG.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. 설계상 재접속 유예를 60초로 바꾸고 자동 재연결 횟수·시간 한도 및 실패 후 처리를 확정했다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 관련 문서의 유예 시간·재연결 한도를 대조하고 `git diff --check` 및 신규 계약 파일의 줄 끝 공백 검사 통과.
+- 현재 `app/core/config.py`에서 방장·일반 참여자 기본 유예가 모두 60초임을 확인했다. 일반 참여자는 유예 후 오프라인으로 유지하는 기존 코드이므로 새 자동 퇴장 정책은 미구현이다.
+- 애플리케이션·DB·브라우저 테스트 미실행: 설계 문서만 변경했고 실행 코드·설정은 수정하지 않았다.
+
+#### 남은 작업 및 주의 사항
+
+- 오류·종료 코드·필드 형식·갱신 경합과 실패한 임시 연결의 유예 비연장 처리를 구체화하고 구현한다. 배포·커밋·푸시는 수행하지 않았다.
+
+### #39 T01 토큰 발급과 WebSocket 재인증에 공유 10초 한도 적용
+
+#### 변경 이유 및 내용
+
+- 사용자 승인에 따라 토큰 API 최초 요청부터 WebSocket 성공 확인까지 전체 최대 10초를 공유하도록 설계했다. 각 단계는 최초 포함 최대 3회이며 각 대기는 최대 3초와 전체 남은 시간 중 작은 값을 적용한다.
+- WebSocket 재전송에 같은 JWT·요청 번호와 1초·2초 기준 ±50% 지터를 사용하며 대기 중 성공하면 재전송을 취소한다. 시간이 먼저 소진되면 남은 시도를 하지 않고 WebSocket 재전송에서 토큰 API를 반복 호출하지 않는다.
+- 기존 실패 후 재연결 원칙은 유지하되 예산 초기화를 통한 무한 갱신 반복을 금지했다. 재연결 자체의 횟수·시간 한도와 오류 계약은 미확정으로 구분했다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t01-websocket-auth-contract.md`
+- `docs/plans/39-t01-auth-architecture.md`
+- `docs/plans/39-handoff-2026-11-13.md`
+- `LOG.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. WebSocket 갱신의 확인 대기·재전송·HTTP 토큰 발급과의 공유 시간 한도를 설계상 확정했다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 문서의 단계별 횟수·응답 대기·공유 한도와 미확정 항목을 대조했다. `git diff --check` 및 신규 계약 파일의 줄 끝 공백 검사 통과.
+- 애플리케이션·DB·브라우저 테스트 미실행: 실행 코드 변경 없는 설계 문서 작업이다.
+
+#### 남은 작업 및 주의 사항
+
+- 재연결 한도·오류와 종료 코드·필드 형식·서로 다른 갱신의 경합을 구체화한다. 구현·배포·커밋·푸시는 수행하지 않았다.
+
+### #39 T01 WebSocket 재인증 성공 확인과 중복 재전송·재연결 계약 확정
+
+#### 변경 이유 및 내용
+
+- 사용자 승인에 따라 `auth.refresh`와 `auth.refreshed`를 요청 번호로 연결하고 서버의 인증 교체 완료 후 성공을 확인하는 계약을 추가했다.
+- 확인 유실 시 같은 JWT·요청 번호의 제한적 재전송, 현재 인증 검증 후 중복 성공 확인, 오래된 요청·응답의 상태 비퇴행을 명시했다. 끝내 확인하지 못하면 연결을 정리하고 유효 JWT로 재연결한 뒤 방 상태를 재조회한다.
+- 횟수·대기·전체 시간 예산과 오류·종료 코드는 미확정으로 분리했다. 기존 2분 전 갱신·만료 종료·방 참여 중 전환 금지 정책은 유지한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t01-websocket-auth-contract.md`
+- `docs/plans/39-t01-auth-architecture.md`
+- `docs/plans/39-handoff-2026-11-13.md`
+- `LOG.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. WebSocket 재인증 요청 `auth.refresh`의 `request_id`·`access_token`, 성공 응답 `auth.refreshed`의 `request_id`·`expires_at` 및 복구 동작을 설계상 확정했다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 관련 문서의 승인 상태·메시지·중복 및 만료 처리와 링크를 대조하고 `git diff --check` 통과.
+- 애플리케이션·DB·브라우저 테스트 미실행: 실행 코드 변경 없는 설계 문서 작업이다.
+
+#### 남은 작업 및 주의 사항
+
+- 확인 시간·재전송 예산·오류와 종료 코드·세부 필드 형식·다른 갱신과의 경합을 구체화한다. 구현·배포·커밋·푸시는 수행하지 않았다.
+
+### #39 방 참여 요청 시작부터 계정 전환을 차단하도록 설계 명확화
+
+#### 변경 이유 및 내용
+
+- 사용자 확인에 따라 방 참여 완료 후뿐 아니라 요청 시작·응답 대기부터 로그인·로그아웃·계정 전환을 차단하도록 ADR·명세·아키텍처·인계를 맞췄다.
+- 참여 성공 시 기존 참여·30초 유예 제한을 유지하고, 실패 확정 시 요청 중 차단을 해제한다. 응답 유실·시간 초과 시 서버의 참여 여부와 처리 결과를 확인하며 지연 성공 가능성을 남긴 단순 미참여 조회만으로 해제하지 않는다.
+- 프론트 차단과 서버 검증·기존 직렬화 요구를 유지했다. 방 이용 중 전환을 허용하는 흐름이나 모든 WebSocket 전송 전 DB 인증 조회는 채택하지 않았다.
+
+#### 주요 변경 파일
+
+- `docs/adr/0002-room-reconnect-and-account-switching.md`
+- `docs/specs/39-uuid-users-and-kakao-migration.md`
+- `docs/plans/39-t01-auth-architecture.md`
+- `docs/plans/39-handoff-2026-11-13.md`
+- `LOG.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. 요청 대기 중 계정 전환 제한과 결과 불명 시 복구 원칙의 설계 보충이다. 확인 경로·추적 방식·오류 코드는 미확정이다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 관련 문서의 차단 시작·해제 조건과 응답 유실 처리를 대조하고 `git diff --check` 통과.
+- 애플리케이션·DB·브라우저 테스트 미실행: 문서만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- 재인증 메시지·응답 계약, 참여 결과 확인 경로 및 서버 직렬화의 세부 구현을 설계한다. 코드 구현·배포는 수행하지 않았다.
+
+### #39 T01 활성 WebSocket의 JWT 갱신을 만료 2분 전에 시작
+
+#### 변경 이유 및 내용
+
+- 사용자 선택에 따라 활성 WebSocket이 있는 브라우저가 JWT 만료 120초 전에 갱신을 시작하도록 설계를 확정했다. 1시간 JWT 수명을 유지하며 새 JWT 만료 시각으로 다음 예약을 계산한다.
+- HTTP만 이용할 때의 만료 후 갱신과 적용 범위를 명확히 하고, 브라우저 지연·갱신 실패 시 서버의 만료 종료 및 2분 여유의 trade-off를 기록했다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t01-auth-architecture.md`
+- `docs/plans/39-handoff-2026-11-13.md`
+- `LOG.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. WebSocket 사전 갱신 시점의 설계 확정이다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 문서의 120초 정책과 HTTP·WebSocket 적용 범위 대조 및 `git diff --check` 통과.
+- 애플리케이션·DB·브라우저 테스트 미실행: 문서만 변경했다.
+
+#### 남은 작업 및 주의 사항
+
+- WebSocket 인증 종료 반영·재인증 메시지·경합 처리, DB 상세·계정 전환 동시성·운영 설정과 배포 절차를 설계한다. 코드 구현은 아직 하지 않았다.
+
+### #39 T01 WebSocket 연결 유지 중 JWT 재인증 방식 선택
+
+#### 변경 이유 및 내용
+
+- 사용자 선택에 따라 JWT 만료 전 새 JWT를 발급받고 현재 WebSocket에서 재인증하는 2번 방식을 채택했다. HTTP의 만료 응답 후 갱신 원칙과 활성 WebSocket의 사전 갱신 흐름을 구분했다.
+- 서버 검증과 성공 확인 후 같은 사용자·인증 기록의 연결 인증을 교체하며, 기존 JWT 만료까지 완료하지 못하면 종료하는 흐름을 기록했다. 연결 공백을 줄이는 이점과 타이머·재인증·경합 처리 비용, 공식 제품 사례 및 미확정 상세를 명시했다.
+- 인계 문서의 미승인 상태와 이전 추천안을 최신 결정으로 갱신했다. 이후 설명은 쉬운 개념·단계별 과정·trade-off·근거 있는 현업 사례·프로젝트 추천을 포함한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/39-t01-auth-architecture.md`
+- `docs/plans/39-handoff-2026-11-13.md`
+- `LOG.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. WebSocket 재인증 방향만 설계상 선택했으며 메시지·응답·오류·종료 코드는 미확정이다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 설계·인계 문서의 선택 상태와 HTTP 갱신 원칙의 적용 범위를 대조했다. `git diff --check` 통과.
+- 애플리케이션·DB·브라우저 테스트 미실행: 실행 코드 변경 없는 설계 문서 작업이다.
+
+#### 남은 작업 및 주의 사항
+
+- 갱신 시점·주체, 메시지 상세, 동시 갱신·응답 유실·순서 역전, 인증 종료의 기존 연결 반영을 설계한다. 구현·운영 적용은 수행하지 않았다.
+
 ### #39 다른 컴퓨터에서 이어가기 위한 설계 인계 문서 정리
 
 #### 변경 이유 및 내용

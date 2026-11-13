@@ -2,7 +2,7 @@
 
 현재 WhatBap의 사용자 생성과 인증은 카카오 계정을 전제로 한다. 사용자는 가입·로그인 없이 추천과 같이 고르기를 시작하고, 같은 브라우저에서 음식 취향과 식사 기록을 이어 쓰며, 필요할 때만 카카오 계정에 기록을 모으고 싶다.
 
-현재는 로그인 없는 이용자의 UUID 계정과 재방문 복원, UUID 기록의 카카오 계정 이관, 직접 편집하는 고유 닉네임·프로필 사진 업로드가 없다. 방 연결 종료 후 일반 참여자를 오프라인으로 남기는 기존 동작도, 30초 유예 후 자동 퇴장시키려는 새 정책과 다르다.
+현재는 로그인 없는 이용자의 UUID 계정과 재방문 복원, UUID 기록의 카카오 계정 이관, 직접 편집하는 고유 닉네임·프로필 사진 업로드가 없다. 방 연결 종료 후 일반 참여자를 오프라인으로 남기는 기존 동작도, 60초 유예 후 자동 퇴장시키려는 새 정책과 다르다.
 
 ## Solution
 
@@ -59,14 +59,14 @@
 43. As a user logging in again, I want the new UUID's records added to my Kakao account, so that my later activity is not lost.
 44. As a room participant, I want login and logout blocked until participation ends, so that my identity does not change during a room session.
 45. As a user whose Kakao account is participating in a room on another device, I want login on this device rejected, so that account migration does not occur during that participation.
-46. As a participant whose final room connection disconnects, I want my participation retained for 30 seconds, so that a brief interruption does not remove me immediately.
+46. As a participant whose final room connection disconnects, I want my participation retained for 60 seconds, so that a brief interruption does not remove me immediately.
 47. As a participant reconnecting within that grace period, I want my membership and completion state restored, so that I can continue where I left off.
 48. As a participant with another tab still connected, I want my membership retained, so that closing one connection does not start an unnecessary exit.
 49. As an ordinary participant absent beyond the grace period, I want to leave automatically, so that disconnected members do not remain indefinitely.
 50. As a remaining room participant, I want participant and completion counts updated after automatic departure, so that room progress stays accurate.
 51. As a host absent beyond the grace period, I want the room closed, so that participants are not left in a room without its host.
 52. As a participant receiving a room update or closure, I want consistent REST and WebSocket state, so that the screen reflects the actual room lifecycle.
-53. As a participant during the 30-second grace period, I want account switching to remain blocked, so that temporary disconnection cannot bypass the restriction.
+53. As a participant during the 60-second grace period, I want account switching to remain blocked, so that temporary disconnection cannot bypass the restriction.
 54. As a user after my participation ends, I want account switching available again, so that stale room rows or delayed cleanup do not block me indefinitely.
 55. As a developer, I want profile photos stored locally during development, so that upload behavior can be developed without cloud setup.
 56. As a developer, I want image storage to be configurable, so that an operational storage provider can be added later without changing user-facing behavior.
@@ -81,6 +81,19 @@
 - 기존 Bearer 접근 토큰 및 WebSocket의 최초 인증 메시지 흐름을 활용한다. 브라우저가 보관한 재방문 인증 정보로 같은 사용자를 복원하고 접근 토큰 만료 시 자동 갱신할 수 있게 한다. 접근 토큰 만료만으로 새 UUID를 만들지 않는다.
 - 최초 생성·복원·갱신·로그아웃 응답은 프론트가 현재 사용자 유형, UUID의 유효 여부, 표시 닉네임·사진과 인증 상태를 일관되게 갱신할 수 있어야 한다. UUID와 계정 정보는 Request/Response DTO로 표현한다.
 - 기존 내 정보·비선호·식사 기록·추천 및 방 API에서 UUID 사용자도 본인 데이터로 동작하게 한다. 카카오 로그인 없는 이용과 인증 정보가 없는 요청은 구분한다.
+- 2026-11-13 T02 사용자 승인: 랜덤·주문서 메뉴 추천은 유효한 서비스 JWT와 DB 인증 세션 검증 후 제공한다(B). 기존 JWT 없는 메뉴 추천 호출은 인증 오류로 바뀌며 인증 실패 시 비인증 추천으로 자동 전환하지 않는다. 적용 범위·연동 영향과 남은 설계는 [T02 아키텍처](../plans/39-t02-personal-data-architecture.md)를 따른다. 이 항목은 승인된 설계이며 아직 실행 코드에 적용하지 않았다.
+- 2026-11-13 T02 추가 승인: 주문서 질문 조회도 동일한 JWT·DB 인증 세션 검증을 필수로 하고, 서버가 확인한 사용자 기준으로 질문 선택 이력을 이용한다(①). 기존 상위·탐색 질문 선택 알고리즘은 유지하며 JWT 없는 질문 경로로 우회하지 않는다. 기존 비인증 질문 이력의 삭제·귀속 이관은 이번 선택에 포함하지 않으며, 아직 실행 코드에 적용하지 않았다.
+- 2026-11-13 T02 추가 승인: 피드백도 JWT·DB 인증 세션 검증 후 현재 본인 소유 추천에만 남기며 평가 메뉴가 해당 추천에 포함됐는지 확인한다. 거절된 요청은 피드백·통계를 변경하지 않는다. 사용자 없는 기존 추천은 보존하되 일반 사용자 피드백은 받지 않는다. 반복 평가·수정·중복 전송은 별도 설계하며 아직 실행 코드에는 적용하지 않았다.
+- 2026-11-13 T02 후속 선택: 평가 변경과 변경 이력 보존을 허용한다(D04). 사용자가 개인 메뉴 선호의 누적 반영을 추가 요청했다(D05). 기존 최신 평가 방식의 다음 한 번만 적용되는 효과를 수정하는 것이 아니라 집계 방식을 바꾸는 설계이며, 누적 단위·계산식·수정·재전송·공통 통계의 세부는 미결정이다. 아직 실행 코드에는 적용하지 않았다.
+- 2026-11-13 D05 후속 승인: 개인 선호 누적의 단위는 같은 사용자·추천·메뉴별 최신 유효 평가 한 건이다. 서로 다른 추천의 유효 평가는 누적하고 수정 이력은 모두 보존하며 통신 재전송은 새 평가로 집계하지 않는다. 계산식·공통 통계·적용 범위 등 나머지 세부는 아직 미결정이며 실행 코드에 적용하지 않았다.
+- 2026-11-13 D06 승인: 알레르기·섭취 불가·비선호의 유형별 전체 목록 저장은 기존 비선호와 같이 DB 잠금으로 직렬화하고 마지막 성공 저장을 우선한다. 목록 버전 검사는 필수로 도입하지 않으며 오래된 화면의 전체 저장도 유효하면 반영한다. 다른 유형·사용자 데이터는 보존하고 저장 실패는 롤백한다. 알레르기·섭취 불가 API 확장은 아직 실행 코드에 적용하지 않았다.
+- 2026-11-13 D07 승인: 알레르기 신규 등록은 서버의 선택 목록에서만 허용하며 목록 밖 자유 입력은 받지 않는다. 고정 코드의 유효성을 서버가 검증하고 실제 제외 조건으로 매핑한다. 기존 목록 밖 알레르기 데이터는 임의 삭제·변환하지 않으며 조회·편집 호환은 후속 정리한다. 섭취 불가·비선호를 같은 목록으로 제한한 결정은 아니며 아직 실행 코드에 적용하지 않았다.
+- 2026-11-13 D08 승인: 섭취 불가 신규 등록도 서버의 음식·재료 선택 목록에 한정하며 직접 입력은 받지 않는다. 목록의 구체적 항목·범위·매핑은 미결정이고 알레르기 목록 재사용을 승인한 것은 아니다. 기존 목록 밖 데이터는 보존하며 조회·편집 호환은 후속 정리한다. 비선호 입력 범위와 실행 코드는 아직 변경하지 않았다.
+- 2026-11-13 D09 승인: 섭취 불가는 개별 메뉴가 아닌 재료 중심의 서버 선택 목록으로 제공하고, 재료 코드를 메뉴 분류·태그·키워드와 연결해 제외한다. 초기 8개 항목은 데이터 매핑 검토가 필요한 초안이며 모든 항목·범위를 확정한 것은 아니다. 대표 주재료와 추정 태그를 전체 재료 명세로 간주하지 않으며 아직 실행 코드에 적용하지 않았다.
+- 2026-11-13 D10 승인: 개인 메뉴 선호의 누적은 오늘 주문서 답변 점수에 대한 보조 가산·감점으로 반영하고 유효 평가 건수·만족 비율을 참고하며 영향에 한도를 둔다(②). 실제 반영 강도·수식·스케일은 같은 T02 설계에서 구현 전에 정하고, 100점·±10점·기준 건수 4의 설명 예시를 확정값으로 사용하지 않는다. 강제 제외를 우선하며 아직 실행 코드에 적용하지 않았다.
+- 2026-11-13 D11·D12 최신 선택: 여러 신호를 학습하는 추천 모델을 사용하고 실제 사용자 피드백으로 조정한다. 모델 종류·학습 신호·주기·예측·데이터 부족 처리와 D10 연결은 [체크리스트](../plans/39-t02-architecture-checklist.md)에서 선택한다. 여러 항목을 trade-off와 함께 제시하고 사용자가 선택·보류·질문하는 방식으로 진행하며 미응답이나 추천을 승인으로 간주하지 않는다. 아직 실행 코드에 적용하지 않았다.
+- 2026-11-13 D13 후속 승인: 체크리스트 1A·2A·3A·4A·5B·6A·7A·8B를 선택했다. 오늘 답변 기본 점수의 제한 재정렬, 명시적 만족 라벨을 학습하는 공용 로지스틱 모델, 주기 학습·개인 입력 갱신, 현재 백엔드 예측·별도 학습, 인증·제외 검증 후 기존 추천 대체 경로와 최근 평가 중시로 설계한다. 9·10번은 보류이고 실제 계수·시간·학습·버전·검증 계약과 실행 코드 적용은 남아 있다.
+- 2026-11-13 D14 최신 선택·일정: 9B(기존 값을 정식 항목과 정확히 대응한 뒤 편집)와 10A(주문서·피드백 본문 사용자 번호 제거·JWT 전용)를 승인했다. 대응이 불명확한 원본은 보존한다. 오늘 2시간 제한은 아키텍처 설계이며 구현·실제 검증은 내일(2026-11-14) 진행한다. [설계 마무리 계획](../plans/39-design-completion-plan.md)을 따른다.
 - 카카오 사용자 정보 조회에서는 계정 식별을 검증하되 서비스에서 정한 프로필을 매번 카카오 닉네임·사진으로 동기화하지 않는다.
 
 ### 기록 이관과 프로필 우선순위
@@ -98,11 +111,12 @@
 
 ### 방 참여와 계정 전환
 
+- 방 참여 요청 시작부터 응답 대기 중에도 로그인·로그아웃·계정 전환을 차단한다. 참여 성공 시 방 참여 중 제한을 유지하고, 참여 실패가 확정되면 요청 중 차단을 해제한다. 응답 유실·시간 초과 시 서버에서 참여 여부와 처리 결과를 확인한 뒤 해제 여부를 판단하며, 처리 중 요청의 뒤늦은 성공 가능성을 단순 미참여 조회로 배제하지 않는다. 프론트 차단과 서버 검증을 함께 적용한다.
 - 로그인·로그아웃 시 현재 사용자의 유효한 방 참여 여부를 확인한다. 로그인 대상 카카오 계정이 다른 기기에서 유효한 방에 참여 중인 경우도 거절한다.
 - 계정 전환과 방 생성·참여가 동시에 실행되어도 제한이 우회되지 않도록 상태 확인과 변경을 직렬화한다. 전환 거절 시 프로필·기록·UUID를 변경하지 않는다.
-- 온라인 여부만으로 방 참여를 판단하지 않는다. 30초 유예 동안은 참여 상태와 로그인·로그아웃 제한을 유지한다.
-- 사용자의 마지막 연결 종료 후 30초 안에 재접속하면 종료 예약을 취소하고 기존 참여·완료 상태를 유지한다. 여러 탭 중 하나만 종료된 경우는 마지막 연결 종료로 보지 않는다.
-- 30초가 지나면 일반 참여자의 주문서·참여 정보를 기존 퇴장 의미에 맞게 정리하고 인원·완료 집계를 재계산한다. 방장의 유예가 끝나면 기존 방 종료·이벤트·관련 데이터 정리 흐름을 사용한다.
+- 온라인 여부만으로 방 참여를 판단하지 않는다. 60초 유예 동안은 참여 상태와 로그인·로그아웃 제한을 유지한다.
+- 사용자의 마지막 연결 종료 후 60초 안에 재접속하면 종료 예약을 취소하고 기존 참여·완료 상태를 유지한다. 여러 탭 중 하나만 종료된 경우는 마지막 연결 종료로 보지 않는다.
+- 60초가 지나면 일반 참여자의 주문서·참여 정보를 기존 퇴장 의미에 맞게 정리하고 인원·완료 집계를 재계산한다. 방장의 유예가 끝나면 기존 방 종료·이벤트·관련 데이터 정리 흐름을 사용한다.
 - WebSocket 상태 변화와 DB 정리 결과를 일관되게 알린다. 재접속·유예 만료 경합과 서버 재시작 후 정리 누락을 처리한다.
 - 만료되거나 이미 종료된 방 때문에 로그인이 무기한 차단되지 않도록 유효한 참여 상태를 판정한다.
 
@@ -131,7 +145,7 @@
 - 사용자 확인을 받은 주 경계는 실제 FastAPI 애플리케이션의 REST API·WebSocket 진입점이다. 내부 함수별 테스트를 대량 추가하기보다 사용자 요청부터 저장·응답·이벤트까지의 관찰 가능한 동작을 검증한다.
 - 기존 테스트 클라이언트, 의존성 대체와 격리된 SQLite DB를 재사용한다. 사진은 임시 디렉터리에 저장하고 실제 파일 업로드·조회·교체·삭제 결과를 확인한다.
 - 카카오의 외부 HTTP 응답과 시간만 통제한다. UUID 이관·권한 검사·데이터 저장·닉네임 유일성·파일 검증 자체를 모의 처리하지 않는다.
-- 30초 유예는 테스트 시계를 제어하거나 만료 기준 시각을 주입해 확인한다. 실제로 30초를 기다리는 테스트를 기본으로 삼지 않는다.
+- 60초 유예는 테스트 시계를 제어하거나 만료 기준 시각을 주입해 확인한다. 실제로 60초를 기다리는 테스트를 기본으로 삼지 않는다.
 - HTTP·WebSocket만으로 관찰하기 어려운 재시작 복구는 정리 작업의 상위 실행 경계에서 호출하고, 결과는 방 조회·이벤트·저장 상태로 확인한다.
 
 ### 검증할 모듈과 시나리오
@@ -141,7 +155,7 @@
 - 추천·사용자 기록: 유형별 제외 목록 합집합과 중복 제거, 합계 100개 초과 시 무손실 조회·편집, 식사·추천·피드백의 원본 순서 및 개인화 상태 보존.
 - 프로필: 닉네임 길이 1·2·20·21자, 허용·금지 문자, 공백 처리, 본인 이름 재저장과 타인 이름 충돌, 랜덤 생성 충돌 재시도.
 - 사진: 세 가지 허용 형식, 용량 경계, 확장자와 실제 내용 불일치, 잘못된 이미지, 업로드 실패 시 기존 사진 유지, 교체·삭제와 기본 이미지 복귀, 타인의 파일 수정 차단.
-- 방·WebSocket: 로그인·로그아웃 제한, 다른 기기의 대상 계정 참여, 마지막 연결과 복수 탭, 유예 안 재접속, 30초 만료 후 참여자 퇴장·방장 종료, 인원·완료 집계와 이벤트, 정리 작업 복구.
+- 방·WebSocket: 로그인·로그아웃 제한, 다른 기기의 대상 계정 참여, 마지막 연결과 복수 탭, 유예 안 재접속, 60초 만료 후 참여자 퇴장·방장 종료, 인원·완료 집계와 이벤트, 정리 작업 복구.
 - 회귀: 기존 카카오 인증, 내 정보, 비선호·식사 API, 개인 추천·피드백, 방 생성·참여·퇴장·만료의 영향을 확인한다.
 
 ### 동시성·운영 DB 보완
@@ -158,7 +172,7 @@
 - 카카오 연결 없이 다른 기기에서 UUID 사용자를 복구하거나 임의의 UUID 기록을 가져오는 기능.
 - 추가 소셜 로그인 제공자와 별도 비밀번호 회원가입.
 - UUID 사용자의 닉네임·사진을 카카오 프로필로 계속 자동 동기화하는 기능.
-- 메뉴 데이터나 개인 추천 가중치 알고리즘의 별도 개선.
+- 메뉴 데이터나 개인 추천 가중치 알고리즘의 별도 개선. 단, 사용자가 추가한 T02 D05·D11의 개인 평가 누적·여러 신호 학습형 추천은 포함하며 데이터·모델·학습·검증·예측 세부를 설계한다. 이를 그룹 추천이나 다른 알고리즘 전반의 개선 승인으로 해석하지 않는다.
 - 프론트엔드 전체 화면 구현. 백엔드와 연동하기 위한 세션·응답·오류·업로드 계약과 연동 검증 사항은 포함한다.
 
 ## Further Notes
