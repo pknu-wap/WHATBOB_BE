@@ -99,12 +99,25 @@ def test_host_reconnect_cancels_disconnect_cleanup(monkeypatch):
     monkeypatch.setattr(settings, "ROOM_HOST_DISCONNECT_GRACE_SECONDS", 60)
     client, db, host = build_client()
     room_id = client.post("/api/rooms", json={"max_members": 2}).json()["room_id"]
-    disconnected_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+    disconnected_at = datetime.now(timezone.utc) - timedelta(seconds=30)
 
     assert mark_host_disconnected(db, room_id, host.id, disconnected_at) is True
     assert clear_host_disconnected(db, room_id, host.id) is True
-    assert close_due_rooms(db, now=datetime.now(timezone.utc)) == []
+    assert close_due_rooms(db, now=datetime.now(timezone.utc) + timedelta(minutes=2)) == []
     assert db.query(Room).filter(Room.public_id == room_id).one().status == "WAITING"
+
+
+def test_host_reconnect_after_grace_deadline_closes_room(monkeypatch):
+    monkeypatch.setattr(settings, "ROOM_HOST_DISCONNECT_GRACE_SECONDS", 60)
+    client, db, host = build_client()
+    room_id = client.post("/api/rooms", json={"max_members": 2}).json()["room_id"]
+    disconnected_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+
+    assert mark_host_disconnected(db, room_id, host.id, disconnected_at) is True
+    assert clear_host_disconnected(db, room_id, host.id) is False
+    room = db.query(Room).filter(Room.public_id == room_id).one()
+    assert room.status == "CLOSED"
+    assert room.close_reason == ROOM_CLOSE_REASON_HOST_DISCONNECTED
 
 
 def test_host_disconnect_past_grace_period_is_cleanup_target(monkeypatch):
@@ -202,33 +215,42 @@ def test_host_cannot_leave_through_member_endpoint():
     assert db.query(RoomMember).count() == 1
 
 
-def test_member_presence_grace_preserves_membership_and_order_sheet(monkeypatch):
+def test_member_presence_grace_preserves_within_60s_and_removes_after_60s(monkeypatch):
     monkeypatch.setattr(settings, "ROOM_MEMBER_DISCONNECT_GRACE_SECONDS", 60)
-    client, db, _ = build_client()
+    client, db, host = build_client()
     room_id = client.post("/api/rooms", json={"max_members": 2}).json()["room_id"]
+    assert client.post(f"/api/rooms/{room_id}/order-sheet/complete").status_code == 200
     participant = add_user(db, 222222222, "participant")
     client.app.dependency_overrides[get_current_user] = lambda: participant
     assert client.post(f"/api/rooms/{room_id}/join").status_code == 201
     assert client.post(f"/api/rooms/{room_id}/order-sheet/complete").status_code == 200
 
     assert mark_room_member_online(db, room_id, participant.id) is True
-    disconnected_at = datetime.now(timezone.utc) - timedelta(seconds=61)
+    now = datetime.now(timezone.utc)
+    disconnected_at = now - timedelta(seconds=59)
     assert mark_room_member_disconnected(
         db, room_id, participant.id, disconnected_at
     ) is True
+    # 59초 시점에는 유예 기간 내이므로 퇴장되지 않고 주문서와 참여가 유지된다.
     assert mark_room_member_offline_after_grace(
-        db, room_id, participant.id, now=datetime.now(timezone.utc)
-    ) is True
-
-    member = (
-        db.query(RoomMember)
-        .filter(RoomMember.user_id == participant.id)
-        .one()
-    )
-    assert member.is_online is False
-    assert member.disconnected_at is not None
+        db, room_id, participant.id, now=now
+    ) is False
     assert db.query(RoomMember).count() == 2
+    assert db.query(RoomMemberOrderSheet).count() == 2
+
+    # 60초 경과 시점에는 해당 참가자만 자동 퇴장되고 주문서가 삭제되며 남은 인원 기준 통계가 재계산된다.
+    left = mark_room_member_offline_after_grace(
+        db, room_id, participant.id, now=disconnected_at + timedelta(seconds=60)
+    )
+    assert left is not False
+    assert left.user_id == participant.id
+    assert left.member_count == 1
+    assert left.completed_member_count == 1
+    assert left.all_members_completed is True
+    assert db.query(RoomMember).filter(RoomMember.user_id == participant.id).one_or_none() is None
+    assert db.query(RoomMember).count() == 1
     assert db.query(RoomMemberOrderSheet).count() == 1
+    assert host.id == db.query(RoomMember).one().user_id
 
 
 def test_member_reconnect_cancels_offline_transition(monkeypatch):

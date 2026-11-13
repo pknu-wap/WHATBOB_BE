@@ -12,6 +12,7 @@ import app.users.models  # noqa: F401
 from app.core.database import Base, get_db
 from app.menus.display import format_menu_name
 from app.menus.models import Menu, OrderSheetQuestion, Recommendation
+from app.users.models import User
 from app.recommend.router import router
 
 
@@ -80,11 +81,14 @@ def test_recommendation_formats_names_without_changing_storage_or_exclusions():
                     ]},
                 ],
             )
-            db.add_all([*menus, question])
+            user = User(kakao_id=702001, nickname="표시명테스터")
+            db.add_all([user, *menus, question])
             db.commit()
             app = FastAPI()
             app.include_router(router)
             app.dependency_overrides[get_db] = lambda: db
+            from app.auth.dependencies import get_current_user
+            app.dependency_overrides[get_current_user] = lambda: user
             body = {"answers": [{"question_id": question.id, "option_id": "soup_no"}]}
             with TestClient(app) as client:
                 response = client.post("/api/recommendations/order-sheet", json=body)

@@ -5,12 +5,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app.core.database import get_db
+from app.auth.dependencies import get_current_user
+from app.core.database import Base, get_db
 from app.menus.models import OrderSheetQuestion, QuestionSelectionState
 from app.recommend.common import QuestionPoolEmptyException
 from app.recommend.order_sheet import select_order_sheet_questions
 from app.recommend.question_pool import build_candidate_question_pool
 from app.recommend.router import router
+from app.users.models import User
 
 
 @pytest.fixture
@@ -18,8 +20,7 @@ def db():
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
     )
-    OrderSheetQuestion.__table__.create(engine)
-    QuestionSelectionState.__table__.create(engine)
+    Base.metadata.create_all(engine)
     with Session(engine) as session:
         yield session
     engine.dispose()
@@ -90,9 +91,13 @@ def test_http_counts_ignore_inactive_topics(db):
     # 한 주제의 최상위 질문이 비활성이면 그 주제의 다음 질문을 사용한다.
     representatives[0].is_active = False
     db.commit()
+    user = User(kakao_id=704001, nickname="질문조회유저")
+    db.add(user)
+    db.commit()
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_current_user] = lambda: user
     with TestClient(app) as client:
         response = client.get("/api/recommendations/order-sheet/questions")
     assert response.status_code == 200
@@ -139,16 +144,18 @@ def test_topic_shortage_reuses_only_when_necessary(db):
         assert result.total_count == len({q.cluster_key for q in result.questions}) == 9
 
 
-def test_http_cookie_session_and_no_store_prevent_repeated_questions(db):
+def test_http_user_session_and_no_store_prevent_repeated_questions(db):
     add_question_topics(db, 12)
+    user = User(kakao_id=704002, nickname="탐색순환유저")
+    db.add(user)
+    db.commit()
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_current_user] = lambda: user
     with TestClient(app) as client:
         first = client.get("/api/recommendations/order-sheet/questions")
-        cookie = client.cookies.get("question_session")
         second = client.get("/api/recommendations/order-sheet/questions")
-        assert cookie == client.cookies.get("question_session")
     assert first.headers["cache-control"] == second.headers["cache-control"] == "no-store"
     first_topics = {q["cluster_key"] for q in first.json()["data"]["questions"] if q["is_exploration"]}
     second_topics = {q["cluster_key"] for q in second.json()["data"]["questions"] if q["is_exploration"]}

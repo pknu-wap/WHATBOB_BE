@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.auth import kakao, service
-from app.core.database import get_db
+from app.core.database import Base, get_db
+from tests.auth_helpers import session_token
 from app.core.security import create_access_token, decode_access_token
 from app.main import app
 from app.users.models import User
@@ -71,7 +72,7 @@ def profile_client():
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
     )
-    User.__table__.create(engine)
+    Base.metadata.create_all(engine)
     overrides = app.dependency_overrides.copy()
     try:
         with Session(engine) as db:
@@ -93,7 +94,7 @@ def test_login_and_me_return_same_profile_and_preserve_login_contract(profile_cl
     response = client.post("/api/auth/kakao/login", json={"code": "test-auth-code"})
     assert response.status_code == 200
     login = response.json()
-    assert set(login) == {"access_token", "token_type", "user", "is_new_user"}
+    assert set(login) == {"access_token", "token_type", "expires_in", "user", "is_new_user"}
     assert login["is_new_user"] is True
     assert login["token_type"] == "bearer"
     user = login["user"]
@@ -120,7 +121,7 @@ def test_login_and_me_return_same_profile_and_preserve_login_contract(profile_cl
     assert me.json() == user
 
 
-def test_existing_login_updates_profile_but_does_not_erase_missing_fields(profile_client, monkeypatch):
+def test_existing_login_preserves_whatbap_profile(profile_client, monkeypatch):
     client, db = profile_client
     existing = User(kakao_id=900001, nickname="이전닉네임", profile_image="https://example.test/old.jpg")
     db.add(existing)
@@ -133,8 +134,8 @@ def test_existing_login_updates_profile_but_does_not_erase_missing_fields(profil
     updated = client.post("/api/auth/kakao/login", json={"code": "test-code"}).json()
     assert updated["is_new_user"] is False
     assert updated["user"]["id"] == identifier
-    assert updated["user"]["nickname"] == "갱신닉네임"
-    assert updated["user"]["profile_image"] == "https://example.test/new.jpg"
+    assert updated["user"]["nickname"] == "이전닉네임"
+    assert updated["user"]["profile_image"] == "https://example.test/old.jpg"
     mock_kakao_response(monkeypatch, {"id": 900001})
     retained = client.post("/api/auth/kakao/login", json={"code": "test-code"}).json()
     assert retained["user"] == updated["user"]
@@ -173,7 +174,7 @@ def test_me_does_not_fabricate_missing_profile(profile_client):
     user = User(kakao_id=900001)
     db.add(user)
     db.commit()
-    token = create_access_token({"sub": str(user.id)})
+    token = session_token(db, user)
     response = client.get("/api/users/me", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
     assert response.json()["nickname"] is None

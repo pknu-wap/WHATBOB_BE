@@ -5,9 +5,11 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app.core.database import get_db
+from app.auth.dependencies import get_current_user
+from app.core.database import Base, get_db
 from app.menus.models import OrderSheetQuestion, QuestionSelectionState
 from app.recommend.router import router
+from app.users.models import User
 
 
 @pytest.mark.parametrize("weight_key, recalculate_key", [
@@ -21,10 +23,10 @@ def test_weight_names_preserve_http_and_database_compatibility(weight_key, recal
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    OrderSheetQuestion.__table__.create(engine)
-    QuestionSelectionState.__table__.create(engine)
+    Base.metadata.create_all(engine)
     try:
         with Session(engine) as db:
+            user = User(kakao_id=703001, nickname="가중치계약테스터")
             question = OrderSheetQuestion(
                 question_code="q_soup_contract",
                 cluster_key="has_soup",
@@ -40,13 +42,14 @@ def test_weight_names_preserve_http_and_database_compatibility(weight_key, recal
                 initial_score=0.8,
                 importance_weight=0.7,
             )
-            db.add(question)
+            db.add_all([user, question])
             db.commit()
             question_id = question.id
 
             app = FastAPI()
             app.include_router(router)
             app.dependency_overrides[get_db] = lambda: db
+            app.dependency_overrides[get_current_user] = lambda: user
             with TestClient(app) as client:
                 response = client.post("/api/recommendations/order-sheet/weights", json={
                     "adjustments": [{"question_id": question_id, weight_key: 1.25}],

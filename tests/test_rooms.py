@@ -7,7 +7,7 @@ from sqlalchemy.pool import StaticPool
 from app.auth.dependencies import get_current_user
 from app.core.config import settings
 from app.core.database import Base, get_db
-from app.core.security import create_access_token
+from tests.auth_helpers import session_token
 from app.rooms.models import Room, RoomMember, RoomMemberOrderSheet
 from app.rooms.router import router
 from app.rooms.websocket import router as websocket_router
@@ -35,7 +35,7 @@ def build_client():
     app.include_router(websocket_router)
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[get_current_user] = lambda: user
-    return TestClient(app), db, user
+    return TestClient(app, headers={"Origin": settings.FRONTEND_BASE_URL.rstrip("/")}), db, user
 
 
 def test_create_room_and_register_host(monkeypatch):
@@ -401,7 +401,7 @@ def test_room_websocket_broadcasts_join_and_completion_events():
         "/api/rooms",
         json={"max_members": 3},
     ).json()["room_id"]
-    host_token = create_access_token({"sub": str(host.id)})
+    host_token = session_token(db, host)
 
     with client.websocket_connect(f"/ws/rooms/{room_id}") as websocket:
         websocket.send_json(
@@ -452,7 +452,7 @@ def test_room_websocket_broadcasts_member_left_with_recalculated_progress():
         json={"max_members": 2},
     ).json()["room_id"]
     assert client.post(f"/api/rooms/{room_id}/order-sheet/complete").status_code == 200
-    host_token = create_access_token({"sub": str(host.id)})
+    host_token = session_token(db, host)
 
     with client.websocket_connect(f"/ws/rooms/{room_id}") as websocket:
         websocket.send_json({"type": "auth", "access_token": host_token})
@@ -484,7 +484,7 @@ def test_room_websocket_rejects_non_member():
         json={"max_members": 2},
     ).json()["room_id"]
     non_member = add_user(db, 987654321, "non-member")
-    non_member_token = create_access_token({"sub": str(non_member.id)})
+    non_member_token = session_token(db, non_member)
 
     with client.websocket_connect(f"/ws/rooms/{room_id}") as websocket:
         websocket.send_json(
@@ -510,6 +510,7 @@ def test_room_websocket_rejects_invalid_token():
                 "access_token": "invalid-token",
             }
         )
+        assert websocket.receive_json()["code"] == "ACCESS_TOKEN_INVALID"
         try:
             websocket.receive_json()
             assert False, "Expected WebSocketDisconnect"

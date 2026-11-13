@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, StringConstraints, field_validator
 
 MAX_DISLIKED_FOODS = 100
 DislikedFoodKeyword = Annotated[
@@ -13,17 +13,25 @@ class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    kakao_id: int
+    uuid: str
+    kakao_id: int | None
     nickname: str | None = None
     email: str | None = None
     profile_image: str | None = None
+
+
+class NicknameUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    nickname: StrictStr = Field(description="표시 닉네임 (앞뒤 공백 제거 후 2~20자 한글/영문/숫자/공백)")
+
 
 
 class DislikedFoodsUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     keywords: list[DislikedFoodKeyword] = Field(
-        max_length=MAX_DISLIKED_FOODS,
+        max_length=1000,
         description="비선호 목록 전체. 빈 배열은 비선호 설정만 모두 해제합니다.",
     )
 
@@ -46,6 +54,39 @@ class DislikedFoodResponse(BaseModel):
 class DislikedFoodsResponse(BaseModel):
     items: list[DislikedFoodResponse]
     total_count: int
+
+
+class CatalogExclusionItemResponse(BaseModel):
+    id: int
+    code: str
+    label: str
+    keyword: str
+    catalog_version: int = 1
+
+
+class LegacyExclusionItemResponse(BaseModel):
+    id: int
+    keyword: str
+
+
+class CatalogExclusionsResponse(BaseModel):
+    exclusion_type: str
+    catalog_version: int = 1
+    editable: bool = True
+    codes: list[str]
+    items: list[CatalogExclusionItemResponse]
+    legacy_items: list[LegacyExclusionItemResponse] = Field(default_factory=list)
+    total_count: int
+
+
+class CatalogExclusionsUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    codes: list[StrictStr] = Field(
+        default_factory=list,
+        max_length=50,
+        description="선택한 표준 카탈로그 코드 배열. 빈 배열로 전체 해제 가능",
+    )
 
 
 class UserMealCreateRequest(BaseModel):

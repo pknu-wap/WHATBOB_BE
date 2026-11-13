@@ -54,7 +54,7 @@ def test_frontend_code_is_forwarded_to_login_service(client, monkeypatch):
     login = AsyncMock(return_value={
         "access_token": "test-service-jwt",
         "token_type": "bearer",
-        "user": {"id": 1, "kakao_id": 123},
+        "user": {"id": 1, "uuid": "871b47cb-d592-4f6c-bff2-8feb5606ddcb", "kakao_id": 123},
         "is_new_user": True,
     })
     monkeypatch.setattr(auth_router, "process_kakao_login", login)

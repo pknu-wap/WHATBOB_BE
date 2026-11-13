@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base, get_db
 from app.menus.models import Menu, OrderSheetQuestion, Recommendation
+from app.users.models import User
 from app.recommend.common import evaluate_option_rules
 from app.recommend.order_sheet import record_recommendation_feedback
 from app.recommend.question_pool import build_candidate_question_pool
@@ -154,9 +155,14 @@ def test_seed_preserves_old_feedback_and_serves_binary_questions(db):
     assert old.options_json == old_options
     assert before_menus == [(m.id, m.name, m.kcal, m.allergen_tags) for m in db.query(Menu).all()]
 
+    user = User(kakao_id=701001, nickname="이진질문테스터")
+    db.add(user)
+    db.commit()
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_db] = lambda: db
+    from app.auth.dependencies import get_current_user
+    app.dependency_overrides[get_current_user] = lambda: user
     with TestClient(app) as client:
         response = client.get("/api/recommendations/order-sheet/questions")
         assert response.status_code == 200

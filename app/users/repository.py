@@ -42,6 +42,57 @@ def remove_disliked_food(db: Session, exclusion: UserFoodExclusion) -> None:
     db.delete(exclusion)
 
 
+def find_exclusions_by_type(
+    db: Session,
+    user_id: int,
+    exclusion_type: str,
+    for_update: bool = False,
+) -> list[UserFoodExclusion]:
+    query = (
+        db.query(UserFoodExclusion)
+        .filter(
+            UserFoodExclusion.user_id == user_id,
+            UserFoodExclusion.exclusion_type == exclusion_type,
+        )
+        .order_by(UserFoodExclusion.id.asc())
+    )
+    if for_update:
+        query = query.with_for_update()
+    return query.all()
+
+
+def add_catalog_exclusion(
+    db: Session,
+    user_id: int,
+    exclusion_type: str,
+    code: str,
+    label: str,
+    catalog_version: int = 1,
+) -> None:
+    db.add(
+        UserFoodExclusion(
+            user_id=user_id,
+            exclusion_type=exclusion_type,
+            keyword=label,
+            catalog_code=code,
+            catalog_version=catalog_version,
+        )
+    )
+
+
+def find_user_meal(db: Session, user_id: int, meal_id: int) -> UserMeal | None:
+    return (
+        db.query(UserMeal)
+        .filter(UserMeal.id == meal_id, UserMeal.user_id == user_id)
+        .with_for_update()
+        .one_or_none()
+    )
+
+
+def remove_user_meal(db: Session, meal: UserMeal) -> None:
+    db.delete(meal)
+
+
 def find_menu_by_id(db: Session, menu_id: int) -> Menu | None:
     return db.query(Menu).filter(Menu.id == menu_id).one_or_none()
 

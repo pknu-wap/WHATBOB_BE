@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base, get_db
-from app.core.security import create_access_token
+from tests.auth_helpers import session_token
 from app.menus.models import Menu, OrderSheetQuestion, QuestionSelectionState, Recommendation, RecommendationFeedback
 from app.recommend.common import InvalidOrderSheetException, NoAvailableFoodException
 from app.recommend.order_sheet import create_order_sheet_recommendation, record_recommendation_feedback
@@ -124,7 +124,26 @@ def test_recent_menu_groups_rotate_for_one_user_only(db):
     assert not db.query(Recommendation).filter(Recommendation.user_id == other.id).count()
 
 
-def test_dislike_lowers_only_that_users_menu_and_later_like_restores_it(db, monkeypatch):
+def test_dislike_lowers_only_that_users_menu_and_later_like_restores_it(db, tmp_path, monkeypatch):
+    from app.menus.models import RecommendationFeedbackState
+    from app.recommend.personal_model import compute_artifact_checksum, FEATURE_NAMES
+
+    monkeypatch.setattr("app.recommend.variety.NEAR_SCORE_RATIO", 0.002)
+    artifact_file = tmp_path / "personal_active.json"
+    payload = {
+        "version": "test-v1",
+        "feature_schema_version": 1,
+        "feature_names": list(FEATURE_NAMES),
+        "intercept": 0.0,
+        "weights": [0.0, 4.0, 0.0, 0.0, 0.0, 0.0],
+        "means": [0.0 for _ in FEATURE_NAMES],
+        "stds": [1.0 for _ in FEATURE_NAMES],
+        "metrics": {"val_log_loss": 0.4, "val_brier_score": 0.12},
+        "validation_passed": True,
+    }
+    payload["checksum"] = compute_artifact_checksum(payload)
+    artifact_file.write_text(json.dumps(payload), encoding="utf-8")
+
     user = User(kakao_id=102)
     other = User(kakao_id=103)
     db.add_all([user, other])
@@ -133,17 +152,23 @@ def test_dislike_lowers_only_that_users_menu_and_later_like_restores_it(db, monk
     rec = Recommendation(user_id=user.id, recommended_menu_ids=[pizza.id, burger.id])
     db.add(rec)
     db.flush()
-    feedback = RecommendationFeedback(recommendation_id=rec.id, user_id=user.id,
-                                      selected_menu_id=pizza.id, is_satisfied=False)
-    db.add(feedback)
+    state = RecommendationFeedbackState(
+        recommendation_id=rec.id,
+        user_id=user.id,
+        selected_menu_id=pizza.id,
+        menu_key="피자",
+        menu_base_name="피자",
+        menu_main_ingredient="other",
+        is_satisfied=False,
+    )
+    db.add(state)
     db.commit()
-    candidates = [(1.0, [], pizza), (0.85, [], burger)]
-    assert select_diverse_menus(db, candidates, user.id, 1, 1)[0][2].id == burger.id
-    assert select_diverse_menus(db, candidates, other.id, 1, 1)[0][2].id == pizza.id
-    db.add(RecommendationFeedback(recommendation_id=rec.id, user_id=user.id,
-                                 selected_menu_id=pizza.id, is_satisfied=True))
+    candidates = [(1.0, [], pizza), (0.995, [], burger)]
+    assert select_diverse_menus(db, candidates, user.id, 1, 1, artifact_path=artifact_file)[0][2].id == burger.id
+    assert select_diverse_menus(db, candidates, other.id, 1, 1, artifact_path=artifact_file)[0][2].id == pizza.id
+    state.is_satisfied = True
     db.commit()
-    assert select_diverse_menus(db, candidates, user.id, 1, 1)[0][2].id == pizza.id
+    assert select_diverse_menus(db, candidates, user.id, 1, 1, artifact_path=artifact_file)[0][2].id == pizza.id
 
 
 def test_any_is_neutral_and_not_used_for_question_learning_including_legacy_binary(db):
@@ -176,18 +201,22 @@ def test_exclusions_stay_hard_with_any_and_variety(db):
 
 
 def test_feedback_rejects_unrecommended_menu_and_mismatched_user(db):
+    from app.recommend.common import RecommendationNotFoundException
+    user = User(kakao_id=108)
+    db.add(user)
+    db.flush()
     pizza, burger = add_menu(db, "피자"), add_menu(db, "햄버거")
-    rec = Recommendation(recommended_menu_ids=[pizza.id])
+    rec = Recommendation(user_id=user.id, recommended_menu_ids=[pizza.id])
     db.add(rec)
     db.commit()
     with pytest.raises(InvalidOrderSheetException):
         record_recommendation_feedback(db, rec.id, RecommendationFeedbackRequest(
             selected_menu_id=burger.id, is_satisfied=False,
-        ))
-    with pytest.raises(InvalidOrderSheetException):
+        ), user_id=user.id)
+    with pytest.raises(RecommendationNotFoundException):
         record_recommendation_feedback(db, rec.id, RecommendationFeedbackRequest(
-            user_id=999, selected_menu_id=pizza.id, is_satisfied=False,
-        ))
+            selected_menu_id=pizza.id, is_satisfied=False,
+        ), user_id=999)
     assert db.query(RecommendationFeedback).count() == 0
 
 
@@ -197,7 +226,7 @@ def test_authenticated_questions_and_recommendations_use_token_identity(db):
     add_menu(db, "피자")
     add_menu(db, "햄버거")
     question = add_question(db)
-    token = create_access_token({"sub": str(user.id)})
+    token = session_token(db, user)
     headers = {"Authorization": f"Bearer {token}"}
     app = FastAPI()
     app.include_router(router)
@@ -217,6 +246,6 @@ def test_authenticated_questions_and_recommendations_use_token_identity(db):
         assert response.status_code == 200
         assert db.query(RecommendationFeedback).one().user_id == user.id
         response = client.post("/api/recommendations/order-sheet", json={**body, "user_id": other.id}, headers=headers)
-        assert response.status_code == 403
+        assert response.status_code == 422
         response = client.get("/api/recommendations/order-sheet/questions", headers={"Authorization": "Bearer invalid"})
         assert response.status_code == 401

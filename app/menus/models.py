@@ -58,6 +58,8 @@ class UserFoodExclusion(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     exclusion_type = Column(String(20), index=True, nullable=False, default="ALLERGY")
     keyword = Column(String(100), nullable=False)
+    catalog_code = Column(String(50), nullable=True, index=True)
+    catalog_version = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -131,17 +133,89 @@ class RecommendationFeedback(Base):
     __tablename__ = "recommendation_feedbacks"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    recommendation_id = (
+        Column(
+            Integer,
+            ForeignKey("recommendations.id", ondelete="CASCADE"),
+            index=True,
+            nullable=False,
+        )
+    )
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True)
+    selected_menu_id = Column(Integer, ForeignKey("menus.id", ondelete="SET NULL"), nullable=True)
+    menu_key = Column(String(100), nullable=True, index=True)
+    menu_base_name = Column(String(100), nullable=True)
+    menu_main_ingredient = Column(String(30), nullable=True)
+    operation_key = Column(String(64), nullable=True, index=True)
+    is_satisfied = Column(Boolean, nullable=False)
+
+    # 질문별 조건 일치 여부: {질문 ID 문자열: 1.0(일치) 또는 0.0(불일치)}.
+    answer_match_results = Column("feature_match_vector", JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class RecommendationFeedbackState(Base):
+    """추천×음식(menu_key) 단위 현재 유효 피드백 상태 테이블"""
+    __tablename__ = "recommendation_feedback_states"
+    __table_args__ = (
+        Index("uq_rec_feedback_states_rec_menu_key", "recommendation_id", "menu_key", unique=True),
+        Index("ix_rec_feedback_states_user_updated", "user_id", "updated_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     recommendation_id = Column(
         Integer,
         ForeignKey("recommendations.id", ondelete="CASCADE"),
         index=True,
         nullable=False,
     )
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     selected_menu_id = Column(Integer, ForeignKey("menus.id", ondelete="SET NULL"), nullable=True)
+    menu_key = Column(String(100), nullable=False)
+    menu_base_name = Column(String(100), nullable=False)
+    menu_main_ingredient = Column(String(30), nullable=False, default="other")
     is_satisfied = Column(Boolean, nullable=False)
-
-    # 질문별 조건 일치 여부: {질문 ID 문자열: 1.0(일치) 또는 0.0(불일치)}.
     answer_match_results = Column("feature_match_vector", JSON, nullable=False, default=dict)
+    latest_feedback_id = Column(
+        Integer,
+        ForeignKey("recommendation_feedbacks.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class RecommendationItemSnapshot(Base):
+    """추천 시점 메뉴별 피처·점수 스냅샷 테이블 (M1A 모델 학습 및 추론 검증용)"""
+    __tablename__ = "recommendation_item_snapshots"
+    __table_args__ = (
+        Index("uq_rec_item_snapshots_rec_menu", "recommendation_id", "menu_id", unique=True),
+        Index("ix_rec_item_snapshots_rec_menu_key", "recommendation_id", "menu_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    recommendation_id = Column(
+        Integer,
+        ForeignKey("recommendations.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    menu_id = Column(Integer, ForeignKey("menus.id", ondelete="SET NULL"), nullable=True)
+    menu_key = Column(String(100), nullable=False)
+    menu_base_name = Column(String(100), nullable=False)
+    menu_main_ingredient = Column(String(30), nullable=False, default="other")
+    rank_position = Column(Integer, nullable=False, default=0)
+    rule_score = Column(Float, nullable=False, default=0.0)
+    recent_meal_adjustment = Column(Float, nullable=False, default=0.0)
+    personal_adjustment = Column(Float, nullable=False, default=0.0)
+    final_score = Column(Float, nullable=False, default=0.0)
+    draw_weight = Column(Float, nullable=False, default=1.0)
+    feature_schema_version = Column(Integer, nullable=False, default=1)
+    features_json = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
