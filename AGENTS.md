@@ -227,3 +227,20 @@ DELETE /api/foods/{foodId}
 
 `코드 수정`, `버그 수정`, `API 변경`처럼 맥락 없는 기록은 피한다.
 예를 들어 `추천 후보 필터링에서 사용자 제외 음식 목록을 먼저 적용하도록 변경하여 알레르기 음식이 후보에 남는 문제를 수정했다`처럼 원인과 결과가 드러나도록 작성한다.
+
+## Agent skills
+
+### Issue tracker
+
+이슈와 명세는 `pknu-wap/WHATBOB_BE`의 GitHub Issues에서 관리한다.
+이슈 작업 전 `docs/agents/issue-tracker.md`를 읽는다.
+
+### Triage labels
+
+기본 triage 라벨 5개를 사용한다.
+이슈 분류 전 `docs/agents/triage-labels.md`를 읽는다.
+
+### Domain docs
+
+단일 컨텍스트: 루트 `GLOSSARY.md`와 `docs/adr/`를 사용한다.
+코드 탐색 전 `docs/agents/domain.md`를 읽는다.
