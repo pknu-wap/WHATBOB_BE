@@ -5,14 +5,15 @@ import threading
 
 from fastapi.testclient import TestClient
 import pytest
-from sqlalchemy import select
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
 
 from app.auth.sessions import authenticate_access_token
 from app.core.database import Base, get_db
 from app.main import app
 from app.rooms.models import Room, RoomMember, RoomMemberOrderSheet
 from app.rooms.service import (complete_room_order_sheet, expire_room_member_after_grace,
-                               join_room, mark_room_member_online)
+                               get_room, join_room, mark_room_member_online)
 from app.users.models import User
 from tests.auth_helpers import session_token
 from tests.test_issue39_mysql_concurrency import mysql_env
@@ -213,3 +214,35 @@ def test_mysql_room_detail_includes_user_created_after_auth_snapshot(departure_m
         detail = env['client'].get(f'/api/rooms/{env["room_id"]}', headers=env['headers'][0]).json()
         assert detail['member_count'] == 3
         assert newcomer_id in {m['user_id'] for m in detail['members']}
+
+
+def test_mysql_room_reads_succeed_when_all_owner_connections_are_in_use(departure_mysql):
+    env = departure_mysql
+    # Database deliberately lives in connect_args, so new reads must preserve
+    # configured connection parameters as well as the Engine's URL.
+    engine = create_engine(
+        env['engine'].url.set(database=None),
+        connect_args={'database': env['schema']},
+        pool_size=2, max_overflow=0, pool_timeout=0.3,
+    )
+    factory = sessionmaker(bind=engine, autoflush=False)
+    try:
+        # Disposing an Engine must also allow a later request to use it again.
+        for _ in range(2):
+            ready = threading.Barrier(2)
+
+            def read(index):
+                with factory() as db:
+                    user, _ = authenticate_access_token(db, env['tokens'][index])
+                    ready.wait(timeout=10)  # both owners hold a pool connection
+                    return get_room(db, env['room_id'], user)
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(read, index) for index in (0, 1)]
+                details = [future.result(timeout=20) for future in futures]
+            assert [detail.member_count for detail in details] == [2, 2]
+            assert all({member.user_id for member in detail.members} == set(env['ids'][:2])
+                       for detail in details)
+            engine.dispose()
+    finally:
+        engine.dispose()
