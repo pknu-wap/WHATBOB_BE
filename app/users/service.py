@@ -73,6 +73,8 @@ def update_my_nickname(
     new_key = cleaned.encode("utf-8")
     try:
         locked_user = lock_user_and_verify_session(db, current_user)
+        from app.rooms.service import assert_profile_change_allowed
+        assert_profile_change_allowed(db, locked_user)
         conflict = (
             db.query(User.id)
             .filter(User.nickname_key == new_key, User.id != locked_user.id)
@@ -100,6 +102,8 @@ def update_my_nickname(
             raise AuthError("NICKNAME_DUPLICATE", "이미 사용 중인 닉네임입니다.", status.HTTP_409_CONFLICT) from exc
 
         resp = UserResponse.model_validate(locked_user)
+        from app.rooms.state import prepare_room_notifications
+        prepare_room_notifications(db)
         db.commit()
         return resp
     except (SQLAlchemyError, HTTPException):

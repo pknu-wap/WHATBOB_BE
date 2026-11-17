@@ -182,6 +182,8 @@ def select_order_sheet_questions(
     exploitation_count: int = DEFAULT_EXPLOITATION_COUNT,
     random_seed: int | None = None,
     scope_key: str | None = None,
+    *,
+    commit: bool = True,
 ) -> OrderSheetQuestionsResponse:
     """
     [5단계 탐색+활용(Exploration-Exploitation) 질문 추출]
@@ -255,7 +257,10 @@ def select_order_sheet_questions(
             {OrderSheetQuestion.shown_count: OrderSheetQuestion.shown_count + 1},
             synchronize_session="fetch",
         )
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
 
     dtos = [
         _to_question_dto(q, is_exploration=False) for q in selected_exploit
@@ -276,6 +281,10 @@ def create_order_sheet_recommendation(
     request: OrderSheetRecommendRequest,
     user_id: int | None = None,
     current_user: User | None = None,
+    *,
+    commit: bool = True,
+    fixed_exclusion_keywords: set[str] | list[str] | None = None,
+    skip_user_lock: bool = False,
 ) -> OrderSheetRecommendResponse:
     """
     [5단계 주문서 답변 기반 메뉴 추천]
@@ -285,19 +294,29 @@ def create_order_sheet_recommendation(
     """
     effective_user_id = user_id
     if current_user is not None:
-        locked_user = lock_user_and_verify_session(db, current_user)
-        effective_user_id = locked_user.id
+        if skip_user_lock:
+            effective_user_id = current_user.id
+        else:
+            locked_user = lock_user_and_verify_session(db, current_user)
+            effective_user_id = locked_user.id
 
     question_ids = [ans.question_id for ans in request.answers]
     if len(set(question_ids)) != len(question_ids):
         raise InvalidOrderSheetException("동일한 질문에 중복 응답할 수 없습니다.")
 
     all_menus = db.query(Menu).all()
-    exclusion_keywords = collect_user_exclusion_keywords(
-        db=db,
-        user_id=effective_user_id,
-        extra_exclusions=request.exclusions,
-    )
+    if fixed_exclusion_keywords is not None:
+        exclusion_keywords = {
+            str(kw).strip().lower()
+            for kw in fixed_exclusion_keywords
+            if kw is not None and str(kw).strip()
+        }
+    else:
+        exclusion_keywords = collect_user_exclusion_keywords(
+            db=db,
+            user_id=effective_user_id,
+            extra_exclusions=request.exclusions,
+        )
     available_menus, excluded_count = filter_available_menus(all_menus, exclusion_keywords)
 
     questions = (
@@ -381,8 +400,11 @@ def create_order_sheet_recommendation(
             )
             db.add(snapshot)
 
-    db.commit()
-    db.refresh(rec_record)
+    if commit:
+        db.commit()
+        db.refresh(rec_record)
+    else:
+        db.flush()
 
     recommended_dtos = [
         RecommendedMenuDTO(

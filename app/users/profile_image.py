@@ -235,6 +235,8 @@ def replace_my_profile_image(
     old_url: str | None = None
     try:
         locked_user = lock_user_and_verify_session(db, current_user)
+        from app.rooms.service import assert_profile_change_allowed
+        assert_profile_change_allowed(db, locked_user)
         old_url = locked_user.profile_image
         locked_user.profile_image = new_url
         locked_user.profile_image_edited = True
@@ -247,6 +249,8 @@ def replace_my_profile_image(
             )
         db.flush()
         resp = UserResponse.model_validate(locked_user)
+        from app.rooms.state import prepare_room_notifications
+        prepare_room_notifications(db)
         db.commit()
     except Exception:
         db.rollback()
@@ -271,6 +275,8 @@ def reset_my_profile_image(
     old_url: str | None = None
     try:
         locked_user = lock_user_and_verify_session(db, current_user)
+        from app.rooms.service import assert_profile_change_allowed
+        assert_profile_change_allowed(db, locked_user)
         old_url = locked_user.profile_image
         locked_user.profile_image = DEFAULT_PROFILE_IMAGE
         locked_user.profile_image_edited = True
@@ -283,6 +289,8 @@ def reset_my_profile_image(
             )
         db.flush()
         resp = UserResponse.model_validate(locked_user)
+        from app.rooms.state import prepare_room_notifications
+        prepare_room_notifications(db)
         db.commit()
     except (SQLAlchemyError, HTTPException):
         db.rollback()

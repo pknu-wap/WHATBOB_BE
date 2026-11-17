@@ -1,3 +1,4 @@
+from app.rooms.notifications import dispatch_room
 import asyncio
 import logging
 
@@ -6,7 +7,7 @@ from app.core.database import SessionLocal
 from app.rooms.service import (
     close_due_rooms,
     delete_closed_room,
-    mark_due_room_members_offline,
+    iter_due_room_member_departures,
 )
 from app.rooms.websocket import room_connection_manager
 
@@ -17,21 +18,15 @@ logger = logging.getLogger("uvicorn")
 async def cleanup_due_rooms_once() -> int:
     """Close, notify, and physically delete every due room, and auto-remove overdue members."""
     with SessionLocal() as db:
-        left_members = await asyncio.to_thread(mark_due_room_members_offline, db)
-    for member in left_members:
-        await room_connection_manager.broadcast(
-            member.room_id,
-            {
-                "type": "room.updated",
-                "room_id": member.room_id,
-                "reason": "MEMBER_LEFT",
-                "user_id": member.user_id,
-                "member_count": member.member_count,
-                "completed_member_count": member.completed_member_count,
-                "all_members_completed": member.all_members_completed,
-            },
-        )
-        await room_connection_manager.close_user_connections(member.room_id, member.user_id)
+        batches = iter_due_room_member_departures(db)
+        while True:
+            left_members = await asyncio.to_thread(next, batches, None)
+            if left_members is None:
+                break
+            # The generator commits and releases this room's locks before yield.
+            for member in left_members:
+                await dispatch_room(db.get_bind(), member.room_id)
+                await room_connection_manager.close_user_connections(member.room_id, member.user_id)
 
     with SessionLocal() as db:
         closed_rooms = await asyncio.to_thread(close_due_rooms, db)

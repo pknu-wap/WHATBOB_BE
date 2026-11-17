@@ -44,6 +44,7 @@ from app.menus.models import (
 )
 from app.rooms.models import Room, RoomMember, RoomMemberOrderSheet
 from app.rooms.service import has_active_or_pending_room_activity
+from app.rooms.state import prepare_room_notifications, close_pending_notifications
 from app.users.models import User
 from app.users.profile_image import delete_profile_image_if_unreferenced
 from app.users.schemas import UserResponse
@@ -146,7 +147,31 @@ def _cleanup_closed_room_references_for_origin_user(db: Session, origin_user_id:
         db.query(RoomMember).filter(
             RoomMember.id.in_(member_ids)
         ).delete(synchronize_session=False)
+    from app.rooms.models import RoomRoundCandidateProposer, RoomRoundMember
+    from app.rooms.rounds import delete_room_rounds_for_rooms
+    origin_rm_ids = [
+        int(rm[0])
+        for rm in db.query(RoomRoundMember.id)
+        .filter(RoomRoundMember.user_id == origin_user_id)
+        .all()
+    ]
+    if origin_rm_ids:
+        db.query(RoomRoundCandidateProposer).filter(
+            (RoomRoundCandidateProposer.user_id == origin_user_id)
+            | (RoomRoundCandidateProposer.round_member_id.in_(origin_rm_ids))
+        ).delete(synchronize_session=False)
+        db.query(RoomRoundMember).filter(
+            RoomRoundMember.id.in_(origin_rm_ids)
+        ).delete(synchronize_session=False)
+    else:
+        db.query(RoomRoundCandidateProposer).filter(
+            RoomRoundCandidateProposer.user_id == origin_user_id
+        ).delete(synchronize_session=False)
     if hosted_room_ids:
+        delete_room_rounds_for_rooms(db, hosted_room_ids)
+        for room_id in hosted_room_ids:
+            close_pending_notifications(db, room_id, now)
+            db.info.get("changed_rooms", {}).pop(room_id, None)
         db.query(Room).filter(
             Room.id.in_(hosted_room_ids)
         ).delete(synchronize_session=False)
@@ -579,6 +604,7 @@ async def prepare_account_transition(
                 existing.prepare_expires_at = now + timedelta(seconds=int(settings.TRANSITION_PREPARE_SECONDS))
                 existing.recovery_expires_at = now + timedelta(seconds=int(settings.TRANSITION_RECOVERY_SECONDS))
                 existing.updated_at = now
+                prepare_room_notifications(db)
                 db.commit()
                 return (
                     TransitionPrepareResponse(
@@ -658,6 +684,7 @@ async def prepare_account_transition(
             updated_at=now,
         )
         db.add(transition)
+        prepare_room_notifications(db)
         db.commit()
         return (
             TransitionPrepareResponse(
@@ -689,6 +716,7 @@ def _build_committed_response_from_transition(
     access_token = create_access_token({"sub": str(result_user.id), "sid": str(result_session.id)})
     transition.recovered_at = now
     transition.updated_at = now
+    prepare_room_notifications(db)
     db.commit()
     return TransitionCommitResponse(
         transition_id=transition.transition_id,
@@ -768,6 +796,7 @@ def commit_account_transition(
             if now >= as_utc_naive(transition.prepare_expires_at):
                 transition.status = "EXPIRED"
                 transition.updated_at = now
+                prepare_room_notifications(db)
                 db.commit()
                 raise AuthError("TRANSITION_PREPARATION_EXPIRED", "전환 준비 유효 시간이 지났습니다.", 401)
 
@@ -924,6 +953,7 @@ def commit_account_transition(
                     user=UserResponse.model_validate(target_user),
                     is_new_user=is_new_user,
                 )
+                prepare_room_notifications(db)
                 db.commit()
 
                 for img_url in replaced_images:
@@ -1018,6 +1048,7 @@ def commit_account_transition(
                     user=UserResponse.model_validate(new_user),
                     is_new_user=True,
                 )
+                prepare_room_notifications(db)
                 db.commit()
                 return resp, prepare_secret
 

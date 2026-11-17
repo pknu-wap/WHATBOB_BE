@@ -3,6 +3,99 @@
 WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 최신 작업을 위에 추가하며, 기록 방법은 같은 디렉터리의 `AGENTS.md`를 따른다.
 
+## 2026-11-17
+
+### #43 / #36 T01N ~ T07 같이 고르기 내구 알림·라운드·개인 추천 후보·복수 선택 투표·퇴장 일시정지/재투표·복구 구현
+
+#### 변경 이유 및 내용
+
+- `T01N` (`docs/plans/36-t01n-final-design.md`): 방 상태 버전(`rooms.state_version`) 단조 증가 및 내구 발송 대기(`room_notifications`) 저장·재시도(1/3/5/10/30초 간격, 첫 실패 후 60초 상한)·종료 시 원문 SQL NULL 제거 및 요약 3일 보관·참여 중 프로필 변경 차단을 구현했다.
+- `T02` (`docs/plans/36-t02-final-design.md`): `room_rounds` 및 `room_round_members` 테이블을 분리하고, 방장 시작 시 참여자 전원의 프로필 제외 조건(`ALLERGY`, `UNABLE`, `DISLIKE`)을 비공개 스냅샷으로 고정하며 생존 메뉴 여부를 즉시 검증(`NO_AVAILABLE_MENUS` 시 취소 라운드 기록 및 대기실 유지)하고 참여자별 9개 질문(활용 7 + 탐색 2)을 시작 트랜잭션에서 일괄 사전 생성해 질문 조회(`GET`)를 순수 읽기 전용으로 분리했다.
+- `T03` + `D20` (`docs/plans/36-t03-final-design.md`): 그룹 주문서 제출 시 임시 추가 제외 조건 입력을 금지(`extra="forbid"`)하고, 고정된 공통 제외 스냅샷으로 개인 주문서를 즉시 채점해 첫 번째 추천 메뉴를 후보로 연결하며 각 참여자의 개인 추천 누적 장부(`Recommendation`, `RecommendationItemSnapshot`)에 정식 기록한다. 전원 제출 완료 시 동일 메뉴(`Menu.id`)를 `room_round_candidates`와 `room_round_candidate_proposers`로 병합하고 후보가 1개이면 무투표 당선(`RESULT`, `is_uncontested=True`), 2개 이상이면 투표(`VOTING`, `vote_round_no=1`)로 전환한다.
+- `T04` (`docs/plans/36-t04-final-design.md`): `room_round_members` 행에 복수 선택 투표 배열(`voted_candidate_ids`)과 제출 시각(`voted_at`)을 내장하고, 전원 투표 완료 순간 후보별 최종 득표수(`final_vote_count`)와 공동 1위(`is_winner`)를 `room_round_candidates`에 영구 기록(`Materialized Result`)한다.
+- `T05` (`docs/plans/36-t05-final-design.md`): 주문서 작성 중 일반 참여자 퇴장 확정(명시적 퇴장 또는 60초 유예 만료) 시 `member_status='LEFT_PENDING'` 소프트 삭제 및 `ANSWERING_PAUSED` 전환과 `decision_version` 증가를 모든 퇴장 경로(`remove_locked_members`)에 통합했다. 2명 미만 시 즉시 `INSUFFICIENT_MEMBERS`로 취소하며, 방장 결정 시 `decision_version` 일치 여부를 검증한다.
+- `T06` (`docs/plans/36-t06-final-design.md`): 투표 중 퇴장 후 방장이 계속 진행을 선택하면 퇴장자만 단독 제안한 후보를 소프트 비활성화(`is_active=False`)하고, 생존 후보가 1개이면 즉시 무투표 당선(`RESULT`), 2개 이상이면 남은 참여자의 투표 칸을 제자리에서 `NULL`로 초기화하고 `vote_round_no`를 `+1` 올려 전원 재투표를 시작하며 이전 회차 지연 요청을 차단한다.
+- `T07` (`docs/plans/36-t07-final-design.md`): 방 상태 조회(`GET /api/rooms/{room_id}`) 한 번으로 `common_state`와 본인 전용 `viewer_state`를 통합 반환하고, 방 물리 삭제 및 계정 전환 정리 시 라운드 테이블은 정리하되 개인 누적 추천 기록(`Recommendation`, `RecommendationItemSnapshot`)은 영구 보존한다. 명시적 재개 가능 MySQL 마이그레이션(`scripts/migrate_room_rounds.py`)을 함께 제공한다.
+
+#### 주요 변경 파일
+
+- `app/rooms/models.py`, `app/rooms/rounds.py`, `app/rooms/state.py`, `app/rooms/notifications.py`
+- `app/rooms/departures.py`, `app/rooms/service.py`, `app/rooms/router.py`, `app/rooms/schemas.py`
+- `app/recommend/order_sheet.py`, `app/auth/transitions.py`
+- `scripts/migrate_room_notifications.py`, `scripts/migrate_room_rounds.py`
+- `tests/test_room_notifications.py`, `tests/test_room_notifications_mysql.py`, `tests/test_group_rounds.py`, `tests/test_group_rounds_mysql.py`
+
+### #44 T01 소유 연결 풀 포화 시 방 조회 실패 수정
+
+#### 변경 이유 및 내용
+
+- 두 방 요청이 소유 풀의 연결 두 개를 모두 점유하면 Room 잠금을 가진 요청도 최신 프로필 조회용 두 번째 연결을 얻지 못해 `QueuePool TimeoutError`로 실패했다. MySQL의 과거 인증 스냅샷을 피하는 별도 비잠금 조회를 소유 풀과 분리했다.
+- 소유 Engine마다 읽기 풀을 지연 생성하고 한 번에 하나의 읽기 세션만 허용한다. 공개 `Pool.recreate()`로 URL뿐 아니라 `connect_args`·creator·연결 이벤트·재활용 설정을 보존하며, 소유 Engine을 dispose하면 읽기 연결도 반납 후 dispose하고 캐시를 제거한다. dispose 후 Engine 재사용도 지원한다.
+- 기존 Room → 참여 → 완료 잠금 순서, 최신 잠금 판정, 상위 트랜잭션의 commit/rollback 소유권은 유지한다.
+
+#### 주요 변경 파일
+
+- `app/rooms/transactions.py`, `tests/test_member_departure_mysql.py`
+
+#### API 변경
+
+- 성공 DTO·오류 계약 변경 없음. 소유 연결 풀이 포화된 두 동시 방 조회가 모두 성공하도록 수정했다.
+
+#### DB 변경
+
+- 스키마·마이그레이션 없음. 소유 Engine마다 실제 추가 연결은 최대 한 개이며 짧은 비잠금 조회 사이에는 재사용한다.
+
+#### 검증
+
+- 승인된 공개 서비스 + 격리 MySQL 경계에서 TDD red로 `pool_size=2`, `max_overflow=0`, `pool_timeout=0.3`인 두 인증 요청의 `QueuePool TimeoutError`를 재현했다.
+- 같은 회귀 테스트의 green에서 두 방 조회 성공, `connect_args`로만 지정한 격리 DB 유지, Engine dispose 후 두 요청 재실행을 확인했다. `tests/test_member_departure_mysql.py`: **8 passed**. 기존 인증 이후 새 참여·사용자 생성, 오래된 ORM 상태, 잠금 경합·재시도도 포함한다.
+- 관련 일반 회귀 `tests/test_member_departure.py tests/test_rooms.py tests/test_t03_rooms.py tests/test_t06_t07_t08_transitions.py`: **53 passed**.
+- 격리 MySQL 혼합 회귀 `tests/test_member_departure_mysql.py tests/test_rooms_mysql.py tests/test_issue39_mysql_concurrency.py -k 'room or depart or reconnect or retry or account_transition'`: **10 passed, 3 deselected**, exit 0. 기존 혼합 실행의 SQLite 연결 스레드 귀속 정리 경고가 종료 시 다시 출력됐다.
+
+#### 남은 작업 및 주의 사항
+
+- 읽기 풀의 실제 동시 연결 비용을 한 개로 제한했으며 운영 부하·RAM 1GB 환경의 성능 개선을 실측한 결과는 아니다. 운영 DB는 사용하지 않았다.
+
+### #44 / #43 T01 일반 참여자 퇴장 정리·최신 잠금 읽기·충돌 재시도·주기 정리 실패 격리
+
+#### 변경 이유 및 내용
+
+- 확정된 `docs/plans/36-t01-final-design.md`에 따라 명시적 퇴장, 요청 지연 정리, 개별 유예 예약, 주기 정리, 늦은 재접속, 계정 전환 전 만료 정리를 하나의 실제 정리 경계로 통합했다. 방 단위 결과에 실제 제거 사용자와 최종 인원·완료 상태를 담고, 기존 이벤트 형식 변환은 서비스 호출 경계에 남겼다.
+- 공통 함수는 전체 입력을 먼저 검증한다. 방장·다른 방 대상은 변경 전에 전체 거절하고, 정상 중복은 경고 후 한 번 처리하며, 빈 목록은 DB 조회·삭제·집계 없이 변경 없음으로 종료한다. 참여·완료 제거와 최종 집계는 같은 트랜잭션이며 공통 함수 안에서 commit/rollback/전송하지 않는다.
+- 인증·전환 선행 잠금을 보존하고 방 영역은 Room → 식별자 순 참여 → 완료 순서의 현재 잠금 읽기 및 ORM 갱신을 사용한다. 방 조회도 정리와 최종 상태를 같은 소유 트랜잭션 안에서 확정한다. MySQL REPEATABLE READ에서 인증 뒤 새로 커밋된 참여 후보와 사용자 프로필은 짧은 별도 비잠금 읽기로 탐색하고 원래 소유 트랜잭션에서 실제 대상 상태를 잠금 재확인한다. 중간 commit으로 계정 전환 원자성을 끊거나 User 잠금을 방 잠금 뒤에 추가하지 않는다.
+- 방 작업 최상위 경계에서 MySQL 1205/1213만 전체 rollback 후 최대 두 번 추가 시도한다. 매 시도 실제 사용자·인증 세션·참여·유예 상태를 다시 확인한다. DB flush와 실제 commit을 구분해 미확정 flush 충돌은 재시도하고, 결과 불명 commit·일반 연결 장애·도메인 오류는 재실행하지 않는다. 기존 계정 전환 전체 재시도에 내부 재시도를 중첩하지 않았다.
+- 주기 자동 퇴장은 방마다 별도 확정하고 실패한 방만 제한적으로 재시도한다. 저장 성공한 결과를 방별로 먼저 전달하여 이후 실패로 이미 성공한 방의 알림 결과가 유실되지 않게 했다. 전역 DB 장애와 취소는 전파하며, 재시작 복구의 단계별 저장·실패 전파와 기존 유예 시각을 보존한다.
+- 실제 WebSocket 늦은 재접속은 현재 잠금 판정에서 제거된 사용자에게 연결 준비 완료를 보내지 않고 기존 비참여 종료 코드 4403으로 닫는다. 60초 유예 안의 재접속과 마지막 연결 종료 규칙, 기존 이벤트 payload는 유지한다.
+
+#### 주요 변경 파일
+
+- `app/rooms/departures.py`, `app/rooms/transactions.py`
+- `app/rooms/service.py`, `app/rooms/cleanup.py`, `app/rooms/websocket.py`
+- `tests/test_member_departure.py`, `tests/test_member_departure_mysql.py`
+- `docs/plans/36-tickets/T01-member-departure-consistency.md`
+
+#### API 변경
+
+- 방 HTTP 작업의 1205/1213 최초 포함 세 번 실패 시 전체 rollback 후 HTTP 503, `detail.code=ROOM_TEMPORARILY_UNAVAILABLE`, `detail.message=일시적으로 방 요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요.`를 반환한다.
+- 기존 인증·계정 전환 오류 계약, 비참여 명시적 퇴장 404, 방 참여자 정보 공개 범위와 성공 DTO/WebSocket payload는 유지한다. 프론트 자동 재전송을 새로 요구하지 않는다.
+
+#### DB 변경
+
+- 스키마·마이그레이션 없음. 기존 참여·완료 행의 잠금·삭제·집계와 트랜잭션 경계를 변경했다.
+
+#### 검증
+
+- TDD red/green으로 중복 묶음 결과, ORM 선적재 상태의 지연/개별/주기/재접속/계정 정리, 1205/1213 재시도 및 503, 방별 실패 격리와 실제 WebSocket 늦은 재접속을 구현했다. 공통 입력 거절·빈 입력·상위 rollback·일반 장애·결과 불명 commit·실패 시 알림 없음도 확인했다.
+- `python -m pytest -q --tb=short`: **350 passed, 20 skipped, 2 failed**. 실패 2건은 구현 전에도 있던 `tests/test_user_meals.py`의 `토마토파스타` / `파스타 (토마토)` 표시명 기대값 차이이며 관련 기능을 수정하지 않았다. MySQL 7개를 포함한 opt-in 테스트 20개는 이 일반 실행에서 건너뛴다.
+- 격리 MySQL **8.0.46**에서 `MYSQL_TEST_DATABASE_URL`을 전용 테스트 스키마에 지정하고 `python -m pytest tests/test_member_departure_mysql.py tests/test_rooms_mysql.py tests/test_issue39_mysql_concurrency.py -q -k 'room or depart or reconnect or retry or account_transition' --tb=short`: **9 passed, 3 deselected**. 새 7건은 과거 인증/ORM 스냅샷, 직접 퇴장 대 자동 퇴장, 만료 대 복귀, 정리 대 참여·완료, 인증 이후 커밋된 참여의 전환 차단, rollback 뒤 세션 폐기 재확인, 인증 이후 생성된 사용자의 방 조회를 독립 세션으로 검증한다.
+- 위 혼합 MySQL 실행 종료 시 기존 SQLite 연결의 스레드 귀속 정리 경고가 출력됐다. pytest 검증 결과는 9 passed/exit 0이며 이 경고를 별도로 숨기지 않았다. 운영 DB나 `.env` DB는 사용하지 않았다.
+- `git diff --check` 통과. 통합 브랜치 `ed356dc`를 구현 worktree에 fast-forward 반영했다.
+
+#### 남은 작업 및 주의 사항
+
+- T01 구현 및 해당 검증 완료, 통합 리뷰 대기. T01N의 내구 알림·재전송·상태 버전과 T02 이후 라운드 기능은 포함하지 않았다. 기존 전송의 수신 보장을 주장하지 않는다.
+- MySQL의 짧은 후보/프로필 조회는 소유 트랜잭션을 유지한 채 별도 읽기 연결을 잠시 사용한다. 성능 개선을 실측한 결과는 아니며, 운영 트래픽/풀 용량 검증은 별도다.
+
 ## 2026-11-13
 
 ### #39 T02~T09 개인 데이터·방 유예/취소·프로필·계정 전환/병합/로그아웃·MySQL 마이그레이션 및 동시성 검증 구현

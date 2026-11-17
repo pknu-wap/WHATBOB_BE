@@ -1,20 +1,35 @@
+from app.rooms.notifications import dispatch_room
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header, status
+from fastapi import APIRouter, Depends, Header, Response, status
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app.auth.dependencies import get_current_user
 from app.core.database import get_db
+from app.rooms.rounds import (
+    decide_room_round_departure,
+    get_room_round_questions,
+    start_room_round,
+    submit_room_round_order_sheet,
+    submit_room_round_votes,
+)
 from app.rooms.schemas import (
     RoomCreateRequest,
     RoomCreateResponse,
     RoomDeleteResponse,
+    RoomDepartureDecisionRequest,
     RoomDetailResponse,
     RoomJoinResponse,
     RoomMemberLeaveResponse,
     RoomOperationResponse,
     RoomOrderSheetCompleteResponse,
+    RoomOrderSheetSubmitRequest,
+    RoomRoundCommandResponse,
+    RoomRoundOrderSheetSubmitResponse,
+    RoomRoundQuestionsResponse,
+    RoomRoundVoteSubmitResponse,
+    RoomVoteSubmitRequest,
 )
 from app.rooms.service import (
     cancel_room_operation,
@@ -58,19 +73,21 @@ async def _notify_and_delete_closed_room(
     response_model=RoomCreateResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def create_room_endpoint(
+async def create_room_endpoint(
     request: RoomCreateRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     raw_idem_key = idempotency_key if isinstance(idempotency_key, str) else None
-    return create_room(
+    result = await run_in_threadpool(create_room,
         db=db,
         host=current_user,
         request=request,
         idempotency_key=raw_idem_key,
     )
+    await dispatch_room(db.get_bind(), result.room_id)
+    return result
 
 
 @router.post(
@@ -94,30 +111,9 @@ async def join_room_endpoint(
     )
     for left in left_events:
         room_connection_manager.cancel_member_disconnect(room_id, left.user_id)
-        await room_connection_manager.broadcast(
-            room_id,
-            {
-                "type": "room.updated",
-                "room_id": room_id,
-                "reason": "MEMBER_LEFT",
-                "user_id": left.user_id,
-                "member_count": left.member_count,
-                "completed_member_count": left.completed_member_count,
-                "all_members_completed": left.all_members_completed,
-                "occurred_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+        await dispatch_room(db.get_bind(), room_id)
     if not is_replay:
-        await room_connection_manager.broadcast(
-            room_id,
-            {
-                "type": "room.updated",
-                "room_id": room_id,
-                "reason": "MEMBER_JOINED",
-                "user_id": current_user.id,
-                "occurred_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+        await dispatch_room(db.get_bind(), room_id)
     return response
 
 
@@ -125,12 +121,14 @@ async def join_room_endpoint(
     "/{room_id}",
     response_model=RoomDetailResponse,
 )
-def get_room_endpoint(
+async def get_room_endpoint(
     room_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return get_room(db=db, room_public_id=room_id, user=current_user)
+    result = await run_in_threadpool(get_room, db=db, room_public_id=room_id, user=current_user)
+    await dispatch_room(db.get_bind(), room_id)
+    return result
 
 
 @router.delete(
@@ -180,19 +178,7 @@ async def leave_room_member_endpoint(
         current_user,
     )
     room_connection_manager.cancel_member_disconnect(room_id, user_id)
-    await room_connection_manager.broadcast(
-        room_id,
-        {
-            "type": "room.updated",
-            "room_id": room_id,
-            "reason": "MEMBER_LEFT",
-            "user_id": user_id,
-            "member_count": response.member_count,
-            "completed_member_count": response.completed_member_count,
-            "all_members_completed": response.all_members_completed,
-            "occurred_at": datetime.now(timezone.utc).isoformat(),
-        },
-    )
+    await dispatch_room(db.get_bind(), room_id)
     await room_connection_manager.close_user_connections(room_id, user_id)
     return response
 
@@ -213,17 +199,186 @@ async def complete_room_order_sheet_endpoint(
         current_user,
     )
     if completion_changed:
-        await room_connection_manager.broadcast(
-            room_id,
-            {
-                "type": "room.updated",
-                "room_id": room_id,
-                "reason": "ORDER_SHEET_COMPLETED",
-                "user_id": current_user.id,
-                "occurred_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+        await dispatch_room(db.get_bind(), room_id)
     return response
+
+
+@router.post(
+    "/{room_id}/rounds/start",
+    response_model=RoomRoundCommandResponse,
+    status_code=status.HTTP_200_OK,
+)
+@router.post(
+    "/{room_id}/start",
+    response_model=RoomRoundCommandResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def start_room_round_endpoint(
+    room_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    bind = db.get_bind()
+    try:
+        response, is_replay, left_events = await run_in_threadpool(
+            start_room_round,
+            db,
+            room_id,
+            current_user,
+        )
+        for left in left_events:
+            room_connection_manager.cancel_member_disconnect(room_id, left.user_id)
+            await room_connection_manager.close_user_connections(room_id, left.user_id)
+        if not is_replay or left_events:
+            await dispatch_room(bind, room_id)
+        return response
+    finally:
+        await dispatch_room(bind, room_id)
+
+
+@router.get(
+    "/{room_id}/rounds/current/questions",
+    response_model=RoomRoundQuestionsResponse,
+    status_code=status.HTTP_200_OK,
+)
+@router.get(
+    "/{room_id}/order-sheet/questions",
+    response_model=RoomRoundQuestionsResponse,
+    status_code=status.HTTP_200_OK,
+)
+@router.get(
+    "/{room_id}/questions",
+    response_model=RoomRoundQuestionsResponse,
+    status_code=status.HTTP_200_OK,
+)
+def get_room_round_questions_endpoint(
+    room_id: str,
+    response: Response,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return get_room_round_questions(db=db, room_public_id=room_id, user=current_user)
+
+
+@router.post(
+    "/{room_id}/rounds/current/order-sheet",
+    response_model=RoomRoundOrderSheetSubmitResponse,
+    status_code=status.HTTP_200_OK,
+)
+@router.post(
+    "/{room_id}/order-sheet/submit",
+    response_model=RoomRoundOrderSheetSubmitResponse,
+    status_code=status.HTTP_200_OK,
+)
+@router.post(
+    "/{room_id}/order-sheet",
+    response_model=RoomRoundOrderSheetSubmitResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def submit_room_round_order_sheet_endpoint(
+    room_id: str,
+    request: RoomOrderSheetSubmitRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    bind = db.get_bind()
+    try:
+        response, is_replay, left_events = await run_in_threadpool(
+            submit_room_round_order_sheet,
+            db,
+            room_id,
+            current_user,
+            request,
+        )
+        for left in left_events:
+            room_connection_manager.cancel_member_disconnect(room_id, left.user_id)
+            await room_connection_manager.close_user_connections(room_id, left.user_id)
+        if not is_replay or left_events:
+            await dispatch_room(bind, room_id)
+        return response
+    finally:
+        await dispatch_room(bind, room_id)
+
+
+@router.post(
+    "/{room_id}/rounds/current/votes",
+    response_model=RoomRoundVoteSubmitResponse,
+    status_code=status.HTTP_200_OK,
+)
+@router.post(
+    "/{room_id}/votes",
+    response_model=RoomRoundVoteSubmitResponse,
+    status_code=status.HTTP_200_OK,
+)
+@router.post(
+    "/{room_id}/vote",
+    response_model=RoomRoundVoteSubmitResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def submit_room_round_votes_endpoint(
+    room_id: str,
+    request: RoomVoteSubmitRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    bind = db.get_bind()
+    try:
+        response, is_replay, left_events = await run_in_threadpool(
+            submit_room_round_votes,
+            db,
+            room_id,
+            current_user,
+            request,
+        )
+        for left in left_events:
+            room_connection_manager.cancel_member_disconnect(room_id, left.user_id)
+            await room_connection_manager.close_user_connections(room_id, left.user_id)
+        if not is_replay or left_events:
+            await dispatch_room(bind, room_id)
+        return response
+    finally:
+        await dispatch_room(bind, room_id)
+
+
+@router.post(
+    "/{room_id}/rounds/current/departure-decision",
+    response_model=RoomRoundCommandResponse,
+    status_code=status.HTTP_200_OK,
+)
+@router.post(
+    "/{room_id}/rounds/current/decision",
+    response_model=RoomRoundCommandResponse,
+    status_code=status.HTTP_200_OK,
+)
+@router.post(
+    "/{room_id}/decision",
+    response_model=RoomRoundCommandResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def decide_room_round_departure_endpoint(
+    room_id: str,
+    request: RoomDepartureDecisionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    bind = db.get_bind()
+    try:
+        response, left_events = await run_in_threadpool(
+            decide_room_round_departure,
+            db,
+            room_id,
+            current_user,
+            request,
+        )
+        for left in left_events:
+            room_connection_manager.cancel_member_disconnect(room_id, left.user_id)
+            await room_connection_manager.close_user_connections(room_id, left.user_id)
+        await dispatch_room(bind, room_id)
+        return response
+    finally:
+        await dispatch_room(bind, room_id)
 
 
 @operations_router.get(
