@@ -1,7 +1,7 @@
 import asyncio
 from collections import defaultdict
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -339,12 +339,19 @@ async def room_websocket(
             room_id,
             authenticated_user_id,
         )
-        with Session(bind=database_bind) as reconnect_db:
-            became_online = mark_room_member_online(
-                reconnect_db,
-                room_id,
-                authenticated_user_id,
-            )
+        try:
+            with Session(bind=database_bind) as reconnect_db:
+                became_online = mark_room_member_online(
+                    reconnect_db,
+                    room_id,
+                    authenticated_user_id,
+                    user=user,
+                    require_membership=True,
+                )
+        except HTTPException as error:
+            await close_websocket(websocket, 4401 if error.status_code == 401 else 4403,
+                                  "Room membership required")
+            return
         if authenticated_is_host:
             room_connection_manager.cancel_host_disconnect(room_id)
             with Session(bind=database_bind) as reconnect_db:

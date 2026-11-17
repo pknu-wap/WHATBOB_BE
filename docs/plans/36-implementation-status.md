@@ -7,7 +7,7 @@
 
 | 티켓 | GitHub | 선행 | 구현 상태 |
 | --- | --- | --- | --- |
-| T01 퇴장 정리 | [#44](https://github.com/pknu-wap/WHATBOB_BE/issues/44) | 없음 | 구현·테스트 진행 |
+| T01 퇴장 정리 | [#44](https://github.com/pknu-wap/WHATBOB_BE/issues/44) | 없음 | 구현·검증 완료, 통합 리뷰 대기 |
 | T01N 내구 알림·버전 | [#45](https://github.com/pknu-wap/WHATBOB_BE/issues/45) | T01 | 대기 |
 | T02 시작·개인 질문 | [#46](https://github.com/pknu-wap/WHATBOB_BE/issues/46) | T01N | 대기 |
 | T03 제출·공동 후보 | [#47](https://github.com/pknu-wap/WHATBOB_BE/issues/47) | T02, 결정 완료 D20 | 대기 |

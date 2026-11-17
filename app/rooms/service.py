@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import logging
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, DataError, IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.auth.models import RequestOperation
@@ -18,6 +19,13 @@ from app.auth.operations import (
 from app.auth.sessions import utc_now
 from app.core.config import settings
 from app.rooms.models import Room, RoomMember, RoomMemberOrderSheet
+from app.rooms.transactions import (
+    room_transaction, commit_room_transaction, current_read_session, is_lock_conflict,
+)
+from app.rooms.departures import (
+    MemberDeparture, lock_room, lock_room_members, lock_order_sheets,
+    remove_locked_members,
+)
 from app.rooms.schemas import (
     RoomCreateRequest,
     RoomCreateResponse,
@@ -55,6 +63,12 @@ class LeftRoomMember:
 OfflineRoomMember = LeftRoomMember
 
 
+def _departure_events(result: MemberDeparture) -> list[LeftRoomMember]:
+    return [LeftRoomMember(result.room_id, uid, result.member_count,
+                           result.completed_member_count, result.all_members_completed)
+            for uid in result.user_ids]
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -72,35 +86,12 @@ def _close_room(room: Room, reason: str, closed_at: datetime) -> ClosedRoom:
     return ClosedRoom(room_id=room.public_id, reason=reason, closed_at=closed_at)
 
 
-def _recalculate_room_counts(db: Session, room_internal_id: int) -> tuple[int, int, bool]:
-    remaining_members = (
-        db.query(RoomMember.id)
-        .filter(RoomMember.room_id == room_internal_id)
-        .all()
-    )
-    remaining_member_ids = [row[0] for row in remaining_members]
-    completed_member_count = 0
-    if remaining_member_ids:
-        completed_member_count = (
-            db.query(RoomMemberOrderSheet)
-            .filter(
-                RoomMemberOrderSheet.room_member_id.in_(remaining_member_ids),
-                RoomMemberOrderSheet.is_completed.is_(True),
-            )
-            .count()
-        )
-    member_count = len(remaining_member_ids)
-    all_completed = member_count > 0 and completed_member_count == member_count
-    return member_count, completed_member_count, all_completed
-
-
 def _apply_lazy_room_deadlines(
     db: Session,
     room: Room,
     *,
     now: datetime | None = None,
     closed_status_code: int = status.HTTP_409_CONFLICT,
-    commit_member_cleanup: bool = False,
 ) -> list[LeftRoomMember]:
     """
     백그라운드 정리 작업 실행 여부와 무관하게 방 만료, 호스트 60초 유예 만료,
@@ -109,7 +100,7 @@ def _apply_lazy_room_deadlines(
     current_time = now or utcnow()
     if _as_utc(room.expires_at) <= current_time:
         _close_room(room, ROOM_CLOSE_REASON_EXPIRED, current_time)
-        db.commit()
+        commit_room_transaction(db)
         raise HTTPException(
             status_code=status.HTTP_410_GONE,
             detail="Room has expired",
@@ -121,7 +112,7 @@ def _apply_lazy_room_deadlines(
         )
         if host_deadline <= current_time:
             _close_room(room, ROOM_CLOSE_REASON_HOST_DISCONNECTED, current_time)
-            db.commit()
+            commit_room_transaction(db)
             raise HTTPException(
                 status_code=closed_status_code,
                 detail="Room is closed",
@@ -136,44 +127,11 @@ def _apply_lazy_room_deadlines(
     member_cutoff = current_time - timedelta(
         seconds=settings.ROOM_MEMBER_DISCONNECT_GRACE_SECONDS
     )
-    overdue_members = (
-        db.query(RoomMember)
-        .filter(
-            RoomMember.room_id == room.id,
-            RoomMember.role == "MEMBER",
-            RoomMember.disconnected_at.is_not(None),
-        )
-        .with_for_update()
-        .all()
-    )
-    removed_user_ids: list[int] = []
-    for member in overdue_members:
-        if _as_utc(member.disconnected_at) <= member_cutoff:
-            (
-                db.query(RoomMemberOrderSheet)
-                .filter(RoomMemberOrderSheet.room_member_id == member.id)
-                .delete(synchronize_session=False)
-            )
-            removed_user_ids.append(member.user_id)
-            db.delete(member)
-
-    left_events: list[LeftRoomMember] = []
-    if removed_user_ids:
-        db.flush()
-        m_cnt, c_cnt, all_done = _recalculate_room_counts(db, room.id)
-        for uid in removed_user_ids:
-            left_events.append(
-                LeftRoomMember(
-                    room_id=room.public_id,
-                    user_id=uid,
-                    member_count=m_cnt,
-                    completed_member_count=c_cnt,
-                    all_members_completed=all_done,
-                )
-            )
-        if commit_member_cleanup:
-            db.commit()
-    return left_events
+    members = lock_room_members(db, room.id)
+    overdue = [m for m in members if m.role == "MEMBER"
+               and m.disconnected_at is not None
+               and _as_utc(m.disconnected_at) <= member_cutoff]
+    return _departure_events(remove_locked_members(db, room, overdue))
 
 
 def build_join_url(room_public_id: str) -> str:
@@ -235,6 +193,7 @@ def _acquire_room_operation(
         return existing, True
 
 
+@room_transaction(http=True)
 def create_room(
     db: Session,
     host: User,
@@ -312,13 +271,14 @@ def create_room(
             operation.response_json = response.model_dump(mode="json")
             operation.updated_at = utc_now()
 
-        db.commit()
+        commit_room_transaction(db)
         return response
     except Exception:
         db.rollback()
         raise
 
 
+@room_transaction(http=True)
 def join_room_with_meta(
     db: Session,
     room_public_id: str,
@@ -368,7 +328,7 @@ def join_room_with_meta(
         room = (
             db.query(Room)
             .filter(Room.public_id == room_public_id)
-            .with_for_update()
+            .execution_options(populate_existing=True).with_for_update()
             .one_or_none()
         )
         if room is None:
@@ -392,7 +352,8 @@ def join_room_with_meta(
         member_rows = (
             db.query(RoomMember.user_id)
             .filter(RoomMember.room_id == room.id)
-            .with_for_update()
+            .order_by(RoomMember.id)
+            .execution_options(populate_existing=True).with_for_update()
             .all()
         )
         member_user_ids = {row[0] for row in member_rows}
@@ -434,7 +395,7 @@ def join_room_with_meta(
             operation.response_json = response.model_dump(mode="json")
             operation.updated_at = utc_now()
 
-        db.commit()
+        commit_room_transaction(db)
         return response, False, left_events
     except Exception:
         db.rollback()
@@ -497,6 +458,7 @@ def get_room_operation(
     )
 
 
+@room_transaction(http=True)
 def cancel_room_operation(
     db: Session,
     user: User,
@@ -528,7 +490,7 @@ def cancel_room_operation(
                 updated_at=now,
             )
             db.add(tombstone)
-            db.commit()
+            commit_room_transaction(db)
             return RoomOperationResponse(
                 operation_key=op_key,
                 status="CANCELLED",
@@ -540,7 +502,7 @@ def cancel_room_operation(
 
         if existing.status == "SUCCEEDED":
             room_status = _resolve_current_room_status(db, existing.room_id)
-            db.commit()
+            commit_room_transaction(db)
             return RoomOperationResponse(
                 operation_key=existing.operation_key,
                 status="SUCCEEDED",
@@ -553,7 +515,7 @@ def cancel_room_operation(
         existing.status = "CANCELLED"
         existing.updated_at = now
         room_status = _resolve_current_room_status(db, existing.room_id)
-        db.commit()
+        commit_room_transaction(db)
         return RoomOperationResponse(
             operation_key=existing.operation_key,
             status="CANCELLED",
@@ -567,17 +529,15 @@ def cancel_room_operation(
         raise
 
 
+@room_transaction(http=True)
 def get_room(
     db: Session,
     room_public_id: str,
     user: User,
 ) -> RoomDetailResponse:
     """Return room state and member details visible to the current user."""
-    room = (
-        db.query(Room)
-        .filter(Room.public_id == room_public_id)
-        .one_or_none()
-    )
+    lock_user_and_verify_session(db, user)
+    room = lock_room(db, room_public_id)
     if room is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -587,20 +547,16 @@ def get_room(
         db,
         room,
         closed_status_code=status.HTTP_410_GONE,
-        commit_member_cleanup=True,
     )
 
-    member_rows = (
-        db.query(RoomMember, User, RoomMemberOrderSheet)
-        .join(User, User.id == RoomMember.user_id)
-        .outerjoin(
-            RoomMemberOrderSheet,
-            RoomMemberOrderSheet.room_member_id == RoomMember.id,
-        )
-        .filter(RoomMember.room_id == room.id)
-        .order_by(RoomMember.joined_at, RoomMember.id)
-        .all()
-    )
+    room_members = lock_room_members(db, room.id)
+    sheets = {s.room_member_id: s for s in lock_order_sheets(db, [m.id for m in room_members])}
+    # A current member can reference a user created after auth's old snapshot.
+    # Read profiles without taking User locks after the Room/member locks.
+    with current_read_session(db) as read_db:
+        users = {u.id: u for u in read_db.query(User).filter(User.id.in_([m.user_id for m in room_members])).all()}
+    member_rows = [(m, users[m.user_id], sheets.get(m.id))
+                   for m in sorted(room_members, key=lambda m: (m.joined_at, m.id))]
     current_member = next(
         (
             room_member
@@ -638,7 +594,7 @@ def get_room(
         for _, _, order_sheet in member_rows
         if order_sheet and order_sheet.is_completed
     )
-    return RoomDetailResponse(
+    response = RoomDetailResponse(
         room_id=room.public_id,
         join_url=build_join_url(room.public_id),
         host_user_id=room.host_user_id,
@@ -657,8 +613,11 @@ def get_room(
             and completed_member_count == member_count
         ),
     )
+    commit_room_transaction(db)
+    return response
 
 
+@room_transaction(http=True)
 def complete_room_order_sheet(
     db: Session,
     room_public_id: str,
@@ -670,7 +629,7 @@ def complete_room_order_sheet(
         room = (
             db.query(Room)
             .filter(Room.public_id == room_public_id)
-            .with_for_update()
+            .execution_options(populate_existing=True).with_for_update()
             .one_or_none()
         )
         if room is None:
@@ -687,7 +646,8 @@ def complete_room_order_sheet(
         member_rows = (
             db.query(RoomMember.id, RoomMember.user_id)
             .filter(RoomMember.room_id == room.id)
-            .with_for_update()
+            .order_by(RoomMember.id)
+            .execution_options(populate_existing=True).with_for_update()
             .all()
         )
         current_member_id = next(
@@ -710,7 +670,8 @@ def complete_room_order_sheet(
             .filter(
                 RoomMemberOrderSheet.room_member_id.in_(room_member_ids)
             )
-            .with_for_update()
+            .order_by(RoomMemberOrderSheet.id)
+            .execution_options(populate_existing=True).with_for_update()
             .all()
         )
         current_order_sheet = next(
@@ -737,7 +698,7 @@ def complete_room_order_sheet(
             1 for order_sheet in order_sheet_rows if order_sheet.is_completed
         )
         total_member_count = len(member_rows)
-        db.commit()
+        commit_room_transaction(db)
         db.refresh(current_order_sheet)
     except Exception:
         db.rollback()
@@ -760,6 +721,7 @@ def complete_room_order_sheet(
     )
 
 
+@room_transaction(http=True)
 def close_room_by_host(
     db: Session,
     room_public_id: str,
@@ -771,7 +733,7 @@ def close_room_by_host(
         room = (
             db.query(Room)
             .filter(Room.public_id == room_public_id)
-            .with_for_update()
+            .execution_options(populate_existing=True).with_for_update()
             .one_or_none()
         )
         if room is None:
@@ -790,13 +752,14 @@ def close_room_by_host(
             ROOM_CLOSE_REASON_HOST_LEFT,
             utcnow(),
         )
-        db.commit()
+        commit_room_transaction(db)
         return closed_room
     except Exception:
         db.rollback()
         raise
 
 
+@room_transaction(http=True)
 def leave_room_member(
     db: Session,
     room_public_id: str,
@@ -815,7 +778,7 @@ def leave_room_member(
         room = (
             db.query(Room)
             .filter(Room.public_id == room_public_id)
-            .with_for_update()
+            .execution_options(populate_existing=True).with_for_update()
             .one_or_none()
         )
         if room is None:
@@ -829,15 +792,7 @@ def leave_room_member(
             closed_status_code=status.HTTP_409_CONFLICT,
         )
 
-        member = (
-            db.query(RoomMember)
-            .filter(
-                RoomMember.room_id == room.id,
-                RoomMember.user_id == locked_user.id,
-            )
-            .with_for_update()
-            .one_or_none()
-        )
+        member = next((m for m in lock_room_members(db, room.id) if m.user_id == locked_user.id), None)
         if member is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -849,16 +804,11 @@ def leave_room_member(
                 detail="The room host must delete the room instead",
             )
 
-        (
-            db.query(RoomMemberOrderSheet)
-            .filter(RoomMemberOrderSheet.room_member_id == member.id)
-            .delete(synchronize_session=False)
-        )
-        db.delete(member)
-        db.flush()
-
-        member_count, completed_member_count, all_completed = _recalculate_room_counts(db, room.id)
-        db.commit()
+        departure = remove_locked_members(db, room, [member])
+        member_count = departure.member_count
+        completed_member_count = departure.completed_member_count
+        all_completed = departure.all_members_completed
+        commit_room_transaction(db)
     except Exception:
         db.rollback()
         raise
@@ -873,13 +823,14 @@ def leave_room_member(
     )
 
 
+@room_transaction()
 def delete_closed_room(db: Session, room_public_id: str) -> bool:
     """Physically delete a closed room and all dependent rows."""
     try:
         room = (
             db.query(Room)
             .filter(Room.public_id == room_public_id)
-            .with_for_update()
+            .execution_options(populate_existing=True).with_for_update()
             .one_or_none()
         )
         if room is None:
@@ -890,31 +841,20 @@ def delete_closed_room(db: Session, room_public_id: str) -> bool:
                 detail="Room must be closed before deletion",
             )
 
-        member_ids = [
-            row[0]
-            for row in db.query(RoomMember.id)
-            .filter(RoomMember.room_id == room.id)
-            .all()
-        ]
-        if member_ids:
-            (
-                db.query(RoomMemberOrderSheet)
-                .filter(RoomMemberOrderSheet.room_member_id.in_(member_ids))
-                .delete(synchronize_session=False)
-            )
-        (
-            db.query(RoomMember)
-            .filter(RoomMember.room_id == room.id)
-            .delete(synchronize_session=False)
-        )
+        members = lock_room_members(db, room.id)
+        for sheet in lock_order_sheets(db, [m.id for m in members]):
+            db.delete(sheet)
+        for member in members:
+            db.delete(member)
         db.delete(room)
-        db.commit()
+        commit_room_transaction(db)
         return True
     except Exception:
         db.rollback()
         raise
 
 
+@room_transaction()
 def mark_host_disconnected(
     db: Session,
     room_public_id: str,
@@ -926,19 +866,20 @@ def mark_host_disconnected(
         room = (
             db.query(Room)
             .filter(Room.public_id == room_public_id)
-            .with_for_update()
+            .execution_options(populate_existing=True).with_for_update()
             .one_or_none()
         )
         if room is None or room.status == "CLOSED" or room.host_user_id != user_id:
             return False
         room.host_disconnected_at = disconnected_at or utcnow()
-        db.commit()
+        commit_room_transaction(db)
         return True
     except Exception:
         db.rollback()
         raise
 
 
+@room_transaction()
 def clear_host_disconnected(
     db: Session,
     room_public_id: str,
@@ -950,14 +891,14 @@ def clear_host_disconnected(
         room = (
             db.query(Room)
             .filter(Room.public_id == room_public_id)
-            .with_for_update()
+            .execution_options(populate_existing=True).with_for_update()
             .one_or_none()
         )
         if room is None or room.host_user_id != user_id or room.status == "CLOSED":
             return False
         if _as_utc(room.expires_at) <= current_time:
             _close_room(room, ROOM_CLOSE_REASON_EXPIRED, current_time)
-            db.commit()
+            commit_room_transaction(db)
             return False
         if (
             room.host_disconnected_at is not None
@@ -965,17 +906,18 @@ def clear_host_disconnected(
             <= current_time - timedelta(seconds=settings.ROOM_HOST_DISCONNECT_GRACE_SECONDS)
         ):
             _close_room(room, ROOM_CLOSE_REASON_HOST_DISCONNECTED, current_time)
-            db.commit()
+            commit_room_transaction(db)
             return False
         changed = room.host_disconnected_at is not None
         room.host_disconnected_at = None
-        db.commit()
+        commit_room_transaction(db)
         return changed
     except Exception:
         db.rollback()
         raise
 
 
+@room_transaction()
 def mark_room_member_disconnected(
     db: Session,
     room_public_id: str,
@@ -984,46 +926,49 @@ def mark_room_member_disconnected(
 ) -> bool:
     """Start a room member's reconnect grace period."""
     try:
-        member = (
-            db.query(RoomMember)
-            .join(Room, Room.id == RoomMember.room_id)
-            .filter(
-                Room.public_id == room_public_id,
-                Room.status != "CLOSED",
-                RoomMember.user_id == user_id,
-            )
-            .with_for_update()
-            .one_or_none()
-        )
+        room = lock_room(db, room_public_id)
+        if room is None or room.status == "CLOSED":
+            return False
+        member = next((m for m in lock_room_members(db, room.id) if m.user_id == user_id), None)
         if member is None:
             return False
         member.disconnected_at = disconnected_at or utcnow()
-        db.commit()
+        commit_room_transaction(db)
         return True
     except Exception:
         db.rollback()
         raise
 
 
+@room_transaction()
 def mark_room_member_online(
     db: Session,
     room_public_id: str,
     user_id: int,
+    *,
+    user: User | None = None,
+    require_membership: bool = False,
 ) -> bool:
     """Mark a member online and report whether an offline event was visible."""
     try:
+        if user is not None:
+            lock_user_and_verify_session(db, user)
         current_time = utcnow()
         room = (
             db.query(Room)
             .filter(Room.public_id == room_public_id)
-            .with_for_update()
+            .execution_options(populate_existing=True).with_for_update()
             .one_or_none()
         )
         if room is None or room.status == "CLOSED":
+            if require_membership:
+                raise HTTPException(403, detail="Room membership required")
             return False
         if _as_utc(room.expires_at) <= current_time:
             _close_room(room, ROOM_CLOSE_REASON_EXPIRED, current_time)
-            db.commit()
+            commit_room_transaction(db)
+            if require_membership:
+                raise HTTPException(403, detail="Room membership required")
             return False
         if (
             room.host_disconnected_at is not None
@@ -1031,20 +976,16 @@ def mark_room_member_online(
             <= current_time - timedelta(seconds=settings.ROOM_HOST_DISCONNECT_GRACE_SECONDS)
         ):
             _close_room(room, ROOM_CLOSE_REASON_HOST_DISCONNECTED, current_time)
-            db.commit()
+            commit_room_transaction(db)
+            if require_membership:
+                raise HTTPException(403, detail="Room membership required")
             return False
 
-        member = (
-            db.query(RoomMember)
-            .filter(
-                RoomMember.room_id == room.id,
-                RoomMember.user_id == user_id,
-            )
-            .with_for_update()
-            .one_or_none()
-        )
+        member = next((m for m in lock_room_members(db, room.id) if m.user_id == user_id), None)
         if member is None:
-            db.commit()
+            commit_room_transaction(db)
+            if require_membership:
+                raise HTTPException(403, detail="Room membership required")
             return False
         if (
             member.role == "MEMBER"
@@ -1052,24 +993,22 @@ def mark_room_member_online(
             and _as_utc(member.disconnected_at)
             <= current_time - timedelta(seconds=settings.ROOM_MEMBER_DISCONNECT_GRACE_SECONDS)
         ):
-            (
-                db.query(RoomMemberOrderSheet)
-                .filter(RoomMemberOrderSheet.room_member_id == member.id)
-                .delete(synchronize_session=False)
-            )
-            db.delete(member)
-            db.commit()
+            remove_locked_members(db, room, [member])
+            commit_room_transaction(db)
+            if require_membership:
+                raise HTTPException(403, detail="Room membership required")
             return False
         became_online = not member.is_online
         member.is_online = True
         member.disconnected_at = None
-        db.commit()
+        commit_room_transaction(db)
         return became_online
     except Exception:
         db.rollback()
         raise
 
 
+@room_transaction()
 def expire_room_member_after_grace(
     db: Session,
     room_public_id: str,
@@ -1084,22 +1023,14 @@ def expire_room_member_after_grace(
         room = (
             db.query(Room)
             .filter(Room.public_id == room_public_id)
-            .with_for_update()
+            .execution_options(populate_existing=True).with_for_update()
             .one_or_none()
         )
         if room is None or room.status == "CLOSED":
             return None
 
-        member = (
-            db.query(RoomMember)
-            .filter(
-                RoomMember.room_id == room.id,
-                RoomMember.user_id == user_id,
-                RoomMember.role == "MEMBER",
-            )
-            .with_for_update()
-            .one_or_none()
-        )
+        member = next((m for m in lock_room_members(db, room.id)
+                       if m.user_id == user_id and m.role == "MEMBER"), None)
         if member is None or member.disconnected_at is None:
             return None
 
@@ -1110,16 +1041,11 @@ def expire_room_member_after_grace(
         if deadline > current_time:
             return None
 
-        (
-            db.query(RoomMemberOrderSheet)
-            .filter(RoomMemberOrderSheet.room_member_id == member.id)
-            .delete(synchronize_session=False)
-        )
-        db.delete(member)
-        db.flush()
-
-        member_count, completed_member_count, all_completed = _recalculate_room_counts(db, room.id)
-        db.commit()
+        departure = remove_locked_members(db, room, [member])
+        member_count = departure.member_count
+        completed_member_count = departure.completed_member_count
+        all_completed = departure.all_members_completed
+        commit_room_transaction(db)
         return LeftRoomMember(
             room_id=room.public_id,
             user_id=user_id,
@@ -1146,67 +1072,82 @@ def mark_room_member_offline_after_grace(
     return result if result is not None else False
 
 
-def expire_due_room_members(
-    db: Session,
-    now: datetime | None = None,
-) -> list[LeftRoomMember]:
-    """60초 유예 기한이 지난 모든 일반 참가자를 자동 퇴장시키고 방별 인원·완료 수를 재계산한다."""
+def _due_member_room_ids(db: Session, current_time: datetime) -> list[int]:
+    cutoff = current_time - timedelta(seconds=settings.ROOM_MEMBER_DISCONNECT_GRACE_SECONDS)
+    # Discovery only: never use a JOIN locking read as a lock-order guarantee.
+    return [row[0] for row in db.query(Room.id).filter(
+        Room.status != "CLOSED",
+        Room.id.in_(select(RoomMember.room_id).where(
+            RoomMember.role == "MEMBER", RoomMember.disconnected_at <= cutoff,
+        )),
+    ).order_by(Room.id).all()]
+
+
+def _expire_members_in_room(db: Session, room_id: int, current_time: datetime) -> list[LeftRoomMember]:
+    room = (db.query(Room).filter(Room.id == room_id)
+            .execution_options(populate_existing=True).with_for_update().one_or_none())
+    if room is None or room.status == "CLOSED":
+        return []
+    cutoff = current_time - timedelta(seconds=settings.ROOM_MEMBER_DISCONNECT_GRACE_SECONDS)
+    overdue = [m for m in lock_room_members(db, room.id) if m.role == "MEMBER"
+               and m.disconnected_at is not None and _as_utc(m.disconnected_at) <= cutoff]
+    return _departure_events(remove_locked_members(db, room, overdue))
+
+
+@room_transaction()
+def expire_due_room_members(db: Session, now: datetime | None = None) -> list[LeftRoomMember]:
+    """Recovery's all-or-nothing member-cleanup stage; caller failures propagate."""
     current_time = now or utcnow()
-    cutoff = current_time - timedelta(
-        seconds=settings.ROOM_MEMBER_DISCONNECT_GRACE_SECONDS
-    )
     try:
-        rows = (
-            db.query(RoomMember, Room)
-            .join(Room, Room.id == RoomMember.room_id)
-            .filter(
-                Room.status != "CLOSED",
-                RoomMember.role == "MEMBER",
-                RoomMember.disconnected_at.is_not(None),
-            )
-            .order_by(Room.id.asc(), RoomMember.id.asc())
-            .with_for_update()
-            .all()
-        )
-        overdue_by_room: dict[int, tuple[Room, list[int]]] = {}
-        for member, room in rows:
-            if _as_utc(member.disconnected_at) <= cutoff:
-                (
-                    db.query(RoomMemberOrderSheet)
-                    .filter(RoomMemberOrderSheet.room_member_id == member.id)
-                    .delete(synchronize_session=False)
-                )
-                overdue_by_room.setdefault(room.id, (room, []))[1].append(member.user_id)
-                db.delete(member)
-
-        if not overdue_by_room:
-            db.commit()
-            return []
-
-        db.flush()
-        left_members: list[LeftRoomMember] = []
-        for room_internal_id, (room, user_ids) in overdue_by_room.items():
-            m_cnt, c_cnt, all_done = _recalculate_room_counts(db, room_internal_id)
-            for uid in user_ids:
-                left_members.append(
-                    LeftRoomMember(
-                        room_id=room.public_id,
-                        user_id=uid,
-                        member_count=m_cnt,
-                        completed_member_count=c_cnt,
-                        all_members_completed=all_done,
-                    )
-                )
-        db.commit()
-        return left_members
+        results = []
+        for room_id in _due_member_room_ids(db, current_time):
+            results.extend(_expire_members_in_room(db, room_id, current_time))
+        commit_room_transaction(db)
+        return results
     except Exception:
         db.rollback()
         raise
 
 
-mark_due_room_members_offline = expire_due_room_members
+@room_transaction()
+def _expire_member_room_transaction(db: Session, room_id: int, now: datetime | None):
+    results = _expire_members_in_room(db, room_id, now or utcnow())
+    commit_room_transaction(db)
+    return results
 
 
+def iter_due_room_member_departures(db: Session, now: datetime | None = None):
+    """Yield committed batches so a later global failure cannot lose delivery.
+
+    Only the periodic job isolates room failures. Recovery and account transition
+    keep their existing transaction and failure propagation boundaries.
+    """
+    room_ids = _due_member_room_ids(db, now or utcnow())
+    db.rollback()  # discovery's snapshot and connection do not span room work
+    for room_id in room_ids:
+        try:
+            result = _expire_member_room_transaction(db, room_id, now)
+        except Exception as exc:
+            # Disconnection, unavailable schema/connection and programming errors
+            # cannot be repaired by skipping a room. Cancellation is BaseException.
+            local_db_error = isinstance(exc, (IntegrityError, DataError)) or (
+                isinstance(exc, OperationalError) and is_lock_conflict(exc)
+            )
+            if (isinstance(exc, SQLAlchemyError) and not local_db_error) or (
+                isinstance(exc, DBAPIError) and exc.connection_invalidated
+            ):
+                raise
+            logging.getLogger(__name__).exception('Periodic departure failed for room %s', room_id)
+            continue
+        if result:
+            yield result
+
+
+def mark_due_room_members_offline(db: Session, now: datetime | None = None) -> list[LeftRoomMember]:
+    return [member for batch in iter_due_room_member_departures(db, now) for member in batch]
+
+
+@room_transaction()
 def close_room_after_host_disconnect(
     db: Session,
     room_public_id: str,
@@ -1218,7 +1159,7 @@ def close_room_after_host_disconnect(
         room = (
             db.query(Room)
             .filter(Room.public_id == room_public_id)
-            .with_for_update()
+            .execution_options(populate_existing=True).with_for_update()
             .one_or_none()
         )
         if (
@@ -1241,13 +1182,14 @@ def close_room_after_host_disconnect(
             ROOM_CLOSE_REASON_HOST_DISCONNECTED,
             closed_at,
         )
-        db.commit()
+        commit_room_transaction(db)
         return closed_room
     except Exception:
         db.rollback()
         raise
 
 
+@room_transaction()
 def close_due_rooms(
     db: Session,
     now: datetime | None = None,
@@ -1258,7 +1200,7 @@ def close_due_rooms(
         seconds=settings.ROOM_HOST_DISCONNECT_GRACE_SECONDS
     )
     try:
-        rooms = db.query(Room).order_by(Room.id.asc()).with_for_update().all()
+        rooms = db.query(Room).order_by(Room.id.asc()).populate_existing().with_for_update().all()
         closed_rooms: list[ClosedRoom] = []
         for room in rooms:
             if room.status == "CLOSED":
@@ -1286,7 +1228,7 @@ def close_due_rooms(
                         current_time,
                     )
                 )
-        db.commit()
+        commit_room_transaction(db)
         return closed_rooms
     except Exception:
         db.rollback()
@@ -1312,14 +1254,9 @@ def recover_rooms_after_restart(
             deleted_rooms += 1
 
     try:
-        rows = (
-            db.query(RoomMember, Room)
-            .join(Room, Room.id == RoomMember.room_id)
-            .filter(Room.status != "CLOSED")
-            .order_by(Room.id.asc(), RoomMember.id.asc())
-            .with_for_update()
-            .all()
-        )
+        rooms = (db.query(Room).filter(Room.status != "CLOSED").order_by(Room.id)
+                 .execution_options(populate_existing=True).with_for_update().all())
+        rows = [(member, room) for room in rooms for member in lock_room_members(db, room.id)]
         grace_started = 0
         for member, room in rows:
             if member.is_online and member.disconnected_at is None:
@@ -1327,7 +1264,7 @@ def recover_rooms_after_restart(
                 grace_started += 1
                 if (member.role == "HOST" or room.host_user_id == member.user_id) and room.host_disconnected_at is None:
                     room.host_disconnected_at = current_time
-        db.commit()
+        commit_room_transaction(db)
         return {
             "expired_members": len(left_members),
             "deleted_rooms": deleted_rooms,
@@ -1364,34 +1301,24 @@ def has_active_or_pending_room_activity(
                 RequestOperation.status == "PENDING",
             )
             .limit(1)
-            .with_for_update()
+            .execution_options(populate_existing=True).with_for_update()
         )
         .scalar_one_or_none()
     )
     if pending_op is not None:
         return True
 
-    room_ids = sorted(
-        {
-            int(row[0])
-            for row in db.query(Room.id)
-            .join(RoomMember, RoomMember.room_id == Room.id)
-            .filter(RoomMember.user_id.in_(uid_set), Room.status != "CLOSED")
-            .order_by(Room.id.asc())
-            .with_for_update()
-            .all()
-        }
-    )
-    if not room_ids:
-        return False
+    def discover_room_ids(read_db: Session) -> list[int]:
+        return [row[0] for row in read_db.query(RoomMember.room_id)
+                .filter(RoomMember.user_id.in_(uid_set)).distinct().order_by(RoomMember.room_id).all()]
 
-    rooms = (
-        db.query(Room)
-        .filter(Room.id.in_(room_ids))
-        .order_by(Room.id.asc())
-        .with_for_update()
-        .all()
-    )
+    # The caller's User locks serialize new joins. A fresh, short read sees
+    # candidates committed after authentication's RR snapshot without locking
+    # members ahead of Room or committing the account transition's work.
+    with current_read_session(db) as discovery:
+        room_ids = discover_room_ids(discovery)
+    rooms = (db.query(Room).filter(Room.id.in_(room_ids))
+             .order_by(Room.id).execution_options(populate_existing=True).with_for_update().all())
     host_cutoff = current_time - timedelta(seconds=settings.ROOM_HOST_DISCONNECT_GRACE_SECONDS)
     member_cutoff = current_time - timedelta(seconds=settings.ROOM_MEMBER_DISCONNECT_GRACE_SECONDS)
 
@@ -1405,29 +1332,14 @@ def has_active_or_pending_room_activity(
             _close_room(room, ROOM_CLOSE_REASON_HOST_DISCONNECTED, current_time)
             continue
 
-        members = (
-            db.query(RoomMember)
-            .filter(RoomMember.room_id == room.id)
-            .order_by(RoomMember.id.asc())
-            .with_for_update()
-            .all()
-        )
-        for member in members:
-            if (
-                member.role == "MEMBER"
-                and member.disconnected_at is not None
-                and _as_utc(member.disconnected_at) <= member_cutoff
-            ):
-                (
-                    db.query(RoomMemberOrderSheet)
-                    .filter(RoomMemberOrderSheet.room_member_id == member.id)
-                    .delete(synchronize_session=False)
-                )
-                db.delete(member)
-                continue
-            if member.user_id in uid_set:
-                db.flush()
-                return True
+        members = lock_room_members(db, room.id)
+        overdue = [m for m in members if m.role == "MEMBER"
+                   and m.disconnected_at is not None and _as_utc(m.disconnected_at) <= member_cutoff]
+        departure = remove_locked_members(db, room, overdue)
+        removed_ids = set(departure.user_ids)
+        if any(m.user_id in uid_set and m.user_id not in removed_ids for m in members):
+            db.flush()
+            return True
 
     db.flush()
     return False
