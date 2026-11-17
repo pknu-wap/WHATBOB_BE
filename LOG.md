@@ -5,6 +5,37 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-17
 
+### #44 T01 소유 연결 풀 포화 시 방 조회 실패 수정
+
+#### 변경 이유 및 내용
+
+- 두 방 요청이 소유 풀의 연결 두 개를 모두 점유하면 Room 잠금을 가진 요청도 최신 프로필 조회용 두 번째 연결을 얻지 못해 `QueuePool TimeoutError`로 실패했다. MySQL의 과거 인증 스냅샷을 피하는 별도 비잠금 조회를 소유 풀과 분리했다.
+- 소유 Engine마다 읽기 풀을 지연 생성하고 한 번에 하나의 읽기 세션만 허용한다. 공개 `Pool.recreate()`로 URL뿐 아니라 `connect_args`·creator·연결 이벤트·재활용 설정을 보존하며, 소유 Engine을 dispose하면 읽기 연결도 반납 후 dispose하고 캐시를 제거한다. dispose 후 Engine 재사용도 지원한다.
+- 기존 Room → 참여 → 완료 잠금 순서, 최신 잠금 판정, 상위 트랜잭션의 commit/rollback 소유권은 유지한다.
+
+#### 주요 변경 파일
+
+- `app/rooms/transactions.py`, `tests/test_member_departure_mysql.py`
+
+#### API 변경
+
+- 성공 DTO·오류 계약 변경 없음. 소유 연결 풀이 포화된 두 동시 방 조회가 모두 성공하도록 수정했다.
+
+#### DB 변경
+
+- 스키마·마이그레이션 없음. 소유 Engine마다 실제 추가 연결은 최대 한 개이며 짧은 비잠금 조회 사이에는 재사용한다.
+
+#### 검증
+
+- 승인된 공개 서비스 + 격리 MySQL 경계에서 TDD red로 `pool_size=2`, `max_overflow=0`, `pool_timeout=0.3`인 두 인증 요청의 `QueuePool TimeoutError`를 재현했다.
+- 같은 회귀 테스트의 green에서 두 방 조회 성공, `connect_args`로만 지정한 격리 DB 유지, Engine dispose 후 두 요청 재실행을 확인했다. `tests/test_member_departure_mysql.py`: **8 passed**. 기존 인증 이후 새 참여·사용자 생성, 오래된 ORM 상태, 잠금 경합·재시도도 포함한다.
+- 관련 일반 회귀 `tests/test_member_departure.py tests/test_rooms.py tests/test_t03_rooms.py tests/test_t06_t07_t08_transitions.py`: **53 passed**.
+- 격리 MySQL 혼합 회귀 `tests/test_member_departure_mysql.py tests/test_rooms_mysql.py tests/test_issue39_mysql_concurrency.py -k 'room or depart or reconnect or retry or account_transition'`: **10 passed, 3 deselected**, exit 0. 기존 혼합 실행의 SQLite 연결 스레드 귀속 정리 경고가 종료 시 다시 출력됐다.
+
+#### 남은 작업 및 주의 사항
+
+- 읽기 풀의 실제 동시 연결 비용을 한 개로 제한했으며 운영 부하·RAM 1GB 환경의 성능 개선을 실측한 결과는 아니다. 운영 DB는 사용하지 않았다.
+
 ### #44 / #43 T01 일반 참여자 퇴장 정리·최신 잠금 읽기·충돌 재시도·주기 정리 실패 격리
 
 #### 변경 이유 및 내용

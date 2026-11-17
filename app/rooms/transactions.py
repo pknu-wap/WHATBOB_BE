@@ -3,14 +3,44 @@ from functools import wraps
 from inspect import signature
 from types import SimpleNamespace
 from contextlib import contextmanager
+from threading import Lock, RLock
 
 from fastapi import HTTPException
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.auth.operations import get_user_session_id
 
 _COMMIT_PHASE = 'room_operation_commit_phase'
+_READ_POOL_ATTRIBUTE = '_whatbob_current_read_pool'
+_read_pool_lock = RLock()
+
+
+class _CurrentReadPool:
+    def __init__(self, owner: Engine):
+        # recreate preserves connect_args, creator, connection events and
+        # recycling/ping settings. No owner-pool checkout is involved.
+        self.engine = Engine(owner.pool.recreate(), owner.dialect, owner.url,
+                             execution_options=owner.get_execution_options())
+        # Only one read session may use the independent pool: at most one
+        # extra connection per owner Engine, irrespective of owner pool size.
+        self.lock = Lock()
+        self.retired = False
+
+
+@event.listens_for(Engine, 'engine_disposed')
+def _dispose_current_read_pool(owner):
+    with _read_pool_lock:
+        reader = getattr(owner, _READ_POOL_ATTRIBUTE, None)
+        if reader is not None:
+            # Keep creation serialized until the active read and its connection
+            # close, so disposal cannot briefly create a second reader pool.
+            with reader.lock:
+                reader.retired = True
+                reader.engine.dispose()
+                delattr(owner, _READ_POOL_ATTRIBUTE)
 
 
 @contextmanager
@@ -18,12 +48,25 @@ def current_read_session(db: Session):
     """Short non-locking discovery/profile reads outside an old MySQL snapshot.
 
     Eligibility and aggregate state still require the owner's current locking
-    reads. This never commits or releases the owner's transaction/locks.
+    reads. This never commits or releases the owner's transaction/locks. MySQL
+    uses one independent reader connection per owner Engine so a saturated
+    owner pool cannot block the Room lock holder's non-locking reads.
     """
     bind = db.get_bind()
     if bind.dialect.name == 'mysql':
-        with Session(bind=getattr(bind, 'engine', bind)) as read_db:
-            yield read_db
+        owner = bind.engine
+        while True:
+            with _read_pool_lock:
+                reader = getattr(owner, _READ_POOL_ATTRIBUTE, None)
+                if reader is None:
+                    reader = _CurrentReadPool(owner)
+                    setattr(owner, _READ_POOL_ATTRIBUTE, reader)
+            with reader.lock:
+                if reader.retired:
+                    continue  # owner disposal raced with this checkout
+                with Session(bind=reader.engine) as read_db:
+                    yield read_db
+                break
     else:
         yield db
 
