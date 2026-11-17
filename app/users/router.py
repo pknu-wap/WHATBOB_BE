@@ -1,3 +1,5 @@
+from starlette.concurrency import run_in_threadpool
+from app.rooms.notifications import dispatch_room
 from fastapi import APIRouter, Depends, File, Header, Path, Query, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
@@ -40,7 +42,7 @@ def get_my_profile(response: Response, current_user: User = Depends(get_current_
 
 
 @router.patch("/me/nickname", response_model=UserResponse)
-def update_my_nickname_endpoint(
+async def update_my_nickname_endpoint(
     request: NicknameUpdateRequest,
     response: Response,
     current_user: User = Depends(get_current_user),
@@ -48,11 +50,13 @@ def update_my_nickname_endpoint(
 ):
     """본인의 표시 닉네임을 수정한다. 앞뒤 공백 제거 후 2~20자 한글/영문/숫자/공백 및 전체 고유성을 검증한다."""
     response.headers["Cache-Control"] = "no-store"
-    return update_my_nickname(db, current_user, request)
+    result = await run_in_threadpool(update_my_nickname, db, current_user, request)
+    await dispatch_room(db.get_bind())
+    return result
 
 
 @router.put("/me/profile-image", response_model=UserResponse)
-def replace_my_profile_image_endpoint(
+async def replace_my_profile_image_endpoint(
     response: Response,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
@@ -60,18 +64,22 @@ def replace_my_profile_image_endpoint(
 ):
     """본인의 프로필 사진을 업로드·교체한다 (5MB·1,200만 픽셀 이하 JPG/PNG/WebP → 긴 변 512px 정지 이미지 정규화)."""
     response.headers["Cache-Control"] = "no-store"
-    return replace_my_profile_image(db, current_user, file)
+    result = await run_in_threadpool(replace_my_profile_image, db, current_user, file)
+    await dispatch_room(db.get_bind())
+    return result
 
 
 @router.delete("/me/profile-image", response_model=UserResponse)
-def delete_my_profile_image_endpoint(
+async def delete_my_profile_image_endpoint(
     response: Response,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """본인의 프로필 사진을 기본 이미지(/static/default-profile.svg)로 복원한다."""
     response.headers["Cache-Control"] = "no-store"
-    return reset_my_profile_image(db, current_user)
+    result = await run_in_threadpool(reset_my_profile_image, db, current_user)
+    await dispatch_room(db.get_bind())
+    return result
 
 
 

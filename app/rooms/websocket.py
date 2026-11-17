@@ -1,7 +1,8 @@
+from app.rooms.notifications import dispatch_room
 import asyncio
 from collections import defaultdict
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -153,6 +154,15 @@ class RoomConnectionManager:
 
         await asyncio.gather(*(send(websocket) for websocket in connections))
 
+    def eligible_connections(self, room_public_id, eligible_user_ids):
+        users = self._user_connections.get(room_public_id, {})
+        return [socket for uid, sockets in list(users.items()) if uid in eligible_user_ids
+                for socket in list(sockets)
+                if not getattr(self._auth_states.get(socket), 'closed', False)]
+
+    async def send_connection(self, socket, message):
+        await self._auth_states.get(socket, socket).send_json(message)
+
     async def close_room_connections(self, room_public_id: str) -> None:
         connections = list(self._connections.pop(room_public_id, set()))
         self._user_connections.pop(room_public_id, None)
@@ -247,18 +257,7 @@ async def mark_member_offline_after_grace(
                 user_id,
             )
         if left_member is not None:
-            await room_connection_manager.broadcast(
-                room_public_id,
-                {
-                    "type": "room.updated",
-                    "room_id": room_public_id,
-                    "reason": "MEMBER_LEFT",
-                    "user_id": user_id,
-                    "member_count": left_member.member_count,
-                    "completed_member_count": left_member.completed_member_count,
-                    "all_members_completed": left_member.all_members_completed,
-                },
-            )
+            await dispatch_room(database_bind, room_public_id)
             await room_connection_manager.close_user_connections(room_public_id, user_id)
     except asyncio.CancelledError:
         return
@@ -339,20 +338,22 @@ async def room_websocket(
             room_id,
             authenticated_user_id,
         )
-        with Session(bind=database_bind) as reconnect_db:
-            became_online = mark_room_member_online(
-                reconnect_db,
-                room_id,
-                authenticated_user_id,
-            )
-        if authenticated_is_host:
-            room_connection_manager.cancel_host_disconnect(room_id)
+        try:
             with Session(bind=database_bind) as reconnect_db:
-                clear_host_disconnected(
+                became_online = mark_room_member_online(
                     reconnect_db,
                     room_id,
                     authenticated_user_id,
+                    user=user,
+                    require_membership=True,
                 )
+        except HTTPException as error:
+            await close_websocket(websocket, 4401 if error.status_code == 401 else 4403,
+                                  "Room membership required")
+            return
+        if authenticated_is_host:
+            room_connection_manager.cancel_host_disconnect(room_id)
+        await dispatch_room(database_bind, room_id)
         # A long-lived socket must not hold a database connection after auth.
         db.close()
         auth_state = ConnectionAuthentication(websocket, payload, auth_message["access_token"], database_bind)
@@ -370,16 +371,6 @@ async def room_websocket(
                 "user_id": authenticated_user_id,
             }
         )
-        if became_online and not authenticated_is_host:
-            await room_connection_manager.broadcast(
-                room_id,
-                {
-                    "type": "room.updated",
-                    "room_id": room_id,
-                    "reason": "MEMBER_ONLINE",
-                    "user_id": authenticated_user_id,
-                },
-            )
 
         while True:
             try:
@@ -407,16 +398,12 @@ async def room_websocket(
             )
             if authenticated_is_host and is_last_connection:
                 with Session(bind=database_bind) as disconnect_db:
-                    mark_room_member_disconnected(
+                    marked = mark_room_member_disconnected(
                         disconnect_db,
                         room_id,
                         authenticated_user_id,
                     )
-                    marked = mark_host_disconnected(
-                        disconnect_db,
-                        room_id,
-                        authenticated_user_id,
-                    )
+                await dispatch_room(database_bind, room_id)
                 if marked:
                     room_connection_manager.schedule_host_disconnect(
                         room_id,
@@ -430,6 +417,7 @@ async def room_websocket(
                         room_id,
                         authenticated_user_id,
                     )
+                await dispatch_room(database_bind, room_id)
                 if marked:
                     room_connection_manager.schedule_member_disconnect(
                         room_id,

@@ -1,3 +1,5 @@
+from starlette.concurrency import run_in_threadpool
+from app.rooms.notifications import dispatch_room
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Header, Request, Response
@@ -73,6 +75,7 @@ async def prepare_transition_endpoint(
         auth_cookie_secret=request.cookies.get(settings.AUTH_COOKIE_NAME),
         idempotency_key_header=raw_idem,
     )
+    await dispatch_room(db.get_bind())
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     set_transition_prepare_cookie(
@@ -88,7 +91,7 @@ async def prepare_transition_endpoint(
     response_model=TransitionCommitResponse,
     dependencies=[Depends(require_csrf)],
 )
-def commit_transition_endpoint(
+async def commit_transition_endpoint(
     transition_id: str,
     request: Request,
     response: Response,
@@ -105,13 +108,14 @@ def commit_transition_endpoint(
         if credentials is not None and credentials.scheme.lower() == "bearer"
         else None
     )
-    result, active_secret = commit_account_transition(
+    result, active_secret = await run_in_threadpool(commit_account_transition,
         db,
         transition_id,
         prepare_secret=prepare_secret,
         expected_context=request.headers.get("x-whatbob-auth-context"),
         bearer_token=bearer_token,
     )
+    await dispatch_room(db.get_bind())
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     set_auth_cookie(response, active_secret, SESSION_SECONDS)

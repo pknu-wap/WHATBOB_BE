@@ -8,9 +8,13 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    JSON,
+    Index,
     String,
     UniqueConstraint,
 )
+
+from sqlalchemy.dialects.mysql import DATETIME
 
 from app.core.database import Base
 
@@ -39,6 +43,7 @@ class Room(Base):
         index=True,
     )
     status = Column(String(20), nullable=False, default="WAITING")
+    state_version = Column(Integer, nullable=False, default=0, server_default="0")
     max_members = Column(Integer, nullable=False, default=8)
     created_at = Column(
         DateTime,
@@ -102,3 +107,183 @@ class RoomMemberOrderSheet(Base):
     )
     is_completed = Column(Boolean, nullable=False, default=False)
     completed_at = Column(DateTime, nullable=True)
+
+
+class RoomNotification(Base):
+    __tablename__ = "room_notifications"
+    __table_args__ = (
+        UniqueConstraint("historical_room_id", "state_version", name="uq_room_notifications_version"),
+        Index("ix_room_notifications_due", "finished_at", "next_attempt_at", "id"),
+        Index("ix_room_notifications_retention", "finished_at", "id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    room_id = Column(Integer, ForeignKey("rooms.id", ondelete="SET NULL"), nullable=True)
+    historical_room_id = Column(Integer, nullable=False)
+    historical_public_id = Column(String(36), nullable=False)
+    state_version = Column(Integer, nullable=False)
+    payload_json = Column(JSON(none_as_null=True), nullable=True)
+    created_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=False)
+    started_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    first_failed_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    deadline_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    next_attempt_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    terminal_reason = Column(String(30), nullable=True)
+    finished_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+
+
+class RoomRound(Base):
+    __tablename__ = "room_rounds"
+    __table_args__ = (
+        UniqueConstraint("room_id", "round_no", name="uq_room_rounds_room_round_no"),
+        CheckConstraint(
+            "status IN ('ANSWERING', 'ANSWERING_PAUSED', 'VOTING', 'VOTING_PAUSED', 'RESULT', 'CANCELLED')",
+            name="ck_room_rounds_status",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    room_id = Column(
+        Integer,
+        ForeignKey("rooms.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    round_no = Column(Integer, nullable=False, default=1, server_default="1")
+    status = Column(String(30), nullable=False, default="ANSWERING")
+    exclusion_snapshot_json = Column(JSON, nullable=False, default=list)
+    vote_round_no = Column(Integer, nullable=False, default=1, server_default="1")
+    decision_version = Column(Integer, nullable=False, default=0, server_default="0")
+    is_uncontested = Column(Boolean, nullable=False, default=False, server_default="0")
+    cancel_reason = Column(String(50), nullable=True)
+    started_at = Column(
+        DateTime().with_variant(DATETIME(fsp=6), "mysql"),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    completed_at = Column(
+        DateTime().with_variant(DATETIME(fsp=6), "mysql"),
+        nullable=True,
+    )
+    cancelled_at = Column(
+        DateTime().with_variant(DATETIME(fsp=6), "mysql"),
+        nullable=True,
+    )
+
+
+class RoomRoundMember(Base):
+    __tablename__ = "room_round_members"
+    __table_args__ = (
+        UniqueConstraint("round_id", "user_id", name="uq_room_round_members_round_user"),
+        CheckConstraint(
+            "member_status IN ('ACTIVE', 'LEFT_PENDING', 'LEFT_CONFIRMED')",
+            name="ck_room_round_members_status",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    round_id = Column(
+        Integer,
+        ForeignKey("room_rounds.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    role = Column(String(10), nullable=False, default="MEMBER")
+    member_status = Column(String(20), nullable=False, default="ACTIVE")
+    assigned_question_ids = Column(JSON, nullable=False, default=list)
+    assigned_questions_json = Column(JSON, nullable=False, default=list)
+    answers_json = Column(JSON(none_as_null=True), nullable=True)
+    submitted_at = Column(
+        DateTime().with_variant(DATETIME(fsp=6), "mysql"),
+        nullable=True,
+    )
+    recommendation_id = Column(
+        Integer,
+        ForeignKey("recommendations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    top_menu_id = Column(
+        Integer,
+        ForeignKey("menus.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    voted_candidate_ids = Column(JSON(none_as_null=True), nullable=True)
+    voted_at = Column(
+        DateTime().with_variant(DATETIME(fsp=6), "mysql"),
+        nullable=True,
+    )
+    left_at = Column(
+        DateTime().with_variant(DATETIME(fsp=6), "mysql"),
+        nullable=True,
+    )
+
+
+class RoomRoundCandidate(Base):
+    __tablename__ = "room_round_candidates"
+    __table_args__ = (
+        UniqueConstraint("round_id", "menu_id", name="uq_room_round_candidates_round_menu"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    round_id = Column(
+        Integer,
+        ForeignKey("room_rounds.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    menu_id = Column(
+        Integer,
+        ForeignKey("menus.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    display_order = Column(Integer, nullable=False, default=1, server_default="1")
+    is_active = Column(Boolean, nullable=False, default=True, server_default="1")
+    final_vote_count = Column(Integer, nullable=True)
+    is_winner = Column(Boolean, nullable=False, default=False, server_default="0")
+    created_at = Column(
+        DateTime().with_variant(DATETIME(fsp=6), "mysql"),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class RoomRoundCandidateProposer(Base):
+    __tablename__ = "room_round_candidate_proposers"
+    __table_args__ = (
+        UniqueConstraint(
+            "candidate_id",
+            "user_id",
+            name="uq_room_round_candidate_proposers_cand_user",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    candidate_id = Column(
+        Integer,
+        ForeignKey("room_round_candidates.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    round_member_id = Column(
+        Integer,
+        ForeignKey("room_round_members.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
