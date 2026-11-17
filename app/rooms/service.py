@@ -37,6 +37,7 @@ from app.rooms.schemas import (
     RoomOrderSheetCompleteResponse,
 )
 from app.users.models import User
+from app.rooms.state import mark_room_changed, response_common_state, prepare_room_notifications, close_pending_notifications
 
 ROOM_CLOSE_REASON_HOST_LEFT = "HOST_LEFT"
 ROOM_CLOSE_REASON_HOST_DISCONNECTED = "HOST_DISCONNECTED"
@@ -79,7 +80,8 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _close_room(room: Room, reason: str, closed_at: datetime) -> ClosedRoom:
+def _close_room(db: Session, room: Room, reason: str, closed_at: datetime) -> ClosedRoom:
+    mark_room_changed(db, room)
     room.status = "CLOSED"
     room.closed_at = closed_at
     room.close_reason = reason
@@ -99,7 +101,7 @@ def _apply_lazy_room_deadlines(
     """
     current_time = now or utcnow()
     if _as_utc(room.expires_at) <= current_time:
-        _close_room(room, ROOM_CLOSE_REASON_EXPIRED, current_time)
+        _close_room(db, room, ROOM_CLOSE_REASON_EXPIRED, current_time)
         commit_room_transaction(db)
         raise HTTPException(
             status_code=status.HTTP_410_GONE,
@@ -111,7 +113,7 @@ def _apply_lazy_room_deadlines(
             seconds=settings.ROOM_HOST_DISCONNECT_GRACE_SECONDS
         )
         if host_deadline <= current_time:
-            _close_room(room, ROOM_CLOSE_REASON_HOST_DISCONNECTED, current_time)
+            _close_room(db, room, ROOM_CLOSE_REASON_HOST_DISCONNECTED, current_time)
             commit_room_transaction(db)
             raise HTTPException(
                 status_code=closed_status_code,
@@ -233,8 +235,9 @@ def create_room(
                         detail="Idempotency-Key reused with different payload (IDEMPOTENCY_KEY_REUSED)",
                     )
                 if operation.status == "SUCCEEDED" and operation.response_json:
+                    saved = _visible_operation_result(db, locked_host.id, operation.response_json)
                     db.rollback()
-                    return RoomCreateResponse.model_validate(operation.response_json)
+                    return RoomCreateResponse.model_validate(saved)
 
         now = utcnow()
         room = Room(
@@ -254,7 +257,10 @@ def create_room(
                 role="HOST",
             )
         )
+        mark_room_changed(db, room, 'ROOM_CREATED', locked_host.id)
+        common_state = response_common_state(db, room)
         response = RoomCreateResponse(
+            common_state=common_state,
             room_id=room.public_id,
             join_url=build_join_url(room.public_id),
             host_user_id=room.host_user_id,
@@ -322,8 +328,9 @@ def join_room_with_meta(
                         detail="Idempotency-Key reused with different payload (IDEMPOTENCY_KEY_REUSED)",
                     )
                 if operation.status == "SUCCEEDED" and operation.response_json:
+                    saved = _visible_operation_result(db, locked_user.id, operation.response_json)
                     db.rollback()
-                    return RoomJoinResponse.model_validate(operation.response_json), True, []
+                    return RoomJoinResponse.model_validate(saved), True, []
 
         room = (
             db.query(Room)
@@ -378,7 +385,10 @@ def join_room_with_meta(
         db.add(member)
         db.flush()
 
+        mark_room_changed(db, room, 'MEMBER_JOINED', locked_user.id)
+        common_state = response_common_state(db, room)
         response = RoomJoinResponse(
+            common_state=common_state,
             room_id=room.public_id,
             user_id=member.user_id,
             role=member.role,
@@ -418,6 +428,23 @@ def join_room(
     return response
 
 
+def _visible_operation_result(db, user_id, payload):
+    if not payload or not payload.get('common_state'):
+        return payload
+    room = lock_room(db, payload.get('room_id'))
+    now = utcnow()
+    eligible = room is not None and room.status != 'CLOSED' and _as_utc(room.expires_at) > now
+    if eligible and room.host_disconnected_at is not None:
+        eligible = _as_utc(room.host_disconnected_at) + timedelta(
+            seconds=settings.ROOM_HOST_DISCONNECT_GRACE_SECONDS) > now
+    if eligible:
+        member = next((m for m in lock_room_members(db, room.id) if m.user_id == user_id), None)
+        eligible = member is not None and (member.disconnected_at is None or
+            _as_utc(member.disconnected_at) + timedelta(
+                seconds=settings.ROOM_MEMBER_DISCONNECT_GRACE_SECONDS) > now)
+    return payload if eligible else {**payload, 'common_state': None}
+
+
 def _resolve_current_room_status(db: Session, room_public_id: str | None) -> str | None:
     if not room_public_id:
         return None
@@ -454,7 +481,7 @@ def get_room_operation(
         scope=op.scope,
         room_id=op.room_id,
         room_status=_resolve_current_room_status(db, op.room_id),
-        result=op.response_json,
+        result=_visible_operation_result(db, locked_user.id, op.response_json),
     )
 
 
@@ -509,7 +536,7 @@ def cancel_room_operation(
                 scope=existing.scope,
                 room_id=existing.room_id,
                 room_status=room_status,
-                result=existing.response_json,
+                result=_visible_operation_result(db, locked_user.id, existing.response_json),
             )
 
         existing.status = "CANCELLED"
@@ -594,7 +621,10 @@ def get_room(
         for _, _, order_sheet in member_rows
         if order_sheet and order_sheet.is_completed
     )
+    common_state = response_common_state(db, room)
     response = RoomDetailResponse(
+        state_version=room.state_version,
+        common_state=common_state if is_member else None,
         room_id=room.public_id,
         join_url=build_join_url(room.public_id),
         host_user_id=room.host_user_id,
@@ -698,6 +728,9 @@ def complete_room_order_sheet(
             1 for order_sheet in order_sheet_rows if order_sheet.is_completed
         )
         total_member_count = len(member_rows)
+        if completion_changed:
+            mark_room_changed(db, room, 'ORDER_SHEET_COMPLETED', locked_user.id)
+        common_state = response_common_state(db, room)
         commit_room_transaction(db)
         db.refresh(current_order_sheet)
     except Exception:
@@ -706,6 +739,7 @@ def complete_room_order_sheet(
 
     return (
         RoomOrderSheetCompleteResponse(
+            common_state=common_state,
             room_id=room.public_id,
             user_id=user.id,
             order_sheet_completed=current_order_sheet.is_completed,
@@ -748,7 +782,7 @@ def close_room_by_host(
             )
 
         closed_room = _close_room(
-            room,
+            db, room,
             ROOM_CLOSE_REASON_HOST_LEFT,
             utcnow(),
         )
@@ -846,6 +880,9 @@ def delete_closed_room(db: Session, room_public_id: str) -> bool:
             db.delete(sheet)
         for member in members:
             db.delete(member)
+        close_pending_notifications(db, room.id)
+        db.info.get("changed_rooms", {}).pop(room.id, None)
+        db.flush()  # Delete children before the physical parent/cascades.
         db.delete(room)
         commit_room_transaction(db)
         return True
@@ -871,7 +908,9 @@ def mark_host_disconnected(
         )
         if room is None or room.status == "CLOSED" or room.host_user_id != user_id:
             return False
-        room.host_disconnected_at = disconnected_at or utcnow()
+        if room.host_disconnected_at is None:
+            room.host_disconnected_at = disconnected_at or utcnow()
+            mark_room_changed(db, room, 'MEMBER_DISCONNECTED', user_id)
         commit_room_transaction(db)
         return True
     except Exception:
@@ -897,7 +936,7 @@ def clear_host_disconnected(
         if room is None or room.host_user_id != user_id or room.status == "CLOSED":
             return False
         if _as_utc(room.expires_at) <= current_time:
-            _close_room(room, ROOM_CLOSE_REASON_EXPIRED, current_time)
+            _close_room(db, room, ROOM_CLOSE_REASON_EXPIRED, current_time)
             commit_room_transaction(db)
             return False
         if (
@@ -905,11 +944,13 @@ def clear_host_disconnected(
             and _as_utc(room.host_disconnected_at)
             <= current_time - timedelta(seconds=settings.ROOM_HOST_DISCONNECT_GRACE_SECONDS)
         ):
-            _close_room(room, ROOM_CLOSE_REASON_HOST_DISCONNECTED, current_time)
+            _close_room(db, room, ROOM_CLOSE_REASON_HOST_DISCONNECTED, current_time)
             commit_room_transaction(db)
             return False
         changed = room.host_disconnected_at is not None
         room.host_disconnected_at = None
+        if changed:
+            mark_room_changed(db, room, 'MEMBER_ONLINE', user_id)
         commit_room_transaction(db)
         return changed
     except Exception:
@@ -932,7 +973,12 @@ def mark_room_member_disconnected(
         member = next((m for m in lock_room_members(db, room.id) if m.user_id == user_id), None)
         if member is None:
             return False
-        member.disconnected_at = disconnected_at or utcnow()
+        changed = member.disconnected_at is None
+        if changed:
+            member.disconnected_at = disconnected_at or utcnow()
+            if room.host_user_id == user_id:
+                room.host_disconnected_at = member.disconnected_at
+            mark_room_changed(db, room, 'MEMBER_DISCONNECTED', user_id)
         commit_room_transaction(db)
         return True
     except Exception:
@@ -965,7 +1011,7 @@ def mark_room_member_online(
                 raise HTTPException(403, detail="Room membership required")
             return False
         if _as_utc(room.expires_at) <= current_time:
-            _close_room(room, ROOM_CLOSE_REASON_EXPIRED, current_time)
+            _close_room(db, room, ROOM_CLOSE_REASON_EXPIRED, current_time)
             commit_room_transaction(db)
             if require_membership:
                 raise HTTPException(403, detail="Room membership required")
@@ -975,7 +1021,7 @@ def mark_room_member_online(
             and _as_utc(room.host_disconnected_at)
             <= current_time - timedelta(seconds=settings.ROOM_HOST_DISCONNECT_GRACE_SECONDS)
         ):
-            _close_room(room, ROOM_CLOSE_REASON_HOST_DISCONNECTED, current_time)
+            _close_room(db, room, ROOM_CLOSE_REASON_HOST_DISCONNECTED, current_time)
             commit_room_transaction(db)
             if require_membership:
                 raise HTTPException(403, detail="Room membership required")
@@ -999,8 +1045,14 @@ def mark_room_member_online(
                 raise HTTPException(403, detail="Room membership required")
             return False
         became_online = not member.is_online
+        connection_changed = became_online or member.disconnected_at is not None
         member.is_online = True
         member.disconnected_at = None
+        if room.host_user_id == user_id:
+            connection_changed = connection_changed or room.host_disconnected_at is not None
+            room.host_disconnected_at = None
+        if connection_changed:
+            mark_room_changed(db, room, 'MEMBER_ONLINE', user_id)
         commit_room_transaction(db)
         return became_online
     except Exception:
@@ -1178,7 +1230,7 @@ def close_room_after_host_disconnect(
             return None
 
         closed_room = _close_room(
-            room,
+            db, room,
             ROOM_CLOSE_REASON_HOST_DISCONNECTED,
             closed_at,
         )
@@ -1214,7 +1266,7 @@ def close_due_rooms(
                 continue
             if _as_utc(room.expires_at) <= current_time:
                 closed_rooms.append(
-                    _close_room(room, ROOM_CLOSE_REASON_EXPIRED, current_time)
+                    _close_room(db, room, ROOM_CLOSE_REASON_EXPIRED, current_time)
                 )
                 continue
             if (
@@ -1223,7 +1275,7 @@ def close_due_rooms(
             ):
                 closed_rooms.append(
                     _close_room(
-                        room,
+                        db, room,
                         ROOM_CLOSE_REASON_HOST_DISCONNECTED,
                         current_time,
                     )
@@ -1253,26 +1305,32 @@ def recover_rooms_after_restart(
         if delete_closed_room(db, closed.room_id):
             deleted_rooms += 1
 
-    try:
-        rooms = (db.query(Room).filter(Room.status != "CLOSED").order_by(Room.id)
-                 .execution_options(populate_existing=True).with_for_update().all())
-        rows = [(member, room) for room in rooms for member in lock_room_members(db, room.id)]
-        grace_started = 0
-        for member, room in rows:
-            if member.is_online and member.disconnected_at is None:
-                member.disconnected_at = current_time
-                grace_started += 1
-                if (member.role == "HOST" or room.host_user_id == member.user_id) and room.host_disconnected_at is None:
-                    room.host_disconnected_at = current_time
-        commit_room_transaction(db)
-        return {
-            "expired_members": len(left_members),
-            "deleted_rooms": deleted_rooms,
-            "grace_started_members": grace_started,
-        }
-    except Exception:
-        db.rollback()
-        raise
+    room_ids = [r[0] for r in db.query(Room.id).filter(Room.status != "CLOSED").order_by(Room.id).all()]
+    db.rollback()  # Discovery does not span per-room restart transactions.
+    grace_started = sum(_start_restart_grace_in_room(db, room_id, current_time) for room_id in room_ids)
+    return {
+        "expired_members": len(left_members),
+        "deleted_rooms": deleted_rooms,
+        "grace_started_members": grace_started,
+    }
+
+
+@room_transaction()
+def _start_restart_grace_in_room(db: Session, room_id: int, current_time: datetime) -> int:
+    room = (db.query(Room).filter(Room.id == room_id)
+            .execution_options(populate_existing=True).with_for_update().one_or_none())
+    if room is None or room.status == "CLOSED":
+        return 0
+    started = 0
+    for member in lock_room_members(db, room.id):
+        if member.is_online and member.disconnected_at is None:
+            member.disconnected_at = current_time
+            mark_room_changed(db, room, 'RESTART_GRACE')
+            started += 1
+            if room.host_user_id == member.user_id and room.host_disconnected_at is None:
+                room.host_disconnected_at = current_time
+    commit_room_transaction(db)
+    return started
 
 
 def has_active_or_pending_room_activity(
@@ -1280,6 +1338,7 @@ def has_active_or_pending_room_activity(
     user_ids: list[int],
     *,
     now: datetime | None = None,
+    include_pending: bool = True,
 ) -> bool:
     """
     지정된 사용자들(원본 UUID 사용자, 대상 카카오 사용자 등) 중 누구라도
@@ -1305,7 +1364,7 @@ def has_active_or_pending_room_activity(
         )
         .scalar_one_or_none()
     )
-    if pending_op is not None:
+    if include_pending and pending_op is not None:
         return True
 
     def discover_room_ids(read_db: Session) -> list[int]:
@@ -1326,10 +1385,10 @@ def has_active_or_pending_room_activity(
         if room.status == "CLOSED":
             continue
         if _as_utc(room.expires_at) <= current_time:
-            _close_room(room, ROOM_CLOSE_REASON_EXPIRED, current_time)
+            _close_room(db, room, ROOM_CLOSE_REASON_EXPIRED, current_time)
             continue
         if room.host_disconnected_at is not None and _as_utc(room.host_disconnected_at) <= host_cutoff:
-            _close_room(room, ROOM_CLOSE_REASON_HOST_DISCONNECTED, current_time)
+            _close_room(db, room, ROOM_CLOSE_REASON_HOST_DISCONNECTED, current_time)
             continue
 
         members = lock_room_members(db, room.id)
@@ -1343,3 +1402,9 @@ def has_active_or_pending_room_activity(
 
     db.flush()
     return False
+
+
+def assert_profile_change_allowed(db, user):
+    if has_active_or_pending_room_activity(db, [user.id], include_pending=False):
+        raise HTTPException(409, detail={"code": "ROOM_PARTICIPATION_ACTIVE",
+                                       "message": "? ?? ??? ???? ??? ? ????."})

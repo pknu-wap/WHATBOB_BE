@@ -1,3 +1,4 @@
+from app.rooms.notifications import dispatch_room
 import asyncio
 import logging
 
@@ -24,18 +25,7 @@ async def cleanup_due_rooms_once() -> int:
                 break
             # The generator commits and releases this room's locks before yield.
             for member in left_members:
-                await room_connection_manager.broadcast(
-                    member.room_id,
-                    {
-                        "type": "room.updated",
-                        "room_id": member.room_id,
-                        "reason": "MEMBER_LEFT",
-                        "user_id": member.user_id,
-                        "member_count": member.member_count,
-                        "completed_member_count": member.completed_member_count,
-                        "all_members_completed": member.all_members_completed,
-                    },
-                )
+                await dispatch_room(db.get_bind(), member.room_id)
                 await room_connection_manager.close_user_connections(member.room_id, member.user_id)
 
     with SessionLocal() as db:

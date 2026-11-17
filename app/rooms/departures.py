@@ -72,6 +72,8 @@ def remove_locked_members(db: Session, room: Room, members: list[RoomMember]) ->
     for member in ordered:
         db.delete(member)
     db.flush()
+    from app.rooms.state import mark_room_changed
+    mark_room_changed(db, room, 'MEMBER_LEFT', ordered[0].user_id)
     remaining_ids = {m.id for m in all_members if m.id not in unique}
     completed = sum(s.is_completed for s in sheets if s.room_member_id in remaining_ids)
     count = len(remaining_ids)

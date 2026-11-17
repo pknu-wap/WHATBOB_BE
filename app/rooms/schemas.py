@@ -11,6 +11,8 @@ class RoomCreateRequest(BaseModel):
 
 
 class RoomCreateResponse(BaseModel):
+    common_state: dict[str, Any] | None = None
+
     model_config = ConfigDict(from_attributes=True)
 
     room_id: str
@@ -23,6 +25,8 @@ class RoomCreateResponse(BaseModel):
 
 
 class RoomJoinResponse(BaseModel):
+    common_state: dict[str, Any] | None = None
+
     model_config = ConfigDict(from_attributes=True)
 
     room_id: str
@@ -47,6 +51,9 @@ class RoomMemberResponse(BaseModel):
 
 
 class RoomDetailResponse(BaseModel):
+    state_version: int = 0
+    common_state: dict[str, Any] | None = None
+
     room_id: str
     join_url: str
     host_user_id: int
@@ -64,6 +71,8 @@ class RoomDetailResponse(BaseModel):
 
 
 class RoomOrderSheetCompleteResponse(BaseModel):
+    common_state: dict[str, Any] | None = None
+
     room_id: str
     user_id: int
     order_sheet_completed: bool

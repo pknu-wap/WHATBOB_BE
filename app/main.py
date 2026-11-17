@@ -18,6 +18,7 @@ from app.recommend.common import RecommendationDomainException
 from app.recommend.router import router as recommend_router
 from app.rooms.router import operations_router as room_operations_router, router as rooms_router
 from app.rooms.cleanup import room_cleanup_loop
+from app.rooms.notifications import notification_loop, summary_cleanup_loop
 from app.rooms.service import recover_rooms_after_restart
 from app.rooms.websocket import router as rooms_websocket_router
 from app.users.profile_image import uploads_router as profile_uploads_router
@@ -37,14 +38,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"데이터베이스 연결 실패 (DB가 아직 실행되지 않았을 수 있습니다): {e}")
     cleanup_task = asyncio.create_task(room_cleanup_loop())
+    notification_task = asyncio.create_task(notification_loop(engine))
+    summary_task = asyncio.create_task(summary_cleanup_loop(engine))
     try:
         yield
     finally:
-        cleanup_task.cancel()
-        try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            pass
+        for task in (cleanup_task, notification_task, summary_task):
+            task.cancel()
+        await asyncio.gather(cleanup_task, notification_task, summary_task, return_exceptions=True)
 
 
 app = FastAPI(

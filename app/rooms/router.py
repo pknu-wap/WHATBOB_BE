@@ -1,3 +1,4 @@
+from app.rooms.notifications import dispatch_room
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, status
@@ -58,19 +59,21 @@ async def _notify_and_delete_closed_room(
     response_model=RoomCreateResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def create_room_endpoint(
+async def create_room_endpoint(
     request: RoomCreateRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     raw_idem_key = idempotency_key if isinstance(idempotency_key, str) else None
-    return create_room(
+    result = await run_in_threadpool(create_room,
         db=db,
         host=current_user,
         request=request,
         idempotency_key=raw_idem_key,
     )
+    await dispatch_room(db.get_bind(), result.room_id)
+    return result
 
 
 @router.post(
@@ -94,30 +97,9 @@ async def join_room_endpoint(
     )
     for left in left_events:
         room_connection_manager.cancel_member_disconnect(room_id, left.user_id)
-        await room_connection_manager.broadcast(
-            room_id,
-            {
-                "type": "room.updated",
-                "room_id": room_id,
-                "reason": "MEMBER_LEFT",
-                "user_id": left.user_id,
-                "member_count": left.member_count,
-                "completed_member_count": left.completed_member_count,
-                "all_members_completed": left.all_members_completed,
-                "occurred_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+        await dispatch_room(db.get_bind(), room_id)
     if not is_replay:
-        await room_connection_manager.broadcast(
-            room_id,
-            {
-                "type": "room.updated",
-                "room_id": room_id,
-                "reason": "MEMBER_JOINED",
-                "user_id": current_user.id,
-                "occurred_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+        await dispatch_room(db.get_bind(), room_id)
     return response
 
 
@@ -125,12 +107,14 @@ async def join_room_endpoint(
     "/{room_id}",
     response_model=RoomDetailResponse,
 )
-def get_room_endpoint(
+async def get_room_endpoint(
     room_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return get_room(db=db, room_public_id=room_id, user=current_user)
+    result = await run_in_threadpool(get_room, db=db, room_public_id=room_id, user=current_user)
+    await dispatch_room(db.get_bind(), room_id)
+    return result
 
 
 @router.delete(
@@ -180,19 +164,7 @@ async def leave_room_member_endpoint(
         current_user,
     )
     room_connection_manager.cancel_member_disconnect(room_id, user_id)
-    await room_connection_manager.broadcast(
-        room_id,
-        {
-            "type": "room.updated",
-            "room_id": room_id,
-            "reason": "MEMBER_LEFT",
-            "user_id": user_id,
-            "member_count": response.member_count,
-            "completed_member_count": response.completed_member_count,
-            "all_members_completed": response.all_members_completed,
-            "occurred_at": datetime.now(timezone.utc).isoformat(),
-        },
-    )
+    await dispatch_room(db.get_bind(), room_id)
     await room_connection_manager.close_user_connections(room_id, user_id)
     return response
 
@@ -213,16 +185,7 @@ async def complete_room_order_sheet_endpoint(
         current_user,
     )
     if completion_changed:
-        await room_connection_manager.broadcast(
-            room_id,
-            {
-                "type": "room.updated",
-                "room_id": room_id,
-                "reason": "ORDER_SHEET_COMPLETED",
-                "user_id": current_user.id,
-                "occurred_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+        await dispatch_room(db.get_bind(), room_id)
     return response
 
 

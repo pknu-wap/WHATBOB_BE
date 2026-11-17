@@ -79,6 +79,8 @@ def is_lock_conflict(exc: OperationalError) -> bool:
 def commit_room_transaction(db):
     # A failed or successful commit must never replay an already persisted or
     # outcome-unknown operation. Only pre-commit lock conflicts are retried.
+    from app.rooms.state import prepare_room_notifications
+    prepare_room_notifications(db)
     db.flush()  # flush conflicts still have a known, rollback-able outcome
     db.info[_COMMIT_PHASE] = 'committing'
     db.commit()

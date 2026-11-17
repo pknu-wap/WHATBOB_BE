@@ -8,9 +8,13 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    JSON,
+    Index,
     String,
     UniqueConstraint,
 )
+
+from sqlalchemy.dialects.mysql import DATETIME
 
 from app.core.database import Base
 
@@ -39,6 +43,7 @@ class Room(Base):
         index=True,
     )
     status = Column(String(20), nullable=False, default="WAITING")
+    state_version = Column(Integer, nullable=False, default=0, server_default="0")
     max_members = Column(Integer, nullable=False, default=8)
     created_at = Column(
         DateTime,
@@ -102,3 +107,27 @@ class RoomMemberOrderSheet(Base):
     )
     is_completed = Column(Boolean, nullable=False, default=False)
     completed_at = Column(DateTime, nullable=True)
+
+
+class RoomNotification(Base):
+    __tablename__ = "room_notifications"
+    __table_args__ = (
+        UniqueConstraint("historical_room_id", "state_version", name="uq_room_notifications_version"),
+        Index("ix_room_notifications_due", "finished_at", "next_attempt_at", "id"),
+        Index("ix_room_notifications_retention", "finished_at", "id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    room_id = Column(Integer, ForeignKey("rooms.id", ondelete="SET NULL"), nullable=True)
+    historical_room_id = Column(Integer, nullable=False)
+    historical_public_id = Column(String(36), nullable=False)
+    state_version = Column(Integer, nullable=False)
+    payload_json = Column(JSON(none_as_null=True), nullable=True)
+    created_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=False)
+    started_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    first_failed_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    deadline_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    next_attempt_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    terminal_reason = Column(String(30), nullable=True)
+    finished_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
