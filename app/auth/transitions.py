@@ -147,7 +147,28 @@ def _cleanup_closed_room_references_for_origin_user(db: Session, origin_user_id:
         db.query(RoomMember).filter(
             RoomMember.id.in_(member_ids)
         ).delete(synchronize_session=False)
+    from app.rooms.models import RoomRoundCandidateProposer, RoomRoundMember
+    from app.rooms.rounds import delete_room_rounds_for_rooms
+    origin_rm_ids = [
+        int(rm[0])
+        for rm in db.query(RoomRoundMember.id)
+        .filter(RoomRoundMember.user_id == origin_user_id)
+        .all()
+    ]
+    if origin_rm_ids:
+        db.query(RoomRoundCandidateProposer).filter(
+            (RoomRoundCandidateProposer.user_id == origin_user_id)
+            | (RoomRoundCandidateProposer.round_member_id.in_(origin_rm_ids))
+        ).delete(synchronize_session=False)
+        db.query(RoomRoundMember).filter(
+            RoomRoundMember.id.in_(origin_rm_ids)
+        ).delete(synchronize_session=False)
+    else:
+        db.query(RoomRoundCandidateProposer).filter(
+            RoomRoundCandidateProposer.user_id == origin_user_id
+        ).delete(synchronize_session=False)
     if hosted_room_ids:
+        delete_room_rounds_for_rooms(db, hosted_room_ids)
         for room_id in hosted_room_ids:
             close_pending_notifications(db, room_id, now)
             db.info.get("changed_rooms", {}).pop(room_id, None)

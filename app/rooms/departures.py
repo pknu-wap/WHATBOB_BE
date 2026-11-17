@@ -72,10 +72,18 @@ def remove_locked_members(db: Session, room: Room, members: list[RoomMember]) ->
     for member in ordered:
         db.delete(member)
     db.flush()
+    remaining_ids = {m.id for m in all_members if m.id not in unique}
+    remaining_sheets = [s for s in sheets if s.room_member_id in remaining_ids]
+    from app.rooms.rounds import apply_round_member_departures
+    apply_round_member_departures(
+        db,
+        room,
+        [m.user_id for m in ordered],
+        remaining_sheets=remaining_sheets,
+    )
     from app.rooms.state import mark_room_changed
     mark_room_changed(db, room, 'MEMBER_LEFT', ordered[0].user_id)
-    remaining_ids = {m.id for m in all_members if m.id not in unique}
-    completed = sum(s.is_completed for s in sheets if s.room_member_id in remaining_ids)
+    completed = sum(s.is_completed for s in remaining_sheets)
     count = len(remaining_ids)
     return MemberDeparture(room.public_id, tuple(m.user_id for m in ordered), count, completed,
                            count > 0 and count == completed)

@@ -622,9 +622,19 @@ def get_room(
         if order_sheet and order_sheet.is_completed
     )
     common_state = response_common_state(db, room)
+    from app.rooms.rounds import build_viewer_state
+    viewer_state = build_viewer_state(
+        db,
+        room,
+        user.id,
+        is_member=is_member,
+        my_role=current_member.role if current_member else None,
+    )
     response = RoomDetailResponse(
         state_version=room.state_version,
         common_state=common_state if is_member else None,
+        viewer_state=viewer_state if is_member else None,
+        current_round=(common_state.get("current_round") if (is_member and common_state) else None),
         room_id=room.public_id,
         join_url=build_join_url(room.public_id),
         host_user_id=room.host_user_id,
@@ -692,6 +702,19 @@ def complete_room_order_sheet(
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only room members can complete an order sheet",
+            )
+
+        from app.rooms.rounds import get_latest_round
+        latest_round = get_latest_round(db, room.id, for_update=True)
+        if room.status != "WAITING" or (
+            latest_round is not None and latest_round.status != "CANCELLED"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "ROUND_ORDER_SHEET_ANSWERS_REQUIRED",
+                    "message": "진행 중인 라운드에서는 주문서 답변 제출 API를 사용해야 합니다.",
+                },
             )
 
         room_member_ids = [row[0] for row in member_rows]
@@ -875,6 +898,8 @@ def delete_closed_room(db: Session, room_public_id: str) -> bool:
                 detail="Room must be closed before deletion",
             )
 
+        from app.rooms.rounds import delete_room_rounds_for_rooms
+        delete_room_rounds_for_rooms(db, [room.id])
         members = lock_room_members(db, room.id)
         for sheet in lock_order_sheets(db, [m.id for m in members]):
             db.delete(sheet)

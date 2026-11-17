@@ -5,6 +5,26 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-17
 
+### #43 / #36 T01N ~ T07 같이 고르기 내구 알림·라운드·개인 추천 후보·복수 선택 투표·퇴장 일시정지/재투표·복구 구현
+
+#### 변경 이유 및 내용
+
+- `T01N` (`docs/plans/36-t01n-final-design.md`): 방 상태 버전(`rooms.state_version`) 단조 증가 및 내구 발송 대기(`room_notifications`) 저장·재시도(1/3/5/10/30초 간격, 첫 실패 후 60초 상한)·종료 시 원문 SQL NULL 제거 및 요약 3일 보관·참여 중 프로필 변경 차단을 구현했다.
+- `T02` (`docs/plans/36-t02-final-design.md`): `room_rounds` 및 `room_round_members` 테이블을 분리하고, 방장 시작 시 참여자 전원의 프로필 제외 조건(`ALLERGY`, `UNABLE`, `DISLIKE`)을 비공개 스냅샷으로 고정하며 생존 메뉴 여부를 즉시 검증(`NO_AVAILABLE_MENUS` 시 취소 라운드 기록 및 대기실 유지)하고 참여자별 9개 질문(활용 7 + 탐색 2)을 시작 트랜잭션에서 일괄 사전 생성해 질문 조회(`GET`)를 순수 읽기 전용으로 분리했다.
+- `T03` + `D20` (`docs/plans/36-t03-final-design.md`): 그룹 주문서 제출 시 임시 추가 제외 조건 입력을 금지(`extra="forbid"`)하고, 고정된 공통 제외 스냅샷으로 개인 주문서를 즉시 채점해 첫 번째 추천 메뉴를 후보로 연결하며 각 참여자의 개인 추천 누적 장부(`Recommendation`, `RecommendationItemSnapshot`)에 정식 기록한다. 전원 제출 완료 시 동일 메뉴(`Menu.id`)를 `room_round_candidates`와 `room_round_candidate_proposers`로 병합하고 후보가 1개이면 무투표 당선(`RESULT`, `is_uncontested=True`), 2개 이상이면 투표(`VOTING`, `vote_round_no=1`)로 전환한다.
+- `T04` (`docs/plans/36-t04-final-design.md`): `room_round_members` 행에 복수 선택 투표 배열(`voted_candidate_ids`)과 제출 시각(`voted_at`)을 내장하고, 전원 투표 완료 순간 후보별 최종 득표수(`final_vote_count`)와 공동 1위(`is_winner`)를 `room_round_candidates`에 영구 기록(`Materialized Result`)한다.
+- `T05` (`docs/plans/36-t05-final-design.md`): 주문서 작성 중 일반 참여자 퇴장 확정(명시적 퇴장 또는 60초 유예 만료) 시 `member_status='LEFT_PENDING'` 소프트 삭제 및 `ANSWERING_PAUSED` 전환과 `decision_version` 증가를 모든 퇴장 경로(`remove_locked_members`)에 통합했다. 2명 미만 시 즉시 `INSUFFICIENT_MEMBERS`로 취소하며, 방장 결정 시 `decision_version` 일치 여부를 검증한다.
+- `T06` (`docs/plans/36-t06-final-design.md`): 투표 중 퇴장 후 방장이 계속 진행을 선택하면 퇴장자만 단독 제안한 후보를 소프트 비활성화(`is_active=False`)하고, 생존 후보가 1개이면 즉시 무투표 당선(`RESULT`), 2개 이상이면 남은 참여자의 투표 칸을 제자리에서 `NULL`로 초기화하고 `vote_round_no`를 `+1` 올려 전원 재투표를 시작하며 이전 회차 지연 요청을 차단한다.
+- `T07` (`docs/plans/36-t07-final-design.md`): 방 상태 조회(`GET /api/rooms/{room_id}`) 한 번으로 `common_state`와 본인 전용 `viewer_state`를 통합 반환하고, 방 물리 삭제 및 계정 전환 정리 시 라운드 테이블은 정리하되 개인 누적 추천 기록(`Recommendation`, `RecommendationItemSnapshot`)은 영구 보존한다. 명시적 재개 가능 MySQL 마이그레이션(`scripts/migrate_room_rounds.py`)을 함께 제공한다.
+
+#### 주요 변경 파일
+
+- `app/rooms/models.py`, `app/rooms/rounds.py`, `app/rooms/state.py`, `app/rooms/notifications.py`
+- `app/rooms/departures.py`, `app/rooms/service.py`, `app/rooms/router.py`, `app/rooms/schemas.py`
+- `app/recommend/order_sheet.py`, `app/auth/transitions.py`
+- `scripts/migrate_room_notifications.py`, `scripts/migrate_room_rounds.py`
+- `tests/test_room_notifications.py`, `tests/test_room_notifications_mysql.py`, `tests/test_group_rounds.py`, `tests/test_group_rounds_mysql.py`
+
 ### #44 T01 소유 연결 풀 포화 시 방 조회 실패 수정
 
 #### 변경 이유 및 내용

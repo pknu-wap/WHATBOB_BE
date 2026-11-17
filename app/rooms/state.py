@@ -44,12 +44,17 @@ def build_common_state(db, room):
                          order_sheet_completed=bool(sheet and sheet.is_completed),
                          order_sheet_completed_at=stamp(sheet.completed_at) if sheet else None))
     completed = sum(row['order_sheet_completed'] for row in rows)
-    return dict(room_id=room.public_id, state_version=room.state_version, status=room.status,
-                host_user_id=room.host_user_id, max_members=room.max_members,
-                created_at=stamp(room.created_at), expires_at=stamp(room.expires_at),
-                member_count=len(rows), is_full=len(rows) >= room.max_members,
-                members=rows, completed_member_count=completed,
-                all_members_completed=bool(rows) and completed == len(rows))
+    state = dict(room_id=room.public_id, state_version=room.state_version, status=room.status,
+                 host_user_id=room.host_user_id, max_members=room.max_members,
+                 created_at=stamp(room.created_at), expires_at=stamp(room.expires_at),
+                 member_count=len(rows), is_full=len(rows) >= room.max_members,
+                 members=rows, completed_member_count=completed,
+                 all_members_completed=bool(rows) and completed == len(rows))
+    from app.rooms.rounds import build_round_common_state
+    round_state = build_round_common_state(db, room, users)
+    if round_state is not None:
+        state['current_round'] = round_state
+    return state
 
 
 def close_pending_notifications(db, room_id, at=None):
