@@ -106,3 +106,48 @@ class KakaoLinkGuard(Base):
     created_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=False)
 
     __table_args__ = ({"mysql_engine": "InnoDB"},)
+
+
+class KakaoSessionCredential(Base):
+    """왓밥 인증 세션별 암호화된 카카오 토큰 및 로그아웃 폐기 작업 원장"""
+    __tablename__ = "kakao_session_credentials"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    transition_id = Column(
+        String(36).with_variant(CHAR(36, charset="ascii"), "mysql"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    auth_session_id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    logout_transition_id = Column(
+        String(36).with_variant(CHAR(36, charset="ascii"), "mysql"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    kakao_id = Column(BigInteger, nullable=True, index=True)
+    encrypted_access_token = Column(String(2048), nullable=True)
+    encrypted_refresh_token = Column(String(2048), nullable=True)
+    access_token_expires_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    refresh_token_expires_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    status = Column(String(32), nullable=False, default="PREPARED", index=True)
+    started_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    first_failed_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    deadline_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    next_attempt_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    terminal_reason = Column(String(64), nullable=True)
+    finished_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    created_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=False)
+    updated_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=False)
+
+    __table_args__ = (
+        Index("ix_kakao_session_credentials_status_next", "status", "next_attempt_at"),
+        {"mysql_engine": "InnoDB"},
+    )

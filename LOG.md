@@ -3,6 +3,39 @@
 WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 최신 작업을 위에 추가하며, 기록 방법은 같은 디렉터리의 `AGENTS.md`를 따른다.
 
+## 2026-11-18
+
+### #50 T01 카카오 토큰 암호화 저장·자동 갱신·폐기와 안전한 왓밥 로그아웃 구현
+
+#### 변경 이유 및 내용
+
+- `T01-D01` (`docs/plans/50-tickets-and-architecture.md`): 카카오 인가 코드 교환(`exchange_kakao_authorization_code`)에서 `access_token`, `refresh_token`, `expires_in`, `refresh_token_expires_in`을 수집하고, 전용 테이블 `kakao_session_credentials`(`KakaoSessionCredential`)에 대칭키(Fernet, `KAKAO_TOKEN_ENCRYPTION_KEY` 또는 `JWT_SECRET` SHA-256 파생)로 암호화해 저장하도록 구현했다. `KAKAO_LINK` 준비 단계에서는 `transition_id`에 `PREPARED` 상태로 결합하고 확정(`commit`) 시 `new_auth_session.id`에 `ACTIVE` 상태로 결합하며, 만료·대체된 준비 내역 및 만료 정리된 세션의 암호화 토큰 원문은 즉시 `NULL`로 파기한다.
+- `T01-D02`: `LOGOUT` 확정(`commit_account_transition`) 시 단일 로컬 DB 트랜잭션 안에서 요청한 `AuthSession`만 폐기(`revoked_at`)하고 새 `UUID 사용자`·새 `AuthSession`을 발급하며, 자격 증명이 존재하는 세션은 `PENDING_REVOCATION`(`kakao_logout_status="PENDING"`), 레거시/자격 증명 부재 세션은 `SKIPPED_NO_CREDENTIALS`로 기록한다. DB 잠금 밖의 백그라운드 디스패처(`KakaoRevocationDispatcher`)가 자격 증명별 직렬화 잠금 아래 만료(또는 401 응답) 시 `grant_type=refresh_token`으로 갱신(새 리프레시 토큰·만료 정보 반환 시 교체, 생략 시 기존 유지)한 뒤 카카오 `POST /v1/user/logout`을 호출해 해당 기기 세션의 토큰 쌍만 폐기한다.
+- `T01-D03`: 카카오 일시 장애(네트워크 타임아웃·연결 오류·429·5xx)는 `1·3·5·10·30초` 간격(첫 실패 후 최대 60초 기한)으로 재시도하고, 영구 오류(400/403, 리프레시 만료, 갱신 후 401)는 즉시 실패 처리한다. `REVOKED`, `FAILED`, `SKIPPED_NO_CREDENTIALS` 도달 즉시 `encrypted_access_token`과 `encrypted_refresh_token`을 `NULL`로 영구 파기하고 상태 메타데이터만 남기며, `TransitionCommitResponse`와 `TransitionStatusResponse`의 `kakao_logout_status`로 결과를 노출한다.
+
+#### 주요 변경 파일
+
+- `app/core/config.py`, `app/main.py`
+- `app/auth/models.py`, `app/auth/schemas.py`, `app/auth/credentials.py`, `app/auth/kakao.py`, `app/auth/revocations.py`, `app/auth/transitions.py`, `app/auth/transition_router.py`, `app/auth/sessions.py`
+- `tests/test_t01_kakao_token_lifecycle.py`
+
+#### API 변경
+
+- `POST /api/auth/transitions/{transition_id}/commit`, `POST /api/auth/transitions/{transition_id}/recovery` (`TransitionCommitResponse`) 및 `GET /api/auth/transitions/{transition_id}` (`TransitionStatusResponse`): `LOGOUT` 전환에 대해 `kakao_logout_status` (`"PENDING" | "REVOKED" | "SKIPPED_NO_CREDENTIALS" | "FAILED" | null`) 필드 추가.
+
+#### DB 변경
+
+- `kakao_session_credentials` 테이블(`KakaoSessionCredential`) 추가: `id`, `transition_id`, `auth_session_id`, `logout_transition_id`, `kakao_id`, `encrypted_access_token`, `encrypted_refresh_token`, `access_token_expires_at`, `refresh_token_expires_at`, `status`, `started_at`, `first_failed_at`, `deadline_at`, `next_attempt_at`, `attempt_count`, `terminal_reason`, `finished_at`, `created_at`, `updated_at`.
+
+#### 검증
+
+- `pytest tests/test_t01_kakao_token_lifecycle.py tests/test_t06_t07_t08_transitions.py tests/test_uuid_auth.py tests/test_auth.py tests/test_user_profile.py`: **99 passed**.
+- `pytest tests/test_t02_personal_data.py tests/test_t03_rooms.py tests/test_t04_t05_profile.py tests/test_room_notifications.py tests/test_group_rounds.py`: **48 passed**.
+
+#### 남은 작업 및 주의 사항
+
+- 후속 티켓 `T02`에서 로그아웃 후 `requires_reauth`(`prompt=login`), 서버 세션 기반 OAuth `state` 검증, 연결 대상 확인(`nickname`, `masked_email`) 및 전환 취소 API를 구현한다.
+
 ## 2026-11-17
 
 ### #43 / #36 T01N ~ T07 같이 고르기 내구 알림·라운드·개인 추천 후보·복수 선택 투표·퇴장 일시정지/재투표·복구 구현
