@@ -128,9 +128,20 @@ def create_uuid_user(db: Session) -> User:
     raise AuthError("AUTH_TEMPORARILY_UNAVAILABLE", "사용자 생성이 혼잡합니다. 잠시 후 다시 시도해 주세요.", 503)
 
 
+def hash_oauth_state(state: str) -> bytes:
+    cleaned = (state or "").strip()
+    if not cleaned:
+        raise AuthError("INVALID_OAUTH_STATE", "카카오 로그인 state 값을 확인해 주세요.", 400)
+    return hashlib.sha256(cleaned.encode("utf-8")).digest()
+
+
 def token_response(user: User, record: AuthSession, *, is_new_user: bool = False) -> TokenResponse:
-    return TokenResponse(access_token=create_access_token({"sub": str(user.id), "sid": str(record.id)}),
-                         user=UserResponse.model_validate(user), is_new_user=is_new_user)
+    return TokenResponse(
+        access_token=create_access_token({"sub": str(user.id), "sid": str(record.id)}),
+        user=UserResponse.model_validate(user),
+        is_new_user=is_new_user,
+        requires_reauth=bool(getattr(record, "requires_reauth", False)),
+    )
 
 
 def issue_cookie_token(

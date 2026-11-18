@@ -12,22 +12,62 @@ from app.core.config import settings
 from app.core.database import get_db
 
 
+AUTH_SECRET_HEADER = "X-Whatbob-Auth-Secret"
+TRANSITION_SECRET_HEADER = "X-Whatbob-Transition-Secret"
+CLIENT_HEADER = "X-Whatbob-Client"
+
+
 def allowed_web_origins() -> list[str]:
     return list(dict.fromkeys([
         settings.FRONTEND_BASE_URL.rstrip("/"), "http://localhost:8081", "http://127.0.0.1:8081",
     ]))
 
 
+def is_mobile_app_request(request: Request | None) -> bool:
+    if request is None:
+        return False
+    return (request.headers.get("x-whatbob-client") or "").strip().lower() == "app"
+
+
+def get_request_auth_secret(request: Request) -> str | None:
+    if settings.AUTH_COOKIE_NAME in request.cookies:
+        return request.cookies.get(settings.AUTH_COOKIE_NAME)
+    if is_mobile_app_request(request) and "x-whatbob-auth-secret" in request.headers:
+        return request.headers.get("x-whatbob-auth-secret")
+    return None
+
+
+def get_request_transition_secret(request: Request) -> str | None:
+    if settings.TRANSITION_PREPARE_COOKIE_NAME in request.cookies:
+        return request.cookies.get(settings.TRANSITION_PREPARE_COOKIE_NAME)
+    if is_mobile_app_request(request) and "x-whatbob-transition-secret" in request.headers:
+        return request.headers.get("x-whatbob-transition-secret")
+    return None
+
+
 def require_csrf(request: Request) -> None:
-    if (request.headers.get("origin") not in allowed_web_origins()
-            or request.headers.get("x-whatbob-request") != "1"):
+    if request.headers.get("x-whatbob-request") != "1":
+        raise AuthError("CSRF_REJECTED", "허용되지 않은 인증 요청입니다.", 403)
+    origin = request.headers.get("origin")
+    if is_mobile_app_request(request):
+        if origin is not None and origin not in allowed_web_origins():
+            raise AuthError("CSRF_REJECTED", "허용되지 않은 인증 요청입니다.", 403)
+        return
+    if origin not in allowed_web_origins():
         raise AuthError("CSRF_REJECTED", "허용되지 않은 인증 요청입니다.", 403)
 
 
-def set_auth_cookie(response: Response, secret: str, max_age: int) -> None:
+def set_auth_cookie(
+    response: Response,
+    secret: str,
+    max_age: int,
+    request: Request | None = None,
+) -> None:
     response.set_cookie(settings.AUTH_COOKIE_NAME, secret, max_age=max_age,
                         expires=datetime.now(timezone.utc) + timedelta(seconds=max_age),
                         path="/api/auth", secure=True, httponly=True, samesite="none")
+    if is_mobile_app_request(request):
+        response.headers[AUTH_SECRET_HEADER] = secret
 
 
 router = APIRouter(prefix="/api/auth", tags=["Auth"], dependencies=[Depends(require_csrf)])
@@ -35,10 +75,10 @@ router = APIRouter(prefix="/api/auth", tags=["Auth"], dependencies=[Depends(requ
 
 @router.post("/preparations", response_model=PreparationResponse)
 def prepare_authentication_endpoint(request: Request, response: Response, db: Session = Depends(get_db)):
-    result, secret = prepare_authentication(db, request.cookies.get(settings.AUTH_COOKIE_NAME))
+    result, secret = prepare_authentication(db, get_request_auth_secret(request))
     response.headers["Cache-Control"] = "no-store"
     if secret is not None:
-        set_auth_cookie(response, secret, PREPARATION_COOKIE_SECONDS)
+        set_auth_cookie(response, secret, PREPARATION_COOKIE_SECONDS, request=request)
     return result
 
 
@@ -53,11 +93,11 @@ def issue_token_endpoint(request: Request, response: Response, db: Session = Dep
 
 
 def _issue_token(request: Request, response: Response, db: Session, *, create_user: bool = False):
-    secret = request.cookies.get(settings.AUTH_COOKIE_NAME)
+    secret = get_request_auth_secret(request)
     expected_context = request.headers.get("x-whatbob-auth-context") if not create_user else None
     result = issue_cookie_token(db, secret, create_user=create_user, expected_context=expected_context)
     response.status_code = 201 if result.is_new_user else 200
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
-    set_auth_cookie(response, secret, SESSION_SECONDS)
+    set_auth_cookie(response, secret, SESSION_SECONDS, request=request)
     return result

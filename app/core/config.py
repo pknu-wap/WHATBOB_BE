@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     TRANSITION_RECOVERY_SECONDS: int = 24 * 60 * 60
     KAKAO_REST_API_KEY: str
     KAKAO_REDIRECT_URI: str = "https://whatbobfe-app.vercel.app/auth/callback"
+    KAKAO_APP_REDIRECT_URI: str = "https://whatbobfe-app.vercel.app/api/auth/kakao/app-callback"
+    APP_DEEP_LINK_CALLBACK_URI: str = "whatbob://auth/kakao/callback"
     KAKAO_CLIENT_SECRET: str | None = None
     KAKAO_TOKEN_ENCRYPTION_KEY: str | None = None
     LLM_API_KEY: str | None = None

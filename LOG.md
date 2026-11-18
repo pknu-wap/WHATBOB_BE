@@ -5,6 +5,48 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-18
 
+### #50 · #52 T02~T04 카카오 재인증(`prompt=login`)·대상 확인/취소·웹 프록시 및 Expo 앱 이중 전달 계약 구현
+
+#### 변경 이유 및 내용
+
+- `T02` (`docs/plans/50-tickets-and-architecture.md`):
+  - `LOGOUT` 확정 시 새로 발급되는 UUID `AuthSession`에 `requires_reauth=True`를 기록하고 `TokenResponse` 및 `TransitionCommitResponse`에 노출했다.
+  - `T02-D01`: `GET /api/auth/kakao/login/url`이 현재 `AuthSession`(쿠키·Bearer JWT·모바일 앱 시크릿 헤더)을 확인해 서버 발급 1회용 `state`의 SHA-256 해시(`oauth_state_hash`)와 만료 시각(`oauth_state_expires_at`)을 세션 행에 덮어써 기록하고, `requires_reauth=True`이면 `prompt=login`을 강제 부착하도록 구현했다. `KAKAO_LINK` 준비 시 세션의 최신 `state`와 대조·1회용 소진하여 이전 탭이나 재사용된 콜백을 `400 INVALID_OAUTH_STATE`로 차단한다.
+  - `KAKAO_LINK` 준비 시 카카오 프로필의 `표시 닉네임`과 서버 마스킹 이메일(`masked_email`)을 `target_account`로 반환하며, 두 필드가 모두 없으면 `422 KAKAO_TARGET_UNVERIFIABLE`로 즉시 중단하고 임시 자격 증명을 남기지 않는다.
+  - 확인 단계 취소 API(`POST /api/auth/transitions/{transition_id}/cancel`)를 추가해 `PREPARED` 전환을 `CANCELLED`로 종료하고 임시 암호화 토큰 원문을 즉시 `NULL`로 파기한다.
+- `T03` (`docs/plans/52-t01-web-auth-design.md`):
+  - 웹 콜백 화면 착륙 후 동일 출처 프록시를 통한 `POST /api/auth/transitions`(`prepare`) → 대상 확인 → `commit`/`cancel` 흐름과, 카카오톡 인앱 브라우저(`User-Agent: ...KAKAOTALK...`) 감지 시 `kakao_in_app_browser=True` 및 `requires_external_browser=True` 사전 안내 플래그 반환을 구현했다.
+- `T04`:
+  - `T04-D01`: 모바일 앱 전용 이중 전달 계약(`X-Whatbob-Client: app` + `X-Whatbob-Request: 1`)을 구현해 앱 요청 시 응답 헤더(`X-Whatbob-Auth-Secret`, `X-Whatbob-Transition-Secret`)로 비밀열쇠를 내려주고 요청 헤더로 세션 복원·계정 전환을 수행할 수 있게 했다(웹 요청에는 비밀열쇠 헤더 미노출).
+  - 모바일 시스템 인증 창(`openAuthSessionAsync`) 복귀를 위해 카카오 `https://` 콜백을 앱 스킴(`whatbob://auth/kakao/callback?...`)으로 즉시 `302 Redirect`하는 `GET /api/auth/kakao/app-callback` 브릿지 엔드포인트를 추가했다.
+
+#### 주요 변경 파일
+
+- `app/core/config.py`, `app/main.py`
+- `app/auth/models.py`, `app/auth/schemas.py`, `app/auth/sessions.py`, `app/auth/cookie_router.py`, `app/auth/router.py`, `app/auth/transitions.py`, `app/auth/transition_router.py`, `app/auth/kakao.py`
+- `docs/UUID_AUTH_API.md`, `docs/plans/50-tickets-and-architecture.md`, `docs/plans/52-t01-web-auth-design.md`
+- `tests/test_t02_t03_t04_reauth_web_app.py`
+
+#### API 변경
+
+- `GET /api/auth/kakao/login/url`: 세션 기반 1회용 `state` 발급·저장, `requires_reauth` 시 `prompt=login` 포함, `kakao_in_app_browser`·`requires_external_browser` 반환, 앱 플랫폼 요청 시 `KAKAO_APP_REDIRECT_URI` 기본 적용.
+- `GET /api/auth/kakao/app-callback`: 카카오 인가 쿼리 파라미터를 `whatbob://auth/kakao/callback`으로 `302 Redirect`(`Cache-Control: no-store`).
+- `POST /api/auth/transitions`: `TransitionPrepareResponse`에 `target_account`(`nickname`, `masked_email`) 추가, 표시 정보 모두 누락 시 `422 KAKAO_TARGET_UNVERIFIABLE` 반환.
+- `POST /api/auth/transitions/{transition_id}/cancel`: 준비된 전환 취소 및 임시 토큰 원문 파기.
+- `POST /api/auth/preparations`, `POST /api/auth/anonymous-users`, `POST /api/auth/tokens`, `/api/auth/transitions/*`: `TokenResponse`·`TransitionCommitResponse`에 `requires_reauth` 추가, `X-Whatbob-Client: app` 요청에 대해 `X-Whatbob-Auth-Secret` / `X-Whatbob-Transition-Secret` 헤더 입출력 지원.
+
+#### DB 변경
+
+- `auth_sessions` 테이블(`AuthSession`): `requires_reauth` (`BOOLEAN NOT NULL DEFAULT FALSE`), `oauth_state_hash` (`BINARY(32) NULL`), `oauth_state_expires_at` (`DATETIME(6) NULL`) 컬럼 추가.
+
+#### 검증
+
+- `pytest tests/test_t02_t03_t04_reauth_web_app.py tests/test_t01_kakao_token_lifecycle.py tests/test_t06_t07_t08_transitions.py tests/test_uuid_auth.py tests/test_auth.py`: 통합 검증 통과.
+
+#### 남은 작업 및 주의 사항
+
+- 실제 프론트엔드 저장소(`WHATBOB_FE`)의 웹 콜백/프록시 및 Expo 앱 `SecureStore` 화면 연동과 실제 브라우저/모바일 기기 검증은 프론트엔드 배포 단계에서 수행한다.
+
 ### #50 T01 카카오 토큰 암호화 저장·자동 갱신·폐기와 안전한 왓밥 로그아웃 구현
 
 #### 변경 이유 및 내용

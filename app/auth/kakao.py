@@ -19,15 +19,20 @@ class KakaoTokenExpiredError(Exception):
     """카카오 액세스 토큰 만료(401)로 리프레시 토큰 갱신이 필요한 상태"""
 
 
-async def exchange_kakao_authorization_code(code: str) -> dict:
+async def exchange_kakao_authorization_code(
+    code: str,
+    *,
+    redirect_uri: str | None = None,
+) -> dict:
     """카카오 인가 코드를 교환해 토큰 쌍과 만료 시간(초)을 반환합니다."""
     headers = {
         "Content-Type": "application/x-www-form-urlencoded;charset=utf-8"
     }
+    effective_redirect_uri = (redirect_uri or settings.KAKAO_REDIRECT_URI).strip()
     data = {
         "grant_type": "authorization_code",
         "client_id": settings.KAKAO_REST_API_KEY.strip(),
-        "redirect_uri": settings.KAKAO_REDIRECT_URI.strip(),
+        "redirect_uri": effective_redirect_uri,
         "code": code.strip(),
     }
     if settings.KAKAO_CLIENT_SECRET:

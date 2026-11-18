@@ -75,7 +75,14 @@ app.add_middleware(
         "Idempotency-Key",
         "ngrok-skip-browser-warning",
         "X-Whatbob-Auth-Context",
+        "X-Whatbob-Auth-Secret",
+        "X-Whatbob-Client",
         "X-Whatbob-Request",
+        "X-Whatbob-Transition-Secret",
+    ],
+    expose_headers=[
+        "X-Whatbob-Auth-Secret",
+        "X-Whatbob-Transition-Secret",
     ],
 )
 

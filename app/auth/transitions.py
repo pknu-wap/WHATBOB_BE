@@ -31,6 +31,7 @@ from app.auth.operations import (
     normalize_idempotency_key,
 )
 from app.auth.schemas import (
+    PreparedKakaoTargetRead,
     TransitionCommitResponse,
     TransitionPrepareRequest,
     TransitionPrepareResponse,
@@ -42,6 +43,7 @@ from app.auth.sessions import (
     as_utc_naive,
     authenticate_access_token,
     create_uuid_user,
+    hash_oauth_state,
     hash_secret,
     require_secret,
     utc_now,
@@ -97,14 +99,50 @@ async def resolve_kakao_profile_from_code(code: str) -> dict:
 _default_resolve_kakao_profile_from_code = resolve_kakao_profile_from_code
 
 
-async def _resolve_kakao_profile_and_tokens(code: str) -> tuple[dict, dict | None]:
+def mask_kakao_email(email: str | None) -> str | None:
+    if not email or not isinstance(email, str):
+        return None
+    cleaned = email.strip()
+    if "@" not in cleaned:
+        return None
+    local, domain = cleaned.split("@", 1)
+    local = local.strip()
+    domain = domain.strip()
+    if not local or not domain:
+        return None
+    prefix = local[0] if len(local) <= 2 else local[:2]
+    return f"{prefix}***@{domain}"
+
+
+def _extract_prepared_target_account(provider_context: dict | None) -> PreparedKakaoTargetRead | None:
+    if not isinstance(provider_context, dict):
+        return None
+    raw_nick = provider_context.get("nickname")
+    nickname = raw_nick.strip() if isinstance(raw_nick, str) and raw_nick.strip() else None
+    masked_email = mask_kakao_email(provider_context.get("email"))
+    if nickname is None and masked_email is None:
+        return None
+    return PreparedKakaoTargetRead(nickname=nickname, masked_email=masked_email)
+
+
+async def _resolve_kakao_profile_and_tokens(
+    code: str,
+    *,
+    redirect_uri: str | None = None,
+) -> tuple[dict, dict | None]:
     cleaned_code = (code or "").strip()
     if not cleaned_code:
         raise AuthError("KAKAO_CODE_REQUIRED", "카카오 인가 코드가 필요합니다.", 400)
 
     if resolve_kakao_profile_from_code is _default_resolve_kakao_profile_from_code:
         if get_kakao_access_token is _default_get_kakao_access_token:
-            raw_tokens = await exchange_kakao_authorization_code(cleaned_code)
+            try:
+                raw_tokens = await exchange_kakao_authorization_code(
+                    cleaned_code,
+                    redirect_uri=redirect_uri,
+                )
+            except TypeError:
+                raw_tokens = await exchange_kakao_authorization_code(cleaned_code)
         else:
             raw_res = await get_kakao_access_token(cleaned_code)
             raw_tokens = (
@@ -631,6 +669,7 @@ async def prepare_account_transition(
     expected_context: str | None = None,
     auth_cookie_secret: str | None = None,
     idempotency_key_header: str | None = None,
+    default_redirect_uri: str | None = None,
 ) -> tuple[TransitionPrepareResponse, str]:
     now = utc_now()
     session_id = _verify_auth_context_and_cookie(
@@ -701,6 +740,11 @@ async def prepare_account_transition(
                         action=existing.action,
                         status="PREPARED",
                         expires_at=_as_utc_aware(existing.prepare_expires_at),
+                        target_account=(
+                            _extract_prepared_target_account(existing.provider_context_json)
+                            if existing.action == "KAKAO_LINK"
+                            else None
+                        ),
                     ),
                     new_secret,
                 )
@@ -708,15 +752,29 @@ async def prepare_account_transition(
 
     provider_context: dict | None = None
     kakao_token_bundle: dict | None = None
+    target_account: PreparedKakaoTargetRead | None = None
     if request.action == "KAKAO_LINK":
         if current_user.kakao_id is not None:
             raise AuthError("ALREADY_LINKED_ACCOUNT", "이미 카카오 계정이 연결된 사용자입니다.", 409)
-        if (
-            request.expected_state is not None
-            and request.state is not None
-            and request.state != request.expected_state
-        ):
-            raise AuthError("INVALID_OAUTH_STATE", "카카오 로그인 state 검증에 실패했습니다.", 400)
+        if request.expected_state is not None:
+            if request.state is None or request.state != request.expected_state:
+                raise AuthError("INVALID_OAUTH_STATE", "카카오 로그인 state 검증에 실패했습니다.", 400)
+
+        origin_session_pre = db.get(AuthSession, session_id)
+        if origin_session_pre is not None and origin_session_pre.oauth_state_hash is not None:
+            if not request.state or not request.state.strip():
+                raise AuthError("INVALID_OAUTH_STATE", "카카오 로그인 state 검증에 실패했습니다.", 400)
+            if (
+                origin_session_pre.oauth_state_expires_at is None
+                or now >= as_utc_naive(origin_session_pre.oauth_state_expires_at)
+            ):
+                raise AuthError("INVALID_OAUTH_STATE", "카카오 로그인 state 유효 시간이 지났습니다.", 400)
+            if not secrets.compare_digest(
+                bytes(origin_session_pre.oauth_state_hash),
+                hash_oauth_state(request.state),
+            ):
+                raise AuthError("INVALID_OAUTH_STATE", "카카오 로그인 state 검증에 실패했습니다.", 400)
+
         if not request.code or not request.code.strip():
             raise AuthError("KAKAO_CODE_REQUIRED", "카카오 인가 코드가 필요합니다.", 400)
 
@@ -729,7 +787,20 @@ async def prepare_account_transition(
                 409,
             )
         db.rollback()
-        provider_context, kakao_token_bundle = await _resolve_kakao_profile_and_tokens(request.code)
+        effective_redirect_uri = (
+            request.redirect_uri or default_redirect_uri or settings.KAKAO_REDIRECT_URI
+        ).strip()
+        provider_context, kakao_token_bundle = await _resolve_kakao_profile_and_tokens(
+            request.code,
+            redirect_uri=effective_redirect_uri,
+        )
+        target_account = _extract_prepared_target_account(provider_context)
+        if target_account is None:
+            raise AuthError(
+                "KAKAO_TARGET_UNVERIFIABLE",
+                "연결할 카카오 계정의 닉네임이나 이메일을 확인할 수 없어 이관을 중단했습니다.",
+                422,
+            )
 
     now = utc_now()
     with database_errors(db):
@@ -739,6 +810,33 @@ async def prepare_account_transition(
             if locked_user.kakao_id is not None:
                 db.rollback()
                 raise AuthError("ALREADY_LINKED_ACCOUNT", "이미 카카오 계정이 연결된 사용자입니다.", 409)
+            locked_session = (
+                db.execute(
+                    select(AuthSession)
+                    .where(AuthSession.id == session_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                .scalar_one_or_none()
+            )
+            validate_session(locked_session)
+            if locked_session.oauth_state_hash is not None:
+                if (
+                    not request.state
+                    or not request.state.strip()
+                    or locked_session.oauth_state_expires_at is None
+                    or now >= as_utc_naive(locked_session.oauth_state_expires_at)
+                    or not secrets.compare_digest(
+                        bytes(locked_session.oauth_state_hash),
+                        hash_oauth_state(request.state),
+                    )
+                ):
+                    db.rollback()
+                    raise AuthError("INVALID_OAUTH_STATE", "카카오 로그인 state 검증에 실패했습니다.", 400)
+                locked_session.oauth_state_hash = None
+                locked_session.oauth_state_expires_at = None
+                db.flush()
+
             kakao_id = int(provider_context["kakao_id"])
             target_user = db.query(User).filter(User.kakao_id == kakao_id).first()
             if target_user is not None:
@@ -777,6 +875,15 @@ async def prepare_account_transition(
         db.flush()
 
         if request.action == "KAKAO_LINK":
+            db.query(AccountTransition).filter(
+                AccountTransition.origin_session_id == session_id,
+                AccountTransition.action == "KAKAO_LINK",
+                AccountTransition.status == "PREPARED",
+                AccountTransition.transition_id != transition.transition_id,
+            ).update(
+                {AccountTransition.status: "CANCELLED", AccountTransition.updated_at: now},
+                synchronize_session=False,
+            )
             shred_session_prepared_kakao_credentials(
                 db,
                 session_id,
@@ -822,6 +929,7 @@ async def prepare_account_transition(
                 action=transition.action,
                 status="PREPARED",
                 expires_at=_as_utc_aware(prepare_expires),
+                target_account=target_account,
             ),
             prepare_secret,
         )
@@ -876,6 +984,7 @@ def _build_committed_response_from_transition(
         access_token=access_token,
         user=UserResponse.model_validate(result_user),
         is_new_user=bool(transition.result_is_new_user),
+        requires_reauth=bool(getattr(result_session, "requires_reauth", False)),
         kakao_logout_status=kakao_logout_status,
     )
 
@@ -1239,11 +1348,12 @@ def commit_account_transition(
                     kakao_logout_status = "SKIPPED_NO_CREDENTIALS"
                 db.flush()
 
-                # 4. 새 UUID 사용자 및 새 정식 AuthSession 발급
+                # 4. 새 UUID 사용자 및 새 정식 AuthSession 발급 (로그아웃 직후 재연결 시 재인증 필요 표시)
                 new_user = create_uuid_user(db)
                 new_auth_session = AuthSession(
                     user_id=new_user.id,
                     secret_hash=secret_hash,
+                    requires_reauth=True,
                     created_at=now,
                     expires_at=now + timedelta(seconds=SESSION_SECONDS),
                 )
@@ -1268,6 +1378,7 @@ def commit_account_transition(
                     ),
                     user=UserResponse.model_validate(new_user),
                     is_new_user=True,
+                    requires_reauth=True,
                     kakao_logout_status=kakao_logout_status,
                 )
                 prepare_room_notifications(db)
@@ -1368,8 +1479,92 @@ def get_account_transition_status(
         origin_uuid=transition.origin_uuid,
         result_uuid=transition.result_uuid,
         expires_at=_as_utc_aware(expires),
+        target_account=(
+            _extract_prepared_target_account(transition.provider_context_json)
+            if transition.action == "KAKAO_LINK"
+            else None
+        ),
         kakao_logout_status=_resolve_logout_kakao_status(db, transition),
     )
+
+
+def cancel_account_transition(
+    db: Session,
+    transition_id: str,
+    *,
+    prepare_secret: str | None = None,
+    auth_cookie_secret: str | None = None,
+    bearer_token: str | None = None,
+    expected_context: str | None = None,
+) -> TransitionStatusResponse:
+    """
+    연결 대상 확인 화면에서 사용자가 취소할 때 PREPARED 전환을 CANCELLED로 종료하고
+    임시 보관된 카카오 토큰 원문을 즉시 파기한다.
+    """
+    transition = (
+        db.query(AccountTransition)
+        .filter(AccountTransition.transition_id == transition_id)
+        .first()
+    )
+    if transition is None:
+        raise AuthError("TRANSITION_NOT_FOUND", "계정 전환 작업을 찾을 수 없습니다.", 404)
+
+    if expected_context is not None and expected_context.strip():
+        ctx = expected_context.strip()
+        if ctx not in {str(transition.origin_session_id), transition.origin_uuid}:
+            raise AuthError("AUTH_CONTEXT_CHANGED", "다른 탭에서 계정이 변경되었습니다.", 409)
+
+    _authorize_transition_inspection(
+        db,
+        transition,
+        prepare_secret=prepare_secret,
+        auth_cookie_secret=auth_cookie_secret,
+        bearer_token=bearer_token,
+    )
+
+    now = utc_now()
+    with database_errors(db):
+        locked = (
+            db.execute(
+                select(AccountTransition)
+                .where(AccountTransition.id == transition.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            .scalar_one()
+        )
+        if locked.status == "COMMITTED":
+            db.rollback()
+            raise AuthError(
+                "TRANSITION_ALREADY_FINALIZED",
+                "이미 확정된 전환 작업은 취소할 수 없습니다.",
+                409,
+            )
+        if locked.status != "CANCELLED":
+            locked.status = "CANCELLED"
+            locked.updated_at = now
+        shred_prepared_kakao_credential(
+            db,
+            locked.transition_id,
+            status="CANCELLED",
+            now=now,
+        )
+        prepare_room_notifications(db)
+        db.commit()
+        return TransitionStatusResponse(
+            transition_id=locked.transition_id,
+            action=locked.action,
+            status="CANCELLED",
+            origin_uuid=locked.origin_uuid,
+            result_uuid=locked.result_uuid,
+            expires_at=_as_utc_aware(locked.prepare_expires_at),
+            target_account=(
+                _extract_prepared_target_account(locked.provider_context_json)
+                if locked.action == "KAKAO_LINK"
+                else None
+            ),
+            kakao_logout_status=None,
+        )
 
 
 def recover_account_transition(
