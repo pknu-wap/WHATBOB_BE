@@ -500,23 +500,29 @@ def create_order_sheet_recommendation(
     )
 
 
-def recalculate_question_weights(db: Session, *, commit: bool = True) -> dict[str, float]:
+def effective_question_feedback(db: Session) -> list[RecommendationFeedbackState | RecommendationFeedback]:
+    state_rows = db.query(RecommendationFeedbackState).all()
+    state_rec_ids = {state.recommendation_id for state in state_rows}
+    legacy_rows = [
+        feedback
+        for feedback in db.query(RecommendationFeedback).all()
+        if feedback.recommendation_id not in state_rec_ids and feedback.answer_match_results
+    ]
+    return [state for state in state_rows if state.answer_match_results] + legacy_rows
+
+
+def recalculate_question_weights(
+    db: Session, *, commit: bool = True, removed_feedback_question_ids: set[int] | None = None,
+) -> dict[str, float]:
     """
     [4·5단계 피드백 누적 데이터 기반 ML 가중치 재학습]
     추천×음식(menu_key) 단위 현재 유효 상태(RecommendationFeedbackState)를 우선 사용하여
     동일 추천·음식의 재전송이나 수정으로 인해 전역 통계가 중복 가산되지 않도록 보장한다.
     """
     questions = db.query(OrderSheetQuestion).all()
-    state_rows = db.query(RecommendationFeedbackState).all()
-    state_rec_ids = {st.recommendation_id for st in state_rows}
-    legacy_rows = [
-        fb
-        for fb in db.query(RecommendationFeedback).all()
-        if fb.recommendation_id not in state_rec_ids and fb.answer_match_results
-    ]
-    effective_votes = [st for st in state_rows if st.answer_match_results] + legacy_rows
+    effective_votes = effective_question_feedback(db)
 
-    if not effective_votes:
+    if not effective_votes and not removed_feedback_question_ids:
         return {q.question_code: round(float(q.importance_weight), 4) for q in questions}
 
     total_fb = len(effective_votes)
@@ -542,6 +548,10 @@ def recalculate_question_weights(db: Session, *, commit: bool = True) -> dict[st
     updated: dict[str, float] = {}
     for q in questions:
         st = stats.get(str(q.id))
+        if removed_feedback_question_ids and q.id in removed_feedback_question_ids:
+            q.positive_count = int(st["match_pos"]) if st else 0
+            if not st:
+                q.importance_weight = q.initial_score
         if not st or (st["match_total"] + st["unmatch_total"]) == 0:
             updated[q.question_code] = round(float(q.importance_weight), 4)
             continue
@@ -601,7 +611,7 @@ def record_recommendation_feedback(
     target_menu_id = request.selected_menu_id
     if target_menu_id is None and rec.recommended_menu_ids:
         target_menu_id = rec.recommended_menu_ids[0]
-    if target_menu_id not in (rec.recommended_menu_ids or []):
+    if target_menu_id is None or target_menu_id not in (rec.recommended_menu_ids or []):
         raise InvalidOrderSheetException("해당 추천 결과에 포함된 메뉴만 평가할 수 있습니다.")
 
     owner_user_id = effective_user_id if effective_user_id is not None else rec.user_id

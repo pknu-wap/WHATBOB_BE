@@ -26,6 +26,7 @@ from app.recommend.question_pool import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_CSV_PATH = Path(__file__).resolve().parent.parent / "data" / "foods_nutrition.csv"
+REMOVED_FOOD_CODES_PATH = DEFAULT_CSV_PATH.with_name("removed_side_dishes_and_desserts.csv")
 
 ORIGIN_PRIORITY = {
     "외식(분석함량)": 1,
@@ -207,6 +208,11 @@ def _derive_allergens(cat_medium: str, cat_small: str, name: str, cat_large: str
     return derive_allergens_from_text(combined)
 
 
+def load_removed_food_codes() -> set[str]:
+    with REMOVED_FOOD_CODES_PATH.open(encoding="utf-8-sig", newline="") as stream:
+        return {row["food_code"] for row in csv.DictReader(stream)}
+
+
 def parse_and_clean_csv(
     csv_path: Path = DEFAULT_CSV_PATH,
     max_menus: Optional[int] = None,
@@ -216,6 +222,7 @@ def parse_and_clean_csv(
     식약처 영양성분 CSV 파일을 읽어 급식/중복 데이터를 대표 메뉴 기준으로 정제하고,
     주문서 조건식(rules) 매칭에 필요한 12개 정규화 속성을 자동 추출합니다.
     """
+    removed_food_codes = load_removed_food_codes()
     with open(csv_path, mode="r", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         best_by_name: dict[str, tuple[int, dict[str, Any]]] = {}
@@ -224,7 +231,7 @@ def parse_and_clean_csv(
             food_code = (row.get("식품코드") or "").strip()
             name = (row.get("식품명") or "").strip()
             cat_large = (row.get("식품대분류명") or "").strip()
-            if not food_code or not name or not cat_large:
+            if not food_code or food_code in removed_food_codes or not name or not cat_large:
                 continue
 
             if (not include_beverages_and_bakery
