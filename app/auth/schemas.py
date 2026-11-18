@@ -40,6 +40,9 @@ class TransitionPrepareResponse(BaseModel):
     expires_at: datetime
 
 
+KakaoLogoutStatus = Literal["PENDING", "REVOKED", "SKIPPED_NO_CREDENTIALS", "FAILED"]
+
+
 class TransitionCommitResponse(BaseModel):
     transition_id: str
     action: Literal["KAKAO_LINK", "LOGOUT"]
@@ -49,6 +52,7 @@ class TransitionCommitResponse(BaseModel):
     expires_in: int = 3600
     user: UserResponse
     is_new_user: bool
+    kakao_logout_status: KakaoLogoutStatus | None = None
 
 
 class TransitionStatusResponse(BaseModel):
@@ -58,4 +62,5 @@ class TransitionStatusResponse(BaseModel):
     origin_uuid: str
     result_uuid: str | None = None
     expires_at: datetime
+    kakao_logout_status: KakaoLogoutStatus | None = None
 

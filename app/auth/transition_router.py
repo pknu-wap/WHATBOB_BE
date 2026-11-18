@@ -1,8 +1,9 @@
 from starlette.concurrency import run_in_threadpool
+from app.auth.revocations import dispatch_kakao_revocation
 from app.rooms.notifications import dispatch_room
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Header, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
@@ -95,6 +96,7 @@ async def commit_transition_endpoint(
     transition_id: str,
     request: Request,
     response: Response,
+    background_tasks: BackgroundTasks,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ):
@@ -108,6 +110,7 @@ async def commit_transition_endpoint(
         if credentials is not None and credentials.scheme.lower() == "bearer"
         else None
     )
+    bind = db.get_bind()
     result, active_secret = await run_in_threadpool(commit_account_transition,
         db,
         transition_id,
@@ -115,7 +118,9 @@ async def commit_transition_endpoint(
         expected_context=request.headers.get("x-whatbob-auth-context"),
         bearer_token=bearer_token,
     )
-    await dispatch_room(db.get_bind())
+    await dispatch_room(bind)
+    if result.action == "LOGOUT" and result.kakao_logout_status == "PENDING":
+        background_tasks.add_task(dispatch_kakao_revocation, bind, result.transition_id)
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     set_auth_cookie(response, active_secret, SESSION_SECONDS)
@@ -160,15 +165,19 @@ def recover_transition_endpoint(
     transition_id: str,
     request: Request,
     response: Response,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     """COMMITTED 후 응답이 유실된 전환 결과를 준비 비밀 쿠키로 복구한다 (원본 물리 삭제 후에도 동작)."""
+    bind = db.get_bind()
     result, active_secret = recover_account_transition(
         db,
         transition_id,
         prepare_secret=request.cookies.get(settings.TRANSITION_PREPARE_COOKIE_NAME),
         auth_cookie_secret=request.cookies.get(settings.AUTH_COOKIE_NAME),
     )
+    if result.action == "LOGOUT" and result.kakao_logout_status == "PENDING":
+        background_tasks.add_task(dispatch_kakao_revocation, bind, result.transition_id)
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     set_auth_cookie(response, active_secret, SESSION_SECONDS)
