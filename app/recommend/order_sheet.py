@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import math
 import random
 from typing import Any
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.auth.operations import (
@@ -51,6 +52,15 @@ from app.users.models import User
 
 DEFAULT_TOTAL_QUESTIONS = 9
 DEFAULT_EXPLOITATION_COUNT = 7
+
+# 숫자가 작을수록 먼저 적용되는 하드 필터 우선순위 (후보 부족 시 후순위부터 완화되어 점수제로 전환)
+HARD_FILTER_PRIORITY: dict[str, int] = {
+    "meal_type": 1,        # 식사 종류 (식사 vs 간식/음료)
+    "main_ingredient": 2,  # 주요 재료 (육류 vs 비육류)
+    "has_soup": 3,         # 국물 여부
+    "cooking_style": 4,    # 조리 방식
+}
+HARD_FILTER_CLUSTERS = frozenset(HARD_FILTER_PRIORITY.keys())
 
 
 def _question_options(question: OrderSheetQuestion) -> list[dict[str, Any]]:
@@ -189,7 +199,8 @@ def select_order_sheet_questions(
     [5단계 탐색+활용(Exploration-Exploitation) 질문 추출]
     - 상위 exploitation_count(기본 7개): 서로 다른 cluster_key의 importance_weight 최상위 질문 선택
     - 나머지 exploration_count(기본 2개): 아직 선택하지 않은 주제에서 노출 횟수를 고려해 가중 샘플링
-    - 상위·탐색 질문 전체에서 주제 중복을 금지하며, 주제가 부족하면 가능한 개수만 반환
+    - 조회 단계에서는 순환 상태(QuestionSelectionState)만 갱신하며, 실제 노출 횟수(shown_count)는
+      사용자가 주문서를 제출해 추천이 실행될 때 증가시킨다.
     """
     active_questions = (
         db.query(OrderSheetQuestion)
@@ -220,9 +231,12 @@ def select_order_sheet_questions(
     topic_counts: dict[str, int] = {}
     last_clusters: set[str] = set()
     if scope_key is not None:
-        state = (db.query(QuestionSelectionState)
-                 .filter(QuestionSelectionState.scope_key == scope_key)
-                 .with_for_update().first())
+        state = (
+            db.query(QuestionSelectionState)
+            .filter(QuestionSelectionState.scope_key == scope_key)
+            .with_for_update()
+            .first()
+        )
         if state is None:
             state = QuestionSelectionState(scope_key=scope_key)
             db.add(state)
@@ -252,15 +266,7 @@ def select_order_sheet_questions(
     if state is not None:
         state.last_clusters = [q.cluster_key for q in selected_explore]
         state.topic_counts = topic_counts
-        selected_ids = [q.id for q in selected_exploit + selected_explore]
-        db.query(OrderSheetQuestion).filter(OrderSheetQuestion.id.in_(selected_ids)).update(
-            {OrderSheetQuestion.shown_count: OrderSheetQuestion.shown_count + 1},
-            synchronize_session="fetch",
-        )
-        if commit:
-            db.commit()
-        else:
-            db.flush()
+        db.commit()
 
     dtos = [
         _to_question_dto(q, is_exploration=False) for q in selected_exploit
@@ -287,10 +293,12 @@ def create_order_sheet_recommendation(
     skip_user_lock: bool = False,
 ) -> OrderSheetRecommendResponse:
     """
-    [5단계 주문서 답변 기반 메뉴 추천]
-    1. 사용자 알레르기/비선호/섭취불가 메뉴를 먼저 제외(Hard Filter)
-    2. 제출된 질문별 선택지 조건식(rules)을 평가하여 질문의 importance_weight 가중치 합산
-    3. 상위 top_k 메뉴를 추천하고 추천 기록과 메뉴별 스냅샷을 저장
+    [하이브리드 주문서 추천 파이프라인]
+    0. 사용자 알레르기/비선호/섭취불가 메뉴 제외
+    1. 우선순위 기반 태그 하드 필터링 (meal_type -> main_ingredient -> has_soup -> cooking_style)
+       - 후보가 top_k 미만으로 줄어드는 후순위 필터는 완화하여 점수제 질문으로 전환
+    2. 남은 후보 메뉴에 대해 점수제 질문(완화된 필터 포함) 가중치 합산
+    3. 다양성 보정 후 상위 top_k 메뉴 추천, 실제 제출된 질문의 shown_count 갱신 및 스냅샷 저장
     """
     effective_user_id = user_id
     if current_user is not None:
@@ -344,29 +352,81 @@ def create_order_sheet_recommendation(
             )
         validated_answers.append((q, matched_opt))
 
+    # ---------------------------------------------------------
+    # ① 우선순위 기반 태그 하드 필터링 ('상관없어요'는 rules=[] 이므로 자동 패스)
+    # ---------------------------------------------------------
+    hard_filter_answers: list[tuple[OrderSheetQuestion, dict[str, Any]]] = [
+        (q, opt)
+        for q, opt in validated_answers
+        if q.cluster_key in HARD_FILTER_CLUSTERS and opt.get("rules")
+    ]
+    hard_filter_answers.sort(
+        key=lambda item: HARD_FILTER_PRIORITY.get(item[0].cluster_key, 999)
+    )
+
+    score_answers: list[tuple[OrderSheetQuestion, dict[str, Any]]] = [
+        (q, opt)
+        for q, opt in validated_answers
+        if q.cluster_key not in HARD_FILTER_CLUSTERS
+    ]
+
+    filtered_menus = list(available_menus)
+    applied_hard_filters: list[tuple[OrderSheetQuestion, list[dict[str, Any]]]] = []
+
+    for q, opt in hard_filter_answers:
+        rules = opt.get("rules", [])
+        next_filtered = [m for m in filtered_menus if evaluate_option_rules(m, rules)]
+        # 필터 적용 시 최소 추천 개수(top_k) 이상이 유지될 때만 하드 필터 확정
+        if len(next_filtered) >= request.top_k:
+            filtered_menus = next_filtered
+            applied_hard_filters.append((q, rules))
+        else:
+            # 후보 부족으로 완화된 하드 필터는 점수제 질문으로 전환해 선호도가 반영되도록 보존
+            score_answers.append((q, opt))
+
+    applied_filter_codes = [q.question_code for q, _ in applied_hard_filters]
+
+    # ---------------------------------------------------------
+    # ② 필터링된 후보 메뉴 대상으로 점수제 질문(완화된 필터 포함) 평가
+    # ---------------------------------------------------------
     scored_candidates: list[tuple[float, list[str], Menu]] = []
-    for menu in available_menus:
+    for menu in filtered_menus:
         score = 0.0
-        matched_codes: list[str] = []
-        for q, opt in validated_answers:
+        # 하드 필터를 통과한 질문 코드는 조건을 충족했으므로 matched_codes에 포함
+        matched_codes: list[str] = list(applied_filter_codes)
+
+        for q, opt in score_answers:
             rules = opt.get("rules", [])
             weight = float(q.importance_weight)
             if rules and evaluate_option_rules(menu, rules):
                 score += weight * 1.0
                 matched_codes.append(q.question_code)
+
         scored_candidates.append((round(score, 4), matched_codes, menu))
+
+    score_total_weight = sum(
+        float(q.importance_weight) for q, opt in score_answers if opt.get("rules")
+    )
 
     top_details = select_diverse_menus_with_snapshots(
         db=db,
         candidates=scored_candidates,
         user_id=effective_user_id,
         top_k=request.top_k,
-        total_weight=sum(float(q.importance_weight) for q, opt in validated_answers if opt.get("rules")),
+        total_weight=score_total_weight if score_total_weight > 0 else 1.0,
     )
+
+    # 실제로 사용자에게 노출되어 제출된 질문들의 shown_count 증가 (NULL 방어 포함)
+    submitted_q_ids = [q.id for q, _ in validated_answers]
+    if submitted_q_ids:
+        db.query(OrderSheetQuestion).filter(OrderSheetQuestion.id.in_(submitted_q_ids)).update(
+            {OrderSheetQuestion.shown_count: func.coalesce(OrderSheetQuestion.shown_count, 0) + 1},
+            synchronize_session="fetch",
+        )
 
     rec_record = Recommendation(
         user_id=effective_user_id,
-        shown_question_ids=[q.id for q, _ in validated_answers],
+        shown_question_ids=submitted_q_ids,
         answers_json=[
             {"question_id": q.id, "option_id": opt["option_id"]}
             for q, opt in validated_answers
@@ -436,27 +496,33 @@ def create_order_sheet_recommendation(
         recommendation_id=rec_record.id,
         recommended_menus=recommended_dtos,
         excluded_count=excluded_count,
-        candidate_count=len(available_menus),
+        candidate_count=len(filtered_menus),
     )
 
 
-def recalculate_question_weights(db: Session, *, commit: bool = True) -> dict[str, float]:
+def effective_question_feedback(db: Session) -> list[RecommendationFeedbackState | RecommendationFeedback]:
+    state_rows = db.query(RecommendationFeedbackState).all()
+    state_rec_ids = {state.recommendation_id for state in state_rows}
+    legacy_rows = [
+        feedback
+        for feedback in db.query(RecommendationFeedback).all()
+        if feedback.recommendation_id not in state_rec_ids and feedback.answer_match_results
+    ]
+    return [state for state in state_rows if state.answer_match_results] + legacy_rows
+
+
+def recalculate_question_weights(
+    db: Session, *, commit: bool = True, removed_feedback_question_ids: set[int] | None = None,
+) -> dict[str, float]:
     """
     [4·5단계 피드백 누적 데이터 기반 ML 가중치 재학습]
     추천×음식(menu_key) 단위 현재 유효 상태(RecommendationFeedbackState)를 우선 사용하여
     동일 추천·음식의 재전송이나 수정으로 인해 전역 통계가 중복 가산되지 않도록 보장한다.
     """
     questions = db.query(OrderSheetQuestion).all()
-    state_rows = db.query(RecommendationFeedbackState).all()
-    state_rec_ids = {st.recommendation_id for st in state_rows}
-    legacy_rows = [
-        fb
-        for fb in db.query(RecommendationFeedback).all()
-        if fb.recommendation_id not in state_rec_ids and fb.answer_match_results
-    ]
-    effective_votes = [st for st in state_rows if st.answer_match_results] + legacy_rows
+    effective_votes = effective_question_feedback(db)
 
-    if not effective_votes:
+    if not effective_votes and not removed_feedback_question_ids:
         return {q.question_code: round(float(q.importance_weight), 4) for q in questions}
 
     total_fb = len(effective_votes)
@@ -482,6 +548,10 @@ def recalculate_question_weights(db: Session, *, commit: bool = True) -> dict[st
     updated: dict[str, float] = {}
     for q in questions:
         st = stats.get(str(q.id))
+        if removed_feedback_question_ids and q.id in removed_feedback_question_ids:
+            q.positive_count = int(st["match_pos"]) if st else 0
+            if not st:
+                q.importance_weight = q.initial_score
         if not st or (st["match_total"] + st["unmatch_total"]) == 0:
             updated[q.question_code] = round(float(q.importance_weight), 4)
             continue
@@ -541,7 +611,7 @@ def record_recommendation_feedback(
     target_menu_id = request.selected_menu_id
     if target_menu_id is None and rec.recommended_menu_ids:
         target_menu_id = rec.recommended_menu_ids[0]
-    if target_menu_id not in (rec.recommended_menu_ids or []):
+    if target_menu_id is None or target_menu_id not in (rec.recommended_menu_ids or []):
         raise InvalidOrderSheetException("해당 추천 결과에 포함된 메뉴만 평가할 수 있습니다.")
 
     owner_user_id = effective_user_id if effective_user_id is not None else rec.user_id
@@ -583,8 +653,29 @@ def record_recommendation_feedback(
     m_base = (target_menu.base_name or target_menu.name or mkey).strip() if target_menu is not None else mkey
     m_ing = (target_menu.main_ingredient or "other").strip() if target_menu is not None else "other"
 
+    existing_state = (
+        db.query(RecommendationFeedbackState)
+        .filter(
+            RecommendationFeedbackState.recommendation_id == rec.id,
+            RecommendationFeedbackState.menu_key == mkey,
+        )
+        .with_for_update()
+        .first()
+        if owner_user_id is not None
+        else None
+    )
+
     answers = rec.answers_json or []
-    q_ids = [a["question_id"] for a in answers if "question_id" in a]
+    prev_q_ids = (
+        [
+            int(qid_str)
+            for qid_str in (existing_state.answer_match_results or {}).keys()
+            if str(qid_str).isdigit()
+        ]
+        if existing_state is not None
+        else []
+    )
+    q_ids = list({a["question_id"] for a in answers if "question_id" in a} | set(prev_q_ids))
     questions = (
         db.query(OrderSheetQuestion).filter(OrderSheetQuestion.id.in_(q_ids)).all()
         if q_ids
@@ -600,7 +691,11 @@ def record_recommendation_feedback(
         q = q_map.get(qid)
         if not q:
             continue
-        opt = next((o for o in (q.options_json or []) if o.get("option_id") == opt_id), None)
+        # 추천 시점과 동일하게 _question_options(q)를 사용해 기존 2선택지 DB의 any 보완을 일치시킨다.
+        opt = next(
+            (o for o in _question_options(q) if o.get("option_id") == opt_id),
+            None,
+        )
         rules = opt.get("rules", []) if opt else []
         if not rules:
             continue
@@ -628,16 +723,10 @@ def record_recommendation_feedback(
     db.flush()
 
     if owner_user_id is not None:
-        existing_state = (
-            db.query(RecommendationFeedbackState)
-            .filter(
-                RecommendationFeedbackState.recommendation_id == rec.id,
-                RecommendationFeedbackState.menu_key == mkey,
-            )
-            .with_for_update()
-            .first()
-        )
         now = datetime.now(timezone.utc)
+        new_satisfied = bool(request.is_satisfied)
+        new_pos_q_ids = {q.id for q in matched_questions} if new_satisfied else set()
+
         if existing_state is None:
             state = RecommendationFeedbackState(
                 recommendation_id=rec.id,
@@ -646,32 +735,48 @@ def record_recommendation_feedback(
                 menu_key=mkey,
                 menu_base_name=m_base,
                 menu_main_ingredient=m_ing,
-                is_satisfied=bool(request.is_satisfied),
+                is_satisfied=new_satisfied,
                 answer_match_results=answer_match_results,
                 latest_feedback_id=feedback.id,
                 created_at=now,
                 updated_at=now,
             )
             db.add(state)
-            if request.is_satisfied:
-                for q in matched_questions:
+            for q_id in new_pos_q_ids:
+                q = q_map.get(q_id)
+                if q:
                     q.positive_count = int(q.positive_count or 0) + 1
         else:
             prev_satisfied = bool(existing_state.is_satisfied)
-            new_satisfied = bool(request.is_satisfied)
+            prev_match_results = existing_state.answer_match_results or {}
+            prev_pos_q_ids = (
+                {
+                    int(qid_str)
+                    for qid_str, val in prev_match_results.items()
+                    if float(val) >= 0.5
+                }
+                if prev_satisfied
+                else set()
+            )
+
             existing_state.selected_menu_id = target_menu_id
             existing_state.menu_base_name = m_base
             existing_state.menu_main_ingredient = m_ing
             existing_state.is_satisfied = new_satisfied
             existing_state.answer_match_results = answer_match_results
             existing_state.latest_feedback_id = feedback.id
-            if prev_satisfied != new_satisfied:
+            if prev_satisfied != new_satisfied or prev_pos_q_ids != new_pos_q_ids:
                 existing_state.updated_at = now
-                for q in matched_questions:
-                    if new_satisfied:
-                        q.positive_count = int(q.positive_count or 0) + 1
-                    else:
-                        q.positive_count = max(0, int(q.positive_count or 0) - 1)
+
+            # 이전 상태와 새 상태의 긍정 기여 질문 차이를 비교해 positive_count 증감 동기화
+            for q_id in new_pos_q_ids - prev_pos_q_ids:
+                q = q_map.get(q_id)
+                if q:
+                    q.positive_count = int(q.positive_count or 0) + 1
+            for q_id in prev_pos_q_ids - new_pos_q_ids:
+                q = q_map.get(q_id)
+                if q:
+                    q.positive_count = max(0, int(q.positive_count or 0) - 1)
     else:
         if request.is_satisfied:
             for q in matched_questions:
