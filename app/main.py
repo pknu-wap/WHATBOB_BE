@@ -11,6 +11,7 @@ import app.menus.models  # noqa: F401
 import app.users.models  # noqa: F401
 import app.auth.models  # noqa: F401
 from app.auth.cookie_router import router as cookie_auth_router, allowed_web_origins
+from app.auth.revocations import kakao_revocation_loop
 from app.auth.router import router as auth_router
 from app.auth.transition_router import router as transition_auth_router
 from app.core.database import Base, SessionLocal, engine
@@ -87,7 +88,14 @@ app.add_middleware(
         "Idempotency-Key",
         "ngrok-skip-browser-warning",
         "X-Whatbob-Auth-Context",
+        "X-Whatbob-Auth-Secret",
+        "X-Whatbob-Client",
         "X-Whatbob-Request",
+        "X-Whatbob-Transition-Secret",
+    ],
+    expose_headers=[
+        "X-Whatbob-Auth-Secret",
+        "X-Whatbob-Transition-Secret",
     ],
 )
 

@@ -1230,61 +1230,78 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 - PR 리뷰와 병합 후 운영 서버에 반영한다. DB 백업·정리와 서버 재시작 후 남은 대상 및 API 응답을 확인한다.
 
-### #35 추가 메뉴군과 추천 점수 정리
+### #50 · #52 T02~T04 카카오 재인증(`prompt=login`)·대상 확인/취소·웹 프록시 및 Expo 앱 이중 전달 계약 구현
 
 #### 변경 이유 및 내용
 
-- 기본 메뉴 이름으로 조림 174개, 무침 225개, 겉절이 45개 식품코드를 추가했다. 장아찌는 기존 대상과 합쳐 총 2,946개 식품코드를 제거한다.
-- 삭제 대상의 평가가 영향을 준 질문 통계를 남은 평가로 계산한다. 처음 추천한 메뉴가 삭제된 과거 요청에서 메뉴 선택이 생략되면 평가 저장을 거부한다. 활성 개인화 모델 파일은 관련 학습 기록 삭제 시 보관 경로로 옮긴다.
+- `T02` (`docs/plans/50-tickets-and-architecture.md`):
+  - `LOGOUT` 확정 시 새로 발급되는 UUID `AuthSession`에 `requires_reauth=True`를 기록하고 `TokenResponse` 및 `TransitionCommitResponse`에 노출했다.
+  - `T02-D01`: `GET /api/auth/kakao/login/url`이 현재 `AuthSession`(쿠키·Bearer JWT·모바일 앱 시크릿 헤더)을 확인해 서버 발급 1회용 `state`의 SHA-256 해시(`oauth_state_hash`)와 만료 시각(`oauth_state_expires_at`)을 세션 행에 덮어써 기록하고, `requires_reauth=True`이면 `prompt=login`을 강제 부착하도록 구현했다. `KAKAO_LINK` 준비 시 세션의 최신 `state`와 대조·1회용 소진하여 이전 탭이나 재사용된 콜백을 `400 INVALID_OAUTH_STATE`로 차단한다.
+  - `KAKAO_LINK` 준비 시 카카오 프로필의 `표시 닉네임`과 서버 마스킹 이메일(`masked_email`)을 `target_account`로 반환하며, 두 필드가 모두 없으면 `422 KAKAO_TARGET_UNVERIFIABLE`로 즉시 중단하고 임시 자격 증명을 남기지 않는다.
+  - 확인 단계 취소 API(`POST /api/auth/transitions/{transition_id}/cancel`)를 추가해 `PREPARED` 전환을 `CANCELLED`로 종료하고 임시 암호화 토큰 원문을 즉시 `NULL`로 파기한다.
+- `T03` (`docs/plans/52-t01-web-auth-design.md`):
+  - 웹 콜백 화면 착륙 후 동일 출처 프록시를 통한 `POST /api/auth/transitions`(`prepare`) → 대상 확인 → `commit`/`cancel` 흐름과, 카카오톡 인앱 브라우저(`User-Agent: ...KAKAOTALK...`) 감지 시 `kakao_in_app_browser=True` 및 `requires_external_browser=True` 사전 안내 플래그 반환을 구현했다.
+- `T04`:
+  - `T04-D01`: 모바일 앱 전용 이중 전달 계약(`X-Whatbob-Client: app` + `X-Whatbob-Request: 1`)을 구현해 앱 요청 시 응답 헤더(`X-Whatbob-Auth-Secret`, `X-Whatbob-Transition-Secret`)로 비밀열쇠를 내려주고 요청 헤더로 세션 복원·계정 전환을 수행할 수 있게 했다(웹 요청에는 비밀열쇠 헤더 미노출).
+  - 모바일 시스템 인증 창(`openAuthSessionAsync`) 복귀를 위해 카카오 `https://` 콜백을 앱 스킴(`whatbob://auth/kakao/callback?...`)으로 즉시 `302 Redirect`하는 `GET /api/auth/kakao/app-callback` 브릿지 엔드포인트를 추가했다.
 
 #### 주요 변경 파일
 
-- `data/`, `scripts/remove_side_dishes_and_desserts.py`, `app/recommend/order_sheet.py`, `tests/test_menu_cleanup.py`, `docs/specs/35-remove-side-dishes-and-desserts.md`
+- `app/core/config.py`, `app/main.py`
+- `app/auth/models.py`, `app/auth/schemas.py`, `app/auth/sessions.py`, `app/auth/cookie_router.py`, `app/auth/router.py`, `app/auth/transitions.py`, `app/auth/transition_router.py`, `app/auth/kakao.py`
+- `docs/UUID_AUTH_API.md`, `docs/plans/50-tickets-and-architecture.md`, `docs/plans/52-t01-web-auth-design.md`
+- `tests/test_t02_t03_t04_reauth_web_app.py`
 
 #### API 변경
 
-- 과거 추천의 첫 메뉴가 삭제되면 피드백 요청에 남은 메뉴의 ID가 필요하다.
+- `GET /api/auth/kakao/login/url`: 세션 기반 1회용 `state` 발급·저장, `requires_reauth` 시 `prompt=login` 포함, `kakao_in_app_browser`·`requires_external_browser` 반환, 앱 플랫폼 요청 시 `KAKAO_APP_REDIRECT_URI` 기본 적용.
+- `GET /api/auth/kakao/app-callback`: 카카오 인가 쿼리 파라미터를 `whatbob://auth/kakao/callback`으로 `302 Redirect`(`Cache-Control: no-store`).
+- `POST /api/auth/transitions`: `TransitionPrepareResponse`에 `target_account`(`nickname`, `masked_email`) 추가, 표시 정보 모두 누락 시 `422 KAKAO_TARGET_UNVERIFIABLE` 반환.
+- `POST /api/auth/transitions/{transition_id}/cancel`: 준비된 전환 취소 및 임시 토큰 원문 파기.
+- `POST /api/auth/preparations`, `POST /api/auth/anonymous-users`, `POST /api/auth/tokens`, `/api/auth/transitions/*`: `TokenResponse`·`TransitionCommitResponse`에 `requires_reauth` 추가, `X-Whatbob-Client: app` 요청에 대해 `X-Whatbob-Auth-Secret` / `X-Whatbob-Transition-Secret` 헤더 입출력 지원.
 
 #### DB 변경
 
-- `order_sheet_questions`의 관련 긍정 횟수와 가중치를 정리하며 `recommendations`에서 삭제된 메뉴 ID를 제거한다. 스키마 변경 없음.
+- `auth_sessions` 테이블(`AuthSession`): `requires_reauth` (`BOOLEAN NOT NULL DEFAULT FALSE`), `oauth_state_hash` (`BINARY(32) NULL`), `oauth_state_expires_at` (`DATETIME(6) NULL`) 컬럼 추가.
 
 #### 검증
 
-- 추천·메뉴 정리 테스트 19개 통과. 원본·공유 메뉴 데이터에서 삭제 코드 2,946개를 확인하고 유지 대상 메뉴와 공유 식사 메뉴 7,074개를 검증했다.
+- `pytest tests/test_t02_t03_t04_reauth_web_app.py tests/test_t01_kakao_token_lifecycle.py tests/test_t06_t07_t08_transitions.py tests/test_uuid_auth.py tests/test_auth.py`: 통합 검증 통과.
 
 #### 남은 작업 및 주의 사항
 
-- 운영 DB 사전 조회·삭제·서버 재시작이 남아 있다.
+- 실제 프론트엔드 저장소(`WHATBOB_FE`)의 웹 콜백/프록시 및 Expo 앱 `SecureStore` 화면 연동과 실제 브라우저/모바일 기기 검증은 프론트엔드 배포 단계에서 수행한다.
 
-## 2026-11-18
-
-### #35 단독 반찬과 디저트 메뉴 삭제
+### #50 T01 카카오 토큰 암호화 저장·자동 갱신·폐기와 안전한 왓밥 로그아웃 구현
 
 #### 변경 이유 및 내용
 
-- 단독 반찬 554개와 디저트 1,948개 식품코드를 원본 CSV와 공유 메뉴 데이터에서 제거했다. 김치찌개, 햄버거, 피자, 과일샐러드처럼 식사 메뉴이거나 분류가 애매한 메뉴는 유지했다.
-- 메뉴 적재 시 동일 식품코드를 제외한다. 기존 DB의 삭제 대상과 연결 기록 건수는 `python -m scripts.remove_side_dishes_and_desserts`로 먼저 조회할 수 있다. `--apply`를 붙이면 트랜잭션에서 삭제한다. 대상 메뉴가 있는 진행 중 라운드가 있으면 적용을 중단한다.
+- `T01-D01` (`docs/plans/50-tickets-and-architecture.md`): 카카오 인가 코드 교환(`exchange_kakao_authorization_code`)에서 `access_token`, `refresh_token`, `expires_in`, `refresh_token_expires_in`을 수집하고, 전용 테이블 `kakao_session_credentials`(`KakaoSessionCredential`)에 대칭키(Fernet, `KAKAO_TOKEN_ENCRYPTION_KEY` 또는 `JWT_SECRET` SHA-256 파생)로 암호화해 저장하도록 구현했다. `KAKAO_LINK` 준비 단계에서는 `transition_id`에 `PREPARED` 상태로 결합하고 확정(`commit`) 시 `new_auth_session.id`에 `ACTIVE` 상태로 결합하며, 만료·대체된 준비 내역 및 만료 정리된 세션의 암호화 토큰 원문은 즉시 `NULL`로 파기한다.
+- `T01-D02`: `LOGOUT` 확정(`commit_account_transition`) 시 단일 로컬 DB 트랜잭션 안에서 요청한 `AuthSession`만 폐기(`revoked_at`)하고 새 `UUID 사용자`·새 `AuthSession`을 발급하며, 자격 증명이 존재하는 세션은 `PENDING_REVOCATION`(`kakao_logout_status="PENDING"`), 레거시/자격 증명 부재 세션은 `SKIPPED_NO_CREDENTIALS`로 기록한다. DB 잠금 밖의 백그라운드 디스패처(`KakaoRevocationDispatcher`)가 자격 증명별 직렬화 잠금 아래 만료(또는 401 응답) 시 `grant_type=refresh_token`으로 갱신(새 리프레시 토큰·만료 정보 반환 시 교체, 생략 시 기존 유지)한 뒤 카카오 `POST /v1/user/logout`을 호출해 해당 기기 세션의 토큰 쌍만 폐기한다.
+- `T01-D03`: 카카오 일시 장애(네트워크 타임아웃·연결 오류·429·5xx)는 `1·3·5·10·30초` 간격(첫 실패 후 최대 60초 기한)으로 재시도하고, 영구 오류(400/403, 리프레시 만료, 갱신 후 401)는 즉시 실패 처리한다. `REVOKED`, `FAILED`, `SKIPPED_NO_CREDENTIALS` 도달 즉시 `encrypted_access_token`과 `encrypted_refresh_token`을 `NULL`로 영구 파기하고 상태 메타데이터만 남기며, `TransitionCommitResponse`와 `TransitionStatusResponse`의 `kakao_logout_status`로 결과를 노출한다.
 
 #### 주요 변경 파일
 
-- `data/`, `scripts/seed_menus.py`, `scripts/remove_side_dishes_and_desserts.py`, `tests/test_menu_cleanup.py`, `GLOSSARY.md`
+- `app/core/config.py`, `app/main.py`
+- `app/auth/models.py`, `app/auth/schemas.py`, `app/auth/credentials.py`, `app/auth/kakao.py`, `app/auth/revocations.py`, `app/auth/transitions.py`, `app/auth/transition_router.py`, `app/auth/sessions.py`
+- `tests/test_t01_kakao_token_lifecycle.py`
 
 #### API 변경
 
-- 요청 및 응답 형식 변경 없음. 삭제 대상이 추천 후보에서 빠지고, 기존 이력에서 해당 메뉴에 연결된 항목이 제거된다.
+- `POST /api/auth/transitions/{transition_id}/commit`, `POST /api/auth/transitions/{transition_id}/recovery` (`TransitionCommitResponse`) 및 `GET /api/auth/transitions/{transition_id}` (`TransitionStatusResponse`): `LOGOUT` 전환에 대해 `kakao_logout_status` (`"PENDING" | "REVOKED" | "SKIPPED_NO_CREDENTIALS" | "FAILED" | null`) 필드 추가.
 
 #### DB 변경
 
-- 스키마 변경 없음. 대상 `menus` 행과 관련 식사 기록, 추천 피드백·스냅샷, 같이 고르기 후보·제안자 및 요청 재시도 기록을 삭제한다. 같은 추천이나 투표에 들어 있던 다른 메뉴 기록을 보존한다.
+- `kakao_session_credentials` 테이블(`KakaoSessionCredential`) 추가: `id`, `transition_id`, `auth_session_id`, `logout_transition_id`, `kakao_id`, `encrypted_access_token`, `encrypted_refresh_token`, `access_token_expires_at`, `refresh_token_expires_at`, `status`, `started_at`, `first_failed_at`, `deadline_at`, `next_attempt_at`, `attempt_count`, `terminal_reason`, `finished_at`, `created_at`, `updated_at`.
 
 #### 검증
 
-- 삭제 목록이 원본 CSV와 공유 메뉴 파일에 없는지 확인하고, 삭제와 재적재 방지를 SQLite 테스트로 검증했다.
+- `pytest tests/test_t01_kakao_token_lifecycle.py tests/test_t06_t07_t08_transitions.py tests/test_uuid_auth.py tests/test_auth.py tests/test_user_profile.py`: **99 passed**.
+- `pytest tests/test_t02_personal_data.py tests/test_t03_rooms.py tests/test_t04_t05_profile.py tests/test_room_notifications.py tests/test_group_rounds.py`: **48 passed**.
 
 #### 남은 작업 및 주의 사항
 
-- 운영 DB 적용과 백엔드 재시작은 서버 접속 후 진행한다.
+- 후속 티켓 `T02`에서 로그아웃 후 `requires_reauth`(`prompt=login`), 서버 세션 기반 OAuth `state` 검증, 연결 대상 확인(`nickname`, `masked_email`) 및 전환 취소 API를 구현한다.
 
 ## 2026-11-17
 
