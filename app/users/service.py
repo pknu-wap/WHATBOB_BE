@@ -16,6 +16,7 @@ from app.auth.operations import (
 )
 from app.auth.sessions import as_utc_naive, utc_now
 from app.menus.display import format_menu_name
+from app.menus.food_kinds import resolve_menu_illustration_url
 from app.menus.models import Menu, UserMeal
 from app.recommend.common import (
     ALLERGEN_BY_CODE,
@@ -34,6 +35,8 @@ from app.users.schemas import (
     DislikedFoodResponse,
     DislikedFoodsResponse,
     DislikedFoodsUpdateRequest,
+    HomeRecentFoodCardItemResponse,
+    HomeRecentFoodCardsResponse,
     LegacyExclusionItemResponse,
     MAX_DISLIKED_FOODS,
     NicknameUpdateRequest,
@@ -462,3 +465,32 @@ def get_my_meals(
     rows = repository.find_user_meals_with_menu(db, user_id, limit=limit, offset=offset)
     items = [_to_user_meal_item_response(meal, menu) for meal, menu in rows]
     return UserMealsResponse(items=items, total_count=total_count)
+
+
+def get_my_home_card_recently_eaten_foods(
+    db: Session,
+    user_id: int,
+    *,
+    now: datetime | None = None,
+) -> HomeRecentFoodCardsResponse:
+    """홈 최근에 먹은 메뉴 첫 카드 데이터를 조회한다."""
+    reference_now = _as_utc(now) if now is not None else datetime.now(timezone.utc)
+    row = repository.find_latest_valid_user_meal_with_food_kind(
+        db,
+        user_id,
+        as_of=reference_now,
+    )
+    if row is None:
+        return HomeRecentFoodCardsResponse(items=[])
+    meal, menu, food_kind = row
+    rep_url = food_kind.representative_image_url if food_kind is not None else None
+    return HomeRecentFoodCardsResponse(
+        items=[
+            HomeRecentFoodCardItemResponse(
+                food_kind_id=int(menu.food_kind_id),
+                menu_name=meal.menu_name,
+                eaten_at=_as_utc(meal.eaten_at),
+                image_url=resolve_menu_illustration_url(rep_url),
+            )
+        ]
+    )

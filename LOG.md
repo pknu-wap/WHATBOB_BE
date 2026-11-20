@@ -5,6 +5,34 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-20
 
+### #62 음식 종류 연결과 최근 메뉴 첫 카드 구현
+
+#### 변경 이유 및 내용
+
+- 홈 최근에 먹은 메뉴와 요즘 인기 메뉴가 공유할 음식 종류(`FoodKind`) 모델과 `Menu.food_kind_id` 외래 키를 추가하고, 합의한 별칭(`버거`/`햄버거`, `돈가스`/`돈까스`, `스파게티`/`파스타`, `자장면`/`짜장면`, `제육볶음`/`돼지고기볶음(제육볶음)` 등) 및 `base_name` 기반 공용 분류 규칙(`app/menus/food_kinds.py`)을 구현했다.
+- `scripts/seed_menus.py`와 MySQL 멱등 마이그레이션(`scripts/migrate_issue62_food_kinds.py`)에서 기존 메뉴와 식사 기록, 수동 `food_kind_id` 분류를 보존하면서 `food_code` 기준으로 백필하고, 미연결·오연결 행이 없음을 검증한 뒤 `NOT NULL` 및 외래 키 제약을 적용하도록 구현했다.
+- 공통 기본 메뉴 일러스트(`app/static/menu-illustrations/default.svg`)를 배포하고, 기존 Bearer 인증(카카오·UUID 계정)으로 본인의 유효한 최근 식사 첫 카드를 반환하는 `GET /api/users/me/home-card-recently-eaten-food-max-6`를 구현했다.
+
+#### 주요 변경 파일
+
+- `app/menus/food_kinds.py`, `app/menus/models.py`, `app/static/menu-illustrations/default.svg`, `app/users/repository.py`, `app/users/router.py`, `app/users/schemas.py`, `app/users/service.py`, `scripts/migrate_issue62_food_kinds.py`, `scripts/seed_menus.py`, `tests/test_ticket62_food_kinds_and_recent_card.py`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/users/me/home-card-recently-eaten-food-max-6` 추가: Bearer 인증 필수, `Cache-Control: no-store`, `ApiResponse` 형식으로 현재 카탈로그에 존재하고 조회 시각 이하인 본인 식사 기록 중 최신 1건(`food_kind_id`, `menu_name`, UTC ISO 8601 `eaten_at`, 상대 `image_url`) 또는 빈 배열(`items: []`) 반환.
+
+#### DB 변경
+
+- `food_kinds` 테이블(`id`, `kind_key` UNIQUE, `name`, `representative_image_url`, `created_at`) 및 `menus.food_kind_id`(`NOT NULL`, `fk_menus_food_kind -> food_kinds.id`) 추가, `scripts/migrate_issue62_food_kinds.py` 마이그레이션 스크립트 추가.
+
+#### 검증
+
+- `pytest tests/test_ticket62_food_kinds_and_recent_card.py` 실행(SQLite 및 격리 MySQL 8.4.13 `MYSQL_TEST_DATABASE_URL`): 별칭 분류, 7,503개 식사용 카탈로그 백필(`burger` 385건 합산, 미연결 0건), MySQL 마이그레이션·시드 재실행 시 수동 분류·식사 기록 보존 및 `NOT NULL`·FK 제약 강제, 정적 공통 일러스트 HTTP 200 조회, 최근 메뉴 첫 카드 API 인증·격리·삭제 메뉴 및 미래 식사 제외·동시각 `id DESC` 정렬 포함 30개 테스트 모두 통과.
+
+#### 남은 작업 및 주의 사항
+
+- 후속 티켓(#63)에서 최근에 먹은 메뉴를 음식 종류별 최신 기록 최대 6개로 확장한다.
+
 ### #68 디자이너 PNG를 받은 뒤 대표 그림 경로를 등록하도록 변경
 
 #### 변경 이유 및 내용

@@ -9,8 +9,22 @@ from sqlalchemy import (
     Integer,
     JSON,
     String,
+    event,
 )
+from sqlalchemy.orm import Session, relationship
 from app.core.database import Base
+from app.menus.food_kinds import classify_food_kind
+
+
+class FoodKind(Base):
+    """홈 최근에 먹은 메뉴·요즘 인기 메뉴 공통 분류 단위(음식 종류) 테이블"""
+    __tablename__ = "food_kinds"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    kind_key = Column(String(100), unique=True, index=True, nullable=False)
+    name = Column(String(100), index=True, nullable=False)
+    representative_image_url = Column(String(500), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
 class Menu(Base):
@@ -21,6 +35,13 @@ class Menu(Base):
     food_code = Column(String(50), unique=True, index=True, nullable=False)
     name = Column(String(200), index=True, nullable=False)
     base_name = Column(String(100), index=True, nullable=False)
+    food_kind_id = Column(
+        Integer,
+        ForeignKey("food_kinds.id", name="fk_menus_food_kind"),
+        index=True,
+        nullable=False,
+    )
+    food_kind = relationship("FoodKind")
 
     category_large = Column(String(50), index=True, nullable=False)
     category_medium = Column(String(50), index=True, nullable=True)
@@ -219,3 +240,47 @@ class RecommendationItemSnapshot(Base):
     features_json = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+
+@event.listens_for(Session, "before_flush")
+def _ensure_menu_food_kind_on_flush(session: Session, _flush_context, _instances) -> None:
+    pending_menus = [
+        obj
+        for obj in (*session.new, *session.dirty)
+        if isinstance(obj, Menu) and obj.food_kind_id is None and obj.food_kind is None
+    ]
+    if not pending_menus:
+        return
+
+    with session.no_autoflush:
+        specs_by_menu: list[tuple[Menu, str, str]] = []
+        needed_keys: set[str] = set()
+        for menu in pending_menus:
+            raw_base = (menu.base_name or "").strip() or (menu.name or "").split("_")[0].strip()
+            if not raw_base:
+                continue
+            kind_key, display_name = classify_food_kind(base_name=menu.base_name, name=menu.name)
+            specs_by_menu.append((menu, kind_key, display_name))
+            needed_keys.add(kind_key)
+
+        if not specs_by_menu:
+            return
+
+        kinds_by_key: dict[str, FoodKind] = {}
+        for obj in (*session.new, *session.identity_map.values()):
+            if isinstance(obj, FoodKind) and obj.kind_key in needed_keys:
+                kinds_by_key[obj.kind_key] = obj
+
+        missing_keys = needed_keys - kinds_by_key.keys()
+        if missing_keys:
+            for existing in session.query(FoodKind).filter(FoodKind.kind_key.in_(missing_keys)).all():
+                kinds_by_key[existing.kind_key] = existing
+
+        for menu, kind_key, display_name in specs_by_menu:
+            fk = kinds_by_key.get(kind_key)
+            if fk is None:
+                fk = FoodKind(kind_key=kind_key, name=display_name)
+                session.add(fk)
+                kinds_by_key[kind_key] = fk
+            menu.food_kind = fk
+            if fk.id is not None:
+                menu.food_kind_id = fk.id

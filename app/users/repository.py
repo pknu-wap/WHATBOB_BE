@@ -2,7 +2,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from app.menus.models import Menu, UserFoodExclusion, UserMeal
+from app.menus.models import FoodKind, Menu, UserFoodExclusion, UserMeal
 from app.users.models import User
 
 DISLIKE_EXCLUSION_TYPE = "DISLIKE"
@@ -134,4 +134,22 @@ def find_user_meals_with_menu(
         .offset(offset)
         .limit(limit)
         .all()
+    )
+
+
+def find_latest_valid_user_meal_with_food_kind(
+    db: Session,
+    user_id: int,
+    as_of: datetime,
+) -> tuple[UserMeal, Menu, FoodKind | None] | None:
+    return (
+        db.query(UserMeal, Menu, FoodKind)
+        .join(Menu, UserMeal.menu_id == Menu.id)
+        .outerjoin(FoodKind, Menu.food_kind_id == FoodKind.id)
+        .filter(
+            UserMeal.user_id == user_id,
+            UserMeal.eaten_at <= as_of,
+        )
+        .order_by(UserMeal.eaten_at.desc(), UserMeal.id.desc())
+        .first()
     )

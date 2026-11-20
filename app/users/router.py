@@ -11,6 +11,7 @@ from app.users.schemas import (
     CatalogExclusionsUpdateRequest,
     DislikedFoodsResponse,
     DislikedFoodsUpdateRequest,
+    HomeRecentFoodCardsResponse,
     NicknameUpdateRequest,
     UserMealCreateRequest,
     UserMealItemResponse,
@@ -22,6 +23,7 @@ from app.users.service import (
     delete_my_meal,
     get_my_catalog_exclusions,
     get_my_disliked_foods,
+    get_my_home_card_recently_eaten_foods,
     get_my_meals,
     record_my_meal,
     replace_my_catalog_exclusions,
@@ -211,3 +213,17 @@ def delete_my_meal_endpoint(
     """본인의 식사 기록 항목 하나를 삭제한다."""
     delete_my_meal(db, current_user.id, meal_id, current_user=current_user)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/me/home-card-recently-eaten-food-max-6",
+    response_model=ApiResponse[HomeRecentFoodCardsResponse],
+)
+def get_my_home_card_recently_eaten_food_max_6(
+    response: Response,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """홈의 최근에 먹은 메뉴 첫 카드 데이터를 조회한다."""
+    response.headers["Cache-Control"] = "no-store"
+    return ApiResponse(data=get_my_home_card_recently_eaten_foods(db, current_user.id))
