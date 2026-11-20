@@ -1,13 +1,28 @@
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.menus.food_kinds import CANONICAL_FOOD_KINDS, resolve_menu_illustration_url
-from app.menus.models import FoodKind, InitialPopularFoodKind
+from app.menus.models import (
+    FoodKind,
+    InitialPopularFoodKind,
+    Menu,
+    PopularMenuRankingItem,
+    PopularMenuRankingState,
+    UserMeal,
+)
 from app.menus.schemas import PopularMenuItemResponse, PopularMenusResponse
 
 INITIAL_POPULAR_MENU_COUNT = 8
+POPULAR_RANKING_MAX_ITEMS = 8
+POPULAR_RANKING_MIN_USERS = 5
+POPULAR_RANKING_STATE_ID = 1
+SEOUL_TIMEZONE_NAME = "Asia/Seoul"
 
 # 이슈 #54 댓글 합의 순서: 떡볶이 → 돈까스 → 햄버거 → 마라탕 → 파스타 → 국밥 → 짜장면 → 제육볶음
 DEFAULT_INITIAL_POPULAR_KIND_KEYS: tuple[str, ...] = (
@@ -141,8 +156,214 @@ def _fetch_initial_popular_rows(
     )
 
 
+def get_seoul_tz() -> tzinfo:
+    """Asia/Seoul 시간대를 반환한다. tzdata가 없는 환경에서는 고정 UTC+9로 폴백한다."""
+    try:
+        return ZoneInfo(SEOUL_TIMEZONE_NAME)
+    except ZoneInfoNotFoundError:
+        return timezone(timedelta(hours=9), name=SEOUL_TIMEZONE_NAME)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _as_utc_naive(value: datetime) -> datetime:
+    return _as_utc(value).replace(tzinfo=None)
+
+
+def _coerce_db_datetime(value: datetime | str) -> datetime:
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    return _as_utc_naive(value)
+
+
+def _resolve_kst_date(target: date | datetime) -> date:
+    if isinstance(target, datetime):
+        return _as_utc(target).astimezone(get_seoul_tz()).date()
+    if isinstance(target, date):
+        return target
+    raise TypeError("target_kst_date는 date 또는 datetime이어야 합니다.")
+
+
+def get_kst_previous_day_window_utc(
+    target_kst_date: date | datetime,
+) -> tuple[date, datetime, datetime]:
+    """집계 기준 한국 날짜에 해당하는 [전날 00:00 KST, 당일 00:00 KST) 범위를 UTC로 계산한다."""
+    resolved_date = _resolve_kst_date(target_kst_date)
+    seoul_tz = get_seoul_tz()
+    prev_date = resolved_date - timedelta(days=1)
+    window_start_kst = datetime(prev_date.year, prev_date.month, prev_date.day, 0, 0, 0, tzinfo=seoul_tz)
+    window_end_kst = datetime(
+        resolved_date.year,
+        resolved_date.month,
+        resolved_date.day,
+        0,
+        0,
+        0,
+        tzinfo=seoul_tz,
+    )
+    return (
+        resolved_date,
+        window_start_kst.astimezone(timezone.utc),
+        window_end_kst.astimezone(timezone.utc),
+    )
+
+
+@dataclass(frozen=True)
+class PopularAggregationResult:
+    target_kst_date: date
+    window_start_utc: datetime
+    window_end_utc: datetime
+    distinct_user_count: int
+    published: bool
+    published_as_of: datetime | None
+    item_count: int
+
+
+def aggregate_popular_menus_for_kst_date(
+    db: Session,
+    target_kst_date: date | datetime,
+    *,
+    commit: bool = True,
+) -> PopularAggregationResult:
+    """한국시간 자정 기준으로 전날 하루치 식사 기록을 집계해 실제 인기 순위(최대 8종)를 저장한다."""
+    kst_date, window_start_utc, window_end_utc = get_kst_previous_day_window_utc(target_kst_date)
+    window_start_naive = window_start_utc.replace(tzinfo=None)
+    window_end_naive = window_end_utc.replace(tzinfo=None)
+    now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    with db.begin_nested():
+        distinct_user_count = int(
+            db.query(func.count(func.distinct(UserMeal.user_id)))
+            .join(Menu, UserMeal.menu_id == Menu.id)
+            .filter(
+                UserMeal.eaten_at >= window_start_naive,
+                UserMeal.eaten_at < window_end_naive,
+            )
+            .scalar()
+            or 0
+        )
+
+        state = (
+            db.query(PopularMenuRankingState)
+            .filter(PopularMenuRankingState.id == POPULAR_RANKING_STATE_ID)
+            .one_or_none()
+        )
+        if state is None:
+            state = PopularMenuRankingState(
+                id=POPULAR_RANKING_STATE_ID,
+                last_succeeded_kst_date=None,
+                published_as_of=None,
+                updated_at=now_utc_naive,
+            )
+            db.add(state)
+            db.flush()
+
+        if distinct_user_count < POPULAR_RANKING_MIN_USERS:
+            state.last_succeeded_kst_date = kst_date
+            state.updated_at = now_utc_naive
+            db.flush()
+            published = False
+            active_as_of = _as_utc(state.published_as_of) if state.published_as_of is not None else None
+            item_count = 0
+        else:
+            user_count_expr = func.count(func.distinct(UserMeal.user_id)).label("user_count")
+            last_eaten_at_expr = func.max(UserMeal.eaten_at).label("last_eaten_at")
+
+            ranked_rows = (
+                db.query(
+                    Menu.food_kind_id.label("food_kind_id"),
+                    user_count_expr,
+                    last_eaten_at_expr,
+                )
+                .join(Menu, UserMeal.menu_id == Menu.id)
+                .filter(
+                    UserMeal.eaten_at >= window_start_naive,
+                    UserMeal.eaten_at < window_end_naive,
+                )
+                .group_by(Menu.food_kind_id)
+                .order_by(
+                    user_count_expr.desc(),
+                    last_eaten_at_expr.desc(),
+                    Menu.food_kind_id.asc(),
+                )
+                .limit(POPULAR_RANKING_MAX_ITEMS)
+                .all()
+            )
+
+            db.query(PopularMenuRankingItem).delete(synchronize_session=False)
+            db.flush()
+
+            new_items = [
+                PopularMenuRankingItem(
+                    rank_position=rank_position,
+                    food_kind_id=int(row.food_kind_id),
+                    user_count=int(row.user_count),
+                    last_eaten_at=_coerce_db_datetime(row.last_eaten_at),
+                )
+                for rank_position, row in enumerate(ranked_rows, start=1)
+            ]
+            db.add_all(new_items)
+            state.published_as_of = window_end_naive
+            state.last_succeeded_kst_date = kst_date
+            state.updated_at = now_utc_naive
+            db.flush()
+
+            published = True
+            active_as_of = window_end_utc
+            item_count = len(new_items)
+
+    if commit:
+        db.commit()
+
+    return PopularAggregationResult(
+        target_kst_date=kst_date,
+        window_start_utc=window_start_utc,
+        window_end_utc=window_end_utc,
+        distinct_user_count=distinct_user_count,
+        published=published,
+        published_as_of=active_as_of,
+        item_count=item_count,
+    )
+
+
+def _fetch_published_popular_rows(
+    db: Session,
+) -> list[tuple[PopularMenuRankingItem, FoodKind]]:
+    return (
+        db.query(PopularMenuRankingItem, FoodKind)
+        .join(FoodKind, PopularMenuRankingItem.food_kind_id == FoodKind.id)
+        .order_by(PopularMenuRankingItem.rank_position.asc())
+        .all()
+    )
+
+
 def get_popular_menus(db: Session) -> PopularMenusResponse:
-    """요즘 인기 메뉴를 조회한다. 실제 집계 순위 발행 전에는 DB의 초기 인기 8종을 위치순으로 반환한다."""
+    """요즘 인기 메뉴를 조회한다. 발행된 실제 순위가 있으면 저장 순위를, 없으면 초기 인기 8종을 반환한다."""
+    state = (
+        db.query(PopularMenuRankingState)
+        .filter(PopularMenuRankingState.id == POPULAR_RANKING_STATE_ID)
+        .one_or_none()
+    )
+    if state is not None and state.published_as_of is not None:
+        ranking_rows = _fetch_published_popular_rows(db)
+        items = [
+            PopularMenuItemResponse(
+                food_kind_id=food_kind.id,
+                name=food_kind.name,
+                image_url=resolve_menu_illustration_url(food_kind.representative_image_url),
+            )
+            for _item, food_kind in ranking_rows
+        ]
+        return PopularMenusResponse(
+            source="aggregated",
+            as_of=_as_utc(state.published_as_of),
+            items=items,
+        )
+
     rows = _fetch_initial_popular_rows(db)
     if not rows:
         try:

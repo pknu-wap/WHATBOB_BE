@@ -15,6 +15,7 @@ from app.auth.router import router as auth_router
 from app.auth.transition_router import router as transition_auth_router
 from app.core.database import Base, SessionLocal, engine
 from app.menus.popular import ensure_initial_popular_food_kinds
+from app.menus.popular_scheduler import popular_ranking_scheduler_loop
 from app.menus.router import router as menus_router
 from app.recommend.common import RecommendationDomainException
 from app.recommend.router import router as recommend_router
@@ -40,14 +41,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"데이터베이스 연결 실패 (DB가 아직 실행되지 않았을 수 있습니다): {e}")
     cleanup_task = asyncio.create_task(room_cleanup_loop())
+    popular_ranking_task = asyncio.create_task(popular_ranking_scheduler_loop())
     try:
         yield
     finally:
-        cleanup_task.cancel()
-        try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            pass
+        for task in (cleanup_task, popular_ranking_task):
+            task.cancel()
+        for task in (cleanup_task, popular_ranking_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(
