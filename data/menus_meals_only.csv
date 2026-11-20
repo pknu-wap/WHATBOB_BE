@@ -93,10 +93,6 @@ D105-216400000-0001,된장국_호박,된장국,국 및 탕류,호박,,home_style
 D105-216410000-0001,된장국_호박잎,된장국,국 및 탕류,호박잎,,home_style,main_meal,True,soup_stew,veggie_tofu,mild_clean,hot,light,481.5,0.4,0.32,0.54,0.07,163.0,"[""대두(콩)""]"
 D105-219420000-0001,무국_홍합,무국,국 및 탕류,홍합,,home_style,main_meal,True,soup_stew,seafood,mild_clean,hot,light,562.5,0.79,2.03,0.86,0.24,233.0,"[""조개류(굴/전복/홍합 포함)"", ""해산물""]"
 D105-220140000-0001,묵국_메밀묵,묵국,국 및 탕류,메밀묵,,home_style,main_meal,True,soup_stew,other,mild_clean,hot,light,549.0,1.0,0.4,3.57,0.28,238.0,"[""메밀""]"
-D105-223000000-0001,미역국,미역국,국 및 탕류,,,home_style,main_meal,True,soup_stew,veggie_tofu,mild_clean,hot,light,504.0,0.65,0.61,0.87,0.27,168.0,[]
-D105-223100000-0001,미역국_대합,미역국,국 및 탕류,대합,,home_style,main_meal,True,soup_stew,veggie_tofu,mild_clean,hot,light,499.5,1.23,0.45,0.56,0.01,232.0,[]
-D105-223220000-0001,미역국_새우,미역국,국 및 탕류,새우,,home_style,main_meal,True,soup_stew,seafood,mild_clean,hot,light,522.0,1.09,0.46,1.83,0.0,5.0,"[""새우"", ""해산물""]"
-D105-223240000-0001,미역국_소고기,미역국,국 및 탕류,소고기,,home_style,main_meal,True,soup_stew,beef,mild_clean,hot,light,508.5,1.86,0.26,0.82,0.52,196.0,"[""쇠고기(소고기)""]"
 D105-225240000-0001,배추국_소고기,배추국,국 및 탕류,소고기,,home_style,main_meal,True,soup_stew,beef,mild_clean,hot,light,522.0,1.84,0.41,1.14,0.0,248.0,"[""쇠고기(소고기)""]"
 D105-226000000-0001,북어국,북어국,국 및 탕류,,,home_style,main_meal,True,soup_stew,seafood,mild_clean,hot,light,576.0,3.89,0.98,0.84,0.12,232.0,[]
 D105-227000000-0001,사골국,사골국,국 및 탕류,,,home_style,main_meal,True,soup_stew,other,mild_clean,hot,light,697.5,5.56,2.42,2.81,0.0,75.0,[]
@@ -110,7 +106,6 @@ D105-245080000-0001,육개장_닭고기,육개장,국 및 탕류,닭고기,,home
 D105-247000000-0001,장어탕,장어탕,국 및 탕류,,,home_style,main_meal,True,soup_stew,seafood,mild_clean,hot,moderate,885.5,4.32,3.91,3.68,2.66,387.0,"[""해산물""]"
 D105-248000000-0001,재첩국,재첩국,국 및 탕류,,,home_style,main_meal,True,soup_stew,seafood,mild_clean,hot,light,553.5,0.67,0.29,4.54,0.0,126.0,"[""조개류(굴/전복/홍합 포함)""]"
 D105-250000000-0001,조개국,조개국,국 및 탕류,,,home_style,main_meal,True,soup_stew,seafood,mild_clean,hot,light,522.0,1.67,0.89,0.25,0.18,297.0,"[""조개류(굴/전복/홍합 포함)"", ""해산물""]"
-D105-253000000-0001,콩나물국,콩나물국,국 및 탕류,,,home_style,main_meal,True,soup_stew,veggie_tofu,mild_clean,hot,light,477.0,0.74,0.09,0.61,0.16,219.0,"[""대두(콩)""]"
 D105-255000000-0001,토란국,토란국,국 및 탕류,,,home_style,main_meal,True,soup_stew,other,mild_clean,hot,light,522.0,1.0,0.12,2.61,0.27,190.0,[]
 D105-272000000-0001,동태국,동태국,국 및 탕류,,,home_style,main_meal,True,soup_stew,seafood,mild_clean,hot,light,526.5,2.42,0.16,1.4,0.0,224.0,"[""해산물""]"
 D106-259000000-0001,갈치찌개,갈치찌개,찌개 및 전골류,,,home_style,main_meal,True,soup_stew,seafood,mild_clean,hot,light,621.0,5.27,1.0,1.95,0.98,91.0,"[""밀"", ""해산물""]"
@@ -186,7 +181,6 @@ D109-407000000-0001,가지전,가지전,전·적 및 부침류,,,home_style,main
 D109-408000000-0001,감자전,감자전,전·적 및 부침류,,,home_style,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,moderate,818.6,1.72,6.54,16.79,1.81,293.0,"[""밀""]"
 D109-409000000-0001,고구마전,고구마전,전·적 및 부침류,,,home_style,main_meal,False,fried_pan,veggie_tofu,sweet_savory,hot,heavy,1087.5,2.92,7.98,35.99,14.26,87.0,"[""밀""]"
 D109-412000000-0001,김치전,김치전,전·적 및 부침류,,,home_style,main_meal,False,fried_pan,other,spicy_bold,hot,moderate,812.0,5.05,4.2,19.01,4.21,240.0,"[""밀""]"
-D109-416000000-0001,달걀말이,달걀말이,전·적 및 부침류,,,home_style,main_meal,False,fried_pan,egg_dairy,mild_clean,hot,heavy,1013.2,17.21,13.21,1.45,0.0,449.0,"[""알류(달걀)"", ""밀""]"
 D109-417000000-0001,달걀부침(달걀후라이),달걀부침(달걀후라이),전·적 및 부침류,,,home_style,main_meal,False,fried_pan,egg_dairy,mild_clean,hot,heavy,1057.5,15.73,13.78,5.15,0.03,161.0,"[""알류(달걀)"", ""밀""]"
 D109-417120000-0001,달걀부침(달걀후라이)_햄,달걀부침(달걀후라이),전·적 및 부침류,햄,,home_style,main_meal,False,fried_pan,pork,spicy_bold,hot,heavy,1282.0,12.71,21.59,8.06,0.0,591.0,"[""알류(달걀)"", ""밀"", ""돼지고기""]"
 D109-421000000-0001,맛살전,맛살전,전·적 및 부침류,,,home_style,main_meal,False,fried_pan,other,spicy_bold,hot,moderate,907.0,7.48,6.24,19.69,1.14,559.0,"[""밀""]"
@@ -200,11 +194,7 @@ D109-437060000-0001,완자전_소고기,완자전,전·적 및 부침류,소고�
 D109-437080000-0001,완자전_참치,완자전,전·적 및 부침류,참치,,home_style,main_meal,False,fried_pan,seafood,spicy_bold,hot,moderate,930.4,15.0,6.49,13.57,3.69,567.0,"[""밀"", ""해산물""]"
 D109-437110000-0001,완자전_해물,완자전,전·적 및 부침류,해물,,home_style,main_meal,False,fried_pan,seafood,spicy_bold,hot,heavy,1088.0,11.46,11.61,18.04,3.41,591.0,"[""밀"", ""해산물""]"
 D109-441110000-0001,파전_해물,파전,전·적 및 부침류,해물,,home_style,main_meal,False,fried_pan,seafood,mild_clean,hot,moderate,932.4,5.5,8.4,18.29,0.82,300.0,"[""밀"", ""해산물""]"
-D110-450000000-0001,감자볶음,감자볶음,볶음류,,,home_style,main_meal,False,grill_stir,veggie_tofu,mild_clean,hot,moderate,719.4,1.75,4.84,12.41,3.37,318.0,[]
-D110-450320000-0001,감자볶음_채소,감자볶음,볶음류,채소,,home_style,main_meal,False,grill_stir,veggie_tofu,mild_clean,hot,moderate,743.3,2.04,5.22,13.1,0.12,208.0,[]
 D110-455160000-0001,곱창볶음_돼지고기,곱창볶음,볶음류,돼지고기,,home_style,main_meal,False,grill_stir,beef,mild_clean,hot,moderate,796.0,7.23,3.0,18.52,3.27,215.0,"[""돼지고기""]"
-D110-456000000-0001,김치볶음,김치볶음,볶음류,,,home_style,main_meal,False,grill_stir,other,spicy_bold,hot,moderate,748.6,1.38,7.94,7.27,4.45,521.0,[]
-D110-456310000-0001,김치볶음_참치,김치볶음,볶음류,참치,,home_style,main_meal,False,grill_stir,seafood,spicy_bold,hot,moderate,788.3,8.33,6.68,7.12,1.83,480.0,"[""해산물""]"
 D110-457000000-0001,낙지볶음,낙지볶음,볶음류,,,home_style,main_meal,False,grill_stir,seafood,spicy_bold,hot,light,689.9,5.77,3.77,8.6,7.91,537.0,"[""해산물""]"
 D110-461000000-0001,닭발볶음,닭발볶음,볶음류,,,home_style,main_meal,False,grill_stir,poultry,spicy_bold,hot,heavy,978.3,13.8,9.38,11.72,6.37,974.0,"[""닭고기""]"
 D110-462155200-0001,닭볶음(닭갈비)_닭가슴살_피망,닭볶음(닭갈비),볶음류,닭가슴살,피망,home_style,main_meal,False,grill_stir,beef,spicy_bold,hot,moderate,784.2,16.39,5.65,1.38,0.29,490.0,"[""닭고기"", ""쇠고기(소고기)""]"
@@ -227,8 +217,6 @@ D110-481250000-0001,소고기볶음_버섯,소고기볶음,볶음류,버섯,,hom
 D110-481320000-0001,소고기볶음_채소,소고기볶음,볶음류,채소,,home_style,main_meal,False,grill_stir,beef,mild_clean,hot,moderate,794.4,12.8,5.4,6.44,4.53,269.0,"[""쇠고기(소고기)""]"
 D110-484000000-0001,애호박볶음,애호박볶음,볶음류,,,home_style,main_meal,False,grill_stir,veggie_tofu,mild_clean,hot,light,599.7,1.32,3.62,5.3,0.42,447.0,[]
 D110-485000000-0001,양파볶음,양파볶음,볶음류,,,home_style,main_meal,False,grill_stir,other,sweet_savory,hot,light,583.0,0.99,1.54,9.51,9.15,274.0,[]
-D110-486000000-0001,어묵볶음,어묵볶음,볶음류,,,home_style,main_meal,False,grill_stir,seafood,spicy_bold,hot,heavy,1000.8,8.41,7.29,24.33,6.31,818.0,"[""해산물""]"
-D110-486320000-0001,어묵볶음_채소,어묵볶음,볶음류,채소,,home_style,main_meal,False,grill_stir,seafood,spicy_bold,hot,moderate,871.2,6.33,6.41,17.2,1.26,632.0,"[""해산물""]"
 D110-490000000-0001,유산슬,유산슬,볶음류,,,home_style,main_meal,False,grill_stir,other,mild_clean,hot,light,678.4,7.54,4.4,4.1,2.15,211.0,[]
 D110-492000000-0001,잡채,잡채,볶음류,,,home_style,main_meal,False,grill_stir,other,mild_clean,hot,moderate,842.0,4.71,3.3,24.26,0.73,360.0,[]
 D110-492290000-0001,잡채_어묵,잡채,볶음류,어묵,,home_style,main_meal,False,grill_stir,seafood,mild_clean,hot,moderate,849.5,2.34,3.78,26.13,1.5,429.0,"[""해산물""]"
@@ -238,7 +226,6 @@ D110-499000000-0001,팔보채,팔보채,볶음류,,,home_style,main_meal,False,g
 D110-501000000-0001,풋고추볶음,풋고추볶음,볶음류,,,home_style,main_meal,False,grill_stir,other,mild_clean,hot,light,628.9,1.93,3.23,8.25,4.34,276.0,[]
 D110-503320000-0001,햄볶음_채소,햄볶음,볶음류,채소,,home_style,main_meal,False,grill_stir,pork,spicy_bold,hot,heavy,977.9,10.47,11.37,9.6,3.33,803.0,"[""돼지고기""]"
 D111-514000000-0001,닭볶음탕,닭볶음탕,조림류,,,home_style,main_meal,False,steamed_braised,poultry,mild_clean,hot,moderate,765.9,11.91,3.22,8.52,0.42,376.0,"[""닭고기""]"
-D112-537000000-0001,감자튀김,감자튀김,튀김류,,,home_style,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,heavy,1361.6,4.55,17.01,35.15,0.37,78.0,"[""밀""]"
 D112-542000000-0001,김튀김,김튀김,튀김류,,,home_style,main_meal,False,fried_pan,other,spicy_bold,hot,heavy,1650.0,11.0,28.9,54.36,0.14,606.0,"[""밀""]"
 D112-547010000-0001,닭다리튀김_간장,닭다리튀김,튀김류,간장,,home_style,main_meal,False,fried_pan,poultry,mild_clean,hot,heavy,1402.8,18.86,19.6,17.88,3.71,410.0,"[""밀"", ""닭고기""]"
 D112-552000000-0001,떡강정,떡강정,튀김류,,,home_style,main_meal,False,fried_pan,other,sweet_savory,hot,heavy,1136.1,3.79,4.72,47.89,5.34,446.0,"[""밀""]"
@@ -5487,22 +5474,6 @@ D210-467330000-0002,떡볶이_치즈떡볶이,떡볶이,볶음류,치즈,,franch
 D210-467330000-0003,떡볶이_치즈로제떡볶이,떡볶이,볶음류,치즈,,franchise,main_meal,False,grill_stir,egg_dairy,spicy_bold,hot,heavy,1143.0,7.62,,,1.46,379.0,"[""우유""]"
 D210-467330000-0004,떡볶이_치즈마떡,떡볶이,볶음류,치즈,,franchise,main_meal,False,grill_stir,egg_dairy,spicy_bold,hot,heavy,1138.5,6.51,,,5.13,379.0,"[""우유""]"
 D210-467330000-0005,떡볶이_치즈가 펑펑 눈꽃 떡볶이,떡볶이,볶음류,치즈,,franchise,main_meal,False,grill_stir,egg_dairy,spicy_bold,hot,heavy,1094.7,5.04,1.86,35.29,10.35,946.0,"[""우유""]"
-D212-537000000-0001,감자튀김_BBQ 감자튀김,감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,spicy_bold,hot,heavy,1143.2,3.21,,,0.0,519.0,"[""밀""]"
-D212-537000000-0002,감자튀김_감자볼튀김,감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,heavy,1210.4,2.25,,32.59,,436.0,"[""밀""]"
-D212-537000000-0003,감자튀김_모둠 감자튀김,감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,spicy_bold,hot,heavy,1078.8,2.44,,,9.26,630.0,"[""밀""]"
-D212-537000000-0004,감자튀김_웨지감자,감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,moderate,770.8,3.0,,,0.0,286.0,"[""밀""]"
-D212-537000000-0006,감자튀김_크런치감자스틱,감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,moderate,843.6,1.6,,,0.8,355.0,"[""밀""]"
-D212-537000000-0007,감자튀김_갈릭포테이토,감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,heavy,950.0,3.0,,,0.5,23.0,"[""밀""]"
-D212-537000000-0008,감자튀김_못난이치즈감자,감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,sweet_savory,hot,heavy,952.8,3.86,,,3.57,393.0,"[""우유"", ""밀""]"
-D212-537000000-0009,감자튀김_양념감자 어니언,감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,spicy_bold,hot,heavy,1294.4,3.53,,,0.82,434.0,"[""밀""]"
-D212-537000000-0010,감자튀김_양념감자 치즈,감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,spicy_bold,hot,heavy,1302.8,3.88,,,1.65,446.0,"[""우유"", ""밀""]"
-D212-537000000-0011,감자튀김_양념감자 칠리,감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,spicy_bold,hot,heavy,1291.6,3.58,,,0.75,475.0,"[""밀""]"
-D212-537000000-0012,감자튀김_트러플포테이토스틱,감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,moderate,896.8,2.78,,,5.0,377.0,"[""밀""]"
-D212-537000000-0013,감자튀김_포테이토,감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,heavy,989.2,3.75,,,0.3,225.0,"[""밀""]"
-D212-537000000-0014,감자튀김_포테이토(L),감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,heavy,1294.4,3.68,,,0.0,354.0,"[""밀""]"
-D212-537000000-0015,감자튀김_포테이트(R),감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,heavy,1297.2,3.67,,,0.0,348.0,"[""밀""]"
-D212-537000000-0016,감자튀김_프렌치 프라이,감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,heavy,1202.0,3.75,,,0.0,278.0,"[""밀""]"
-D212-537000000-0017,감자튀김_해쉬라운즈,감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,heavy,1006.0,2.0,,,0.0,350.0,"[""밀""]"
 D212-547000000-0001,닭다리튀김_다리 스틱,닭다리튀김,튀김류,,,franchise,main_meal,False,fried_pan,poultry,mild_clean,hot,heavy,1101.2,24.23,,,2.4,325.0,"[""밀"", ""닭고기""]"
 D212-547000000-0002,닭다리튀김_황금올리브치킨 닭다리,닭다리튀김,튀김류,,,franchise,main_meal,False,fried_pan,poultry,spicy_bold,hot,heavy,1115.2,20.78,,,0.96,469.0,"[""밀"", ""닭고기""]"
 D212-547000000-0003,닭다리튀김_황올 반+양념 반 닭다리 치킨,닭다리튀김,튀김류,,,franchise,main_meal,False,fried_pan,poultry,spicy_bold,hot,heavy,1106.8,16.32,,,6.07,503.0,"[""밀"", ""닭고기""]"
@@ -5697,24 +5668,6 @@ D212-552000000-0004,떡강정_못난이소떡소떡,떡강정,튀김류,,,franch
 D212-554000000-0001,멘보샤_텃만꿍멘보샤 (4개),멘보샤,튀김류,,,franchise,main_meal,False,fried_pan,other,spicy_bold,hot,heavy,1070.4,8.3,,22.7,1.7,735.0,"[""밀""]"
 D212-554000000-0002,멘보샤_통새우 멘보샤 (5개),멘보샤,튀김류,,,franchise,main_meal,False,fried_pan,seafood,spicy_bold,hot,heavy,1227.2,8.65,,,5.19,599.0,"[""밀"", ""새우"", ""해산물""]"
 D212-561000000-0001,쥐포튀김_쥐포튀김,쥐포튀김,튀김류,,,franchise,main_meal,False,fried_pan,other,spicy_bold,hot,heavy,1566.0,12.64,,,18.75,891.0,"[""밀""]"
-D212-563000000-0001,치즈볼_고르곤 치즈볼,치즈볼,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,spicy_bold,hot,heavy,1476.4,6.51,,,16.2,501.0,"[""우유"", ""밀""]"
-D212-563000000-0002,치즈볼_로제크림치즈볼 (6개),치즈볼,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,sweet_savory,hot,heavy,1431.6,4.5,,45.6,4.5,331.0,"[""우유"", ""밀""]"
-D212-563000000-0003,치즈볼_모짜감짜 오리지널,치즈볼,튀김류,,,franchise,main_meal,False,fried_pan,poultry,sweet_savory,hot,heavy,1356.0,8.0,,,8.0,430.0,"[""우유"", ""밀""]"
-D212-563000000-0004,치즈볼_밀크치즈볼,치즈볼,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,sweet_savory,hot,heavy,1389.6,5.14,,,3.77,388.0,"[""우유"", ""밀""]"
-D212-563000000-0005,치즈볼_치즈볼 오리지널,치즈볼,튀김류,,,franchise,main_meal,False,fried_pan,poultry,sweet_savory,hot,heavy,1392.4,6.3,,,4.9,335.0,"[""우유"", ""밀""]"
-D212-563000000-0006,치즈볼_치즈쫀득볼,치즈볼,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,sweet_savory,hot,heavy,1372.8,4.91,,,7.75,336.0,"[""우유"", ""밀""]"
-D212-563000000-0007,치즈볼_트리플치즈볼 (6개),치즈볼,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,sweet_savory,hot,heavy,1157.2,9.69,,33.28,3.4,282.0,"[""우유"", ""밀""]"
-D212-563000000-0008,치즈볼_퐁듀 치즈볼,치즈볼,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,spicy_bold,hot,heavy,1456.8,4.3,,,17.76,567.0,"[""우유"", ""밀""]"
-D212-563000000-0009,치즈볼_치즈볼 6개,치즈볼,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,sweet_savory,hot,heavy,1445.6,4.17,,,9.99,224.0,"[""우유"", ""밀""]"
-D212-563000000-0010,치즈볼_크림치즈볼,치즈볼,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,sweet_savory,hot,heavy,1384.0,4.49,,,10.26,241.0,"[""우유"", ""밀""]"
-D212-564000000-0001,치즈스틱_롱치즈스틱 (1개),치즈스틱,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,sweet_savory,hot,heavy,1277.6,12.86,,,0.79,39.0,"[""우유"", ""밀""]"
-D212-564000000-0002,치즈스틱_순수치즈스틱,치즈스틱,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,spicy_bold,hot,heavy,1048.0,11.95,,,1.44,673.0,"[""우유"", ""밀""]"
-D212-564000000-0003,치즈스틱_롱치즈스틱,치즈스틱,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,spicy_bold,hot,heavy,1333.6,16.67,,,0.0,469.0,"[""우유"", ""밀""]"
-D212-564000000-0004,치즈스틱_모짜렐라치즈스틱(1개입),치즈스틱,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,spicy_bold,hot,heavy,1493.2,9.09,,,9.09,485.0,"[""우유"", ""밀""]"
-D212-564000000-0005,치즈스틱_치즈 스틱 (2개),치즈스틱,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,spicy_bold,hot,heavy,1322.4,13.64,,,2.27,577.0,"[""우유"", ""밀""]"
-D212-564000000-0006,치즈스틱_치즈 스틱 (4개),치즈스틱,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,spicy_bold,hot,heavy,1325.2,12.5,,,3.41,578.0,"[""우유"", ""밀""]"
-D212-564000000-0008,치즈스틱_치즈스틱,치즈스틱,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,sweet_savory,hot,heavy,1213.2,11.0,,,3.0,410.0,"[""우유"", ""밀""]"
-D212-564000000-0009,치즈스틱_치즈스틱 (6조각),치즈스틱,튀김류,,,franchise,main_meal,False,fried_pan,egg_dairy,spicy_bold,hot,heavy,1300.0,16.81,,,3.43,461.0,"[""우유"", ""밀""]"
 D212-567000000-0001,닭껍데기튀김_BBQ 닭껍데기,닭껍데기튀김,튀김류,,,franchise,main_meal,False,fried_pan,poultry,spicy_bold,hot,heavy,1650.0,20.42,,,0.67,938.0,"[""밀"", ""닭고기""]"
 D212-568000000-0001,닭발튀김_황올한 닭발튀김,닭발튀김,튀김류,,,franchise,main_meal,False,fried_pan,poultry,spicy_bold,hot,heavy,1650.0,17.63,,,1.88,783.0,"[""밀"", ""닭고기""]"
 D212-569000000-0001,북어튀김_아  귀한 먹태,북어튀김,튀김류,,,franchise,main_meal,False,fried_pan,seafood,spicy_bold,hot,heavy,1395.2,58.62,,,21.19,1183.0,"[""밀""]"
@@ -5771,9 +5724,6 @@ D214-640000000-0047,샐러드_콥샐러드,샐러드,생채·무침류,,,franchi
 D214-640000000-0048,샐러드_토마토치킨샐러드,샐러드,생채·무침류,,,franchise,main_meal,False,raw_salad,poultry,mild_clean,cold,moderate,792.0,5.22,,,3.48,365.0,"[""토마토"", ""닭고기""]"
 D214-640000000-0049,샐러드_포테이토&튜나샐러드,샐러드,생채·무침류,,,franchise,main_meal,False,raw_salad,veggie_tofu,mild_clean,cold,moderate,811.8,4.41,,,4.96,201.0,[]
 D214-712000000-0001,옥수수샐러드_마요옥수수,옥수수샐러드,생채·무침류,,,franchise,main_meal,False,raw_salad,veggie_tofu,mild_clean,cold,moderate,767.5,3.0,,,3.0,240.0,"[""알류(달걀)""]"
-D218-705000000-0001,소스/드레싱_이디야초콜릿디핑소스,소스/드레싱,"장류, 양념류",,,franchise,main_meal,False,other,other,sweet_savory,hot,heavy,1216.0,2.5,,,47.5,0.0,[]
-D218-707000000-0001,카레소스_치킨마크니 찍먹커리,카레소스,"장류, 양념류",,,franchise,main_meal,False,other,poultry,spicy_bold,hot,moderate,913.6,3.65,,28.01,10.24,648.0,"[""닭고기""]"
-D225-757000000-0001,견과_넛츠앤푸르츠,견과,"두류, 견과 및 종실류",,,franchise,main_meal,False,other,other,sweet_savory,hot,heavy,1650.0,17.5,37.5,37.5,17.5,5.0,[]
 D227-761000000-0001,소시지_그릴소시지,소시지,수·조·어·육류,,,franchise,main_meal,False,other,pork,spicy_bold,hot,heavy,1202.0,15.0,,,2.0,730.0,"[""돼지고기""]"
 D301-001000000-0001,계란덮밥,계란덮밥,밥류,,,restaurant,main_meal,False,rice,egg_dairy,mild_clean,hot,moderate,835.0,4.31,2.82,25.14,3.07,223.0,"[""알류(달걀)""]"
 D301-002000000-0001,곤드레나물밥,곤드레나물밥,밥류,,,restaurant,main_meal,False,rice,veggie_tofu,mild_clean,hot,moderate,865.0,2.94,2.71,28.26,0.0,26.0,[]
@@ -6007,11 +5957,6 @@ D305-218000000-0001,매생이국,매생이국,국 및 탕류,,,restaurant,main_m
 D305-219240000-0001,무국_소고기,무국,국 및 탕류,소고기,,restaurant,main_meal,True,soup_stew,beef,mild_clean,hot,light,589.5,3.55,1.0,1.95,0.88,267.0,"[""쇠고기(소고기)""]"
 D305-221110000-0001,묵말이_도토리묵,묵말이,국 및 탕류,도토리묵,,restaurant,main_meal,True,soup_stew,other,mild_clean,hot,light,684.0,0.52,0.65,6.9,0.48,247.0,[]
 D305-222000000-0001,미소된장국,미소된장국,국 및 탕류,,,restaurant,main_meal,True,soup_stew,other,mild_clean,hot,light,562.5,1.87,1.2,1.87,0.47,345.0,"[""대두(콩)""]"
-D305-223040000-0001,미역국_굴,미역국,국 및 탕류,굴,,restaurant,main_meal,True,soup_stew,seafood,mild_clean,hot,light,526.5,1.43,0.64,1.37,0.0,298.0,"[""조개류(굴/전복/홍합 포함)"", ""해산물""]"
-D305-223170000-0001,미역국_바지락,미역국,국 및 탕류,바지락,,restaurant,main_meal,True,soup_stew,seafood,mild_clean,hot,light,490.5,0.89,0.22,0.95,0.0,318.0,"[""조개류(굴/전복/홍합 포함)"", ""해산물""]"
-D305-223200000-0001,미역국_북어,미역국,국 및 탕류,북어,,restaurant,main_meal,True,soup_stew,seafood,mild_clean,hot,light,535.5,2.46,0.56,1.04,0.0,295.0,[]
-D305-223360000-0001,미역국_참치,미역국,국 및 탕류,참치,,restaurant,main_meal,True,soup_stew,seafood,mild_clean,hot,light,535.5,2.62,0.57,0.9,0.0,309.0,"[""해산물""]"
-D305-223420000-0001,미역국_홍합,미역국,국 및 탕류,홍합,,restaurant,main_meal,True,soup_stew,seafood,mild_clean,hot,light,619.0,3.03,0.72,1.78,0.0,314.0,"[""조개류(굴/전복/홍합 포함)"", ""해산물""]"
 D305-229000000-0001,새우탕_간편조리세트_전복민물새우탕,새우탕,국 및 탕류,,,franchise,main_meal,True,soup_stew,seafood,mild_clean,hot,moderate,814.0,2.85,0.45,10.07,0.91,254.0,"[""밀"", ""새우"", ""조개류(굴/전복/홍합 포함)"", ""해산물""]"
 D305-233000000-0001,소탕,소탕,국 및 탕류,,,restaurant,main_meal,True,soup_stew,other,mild_clean,hot,moderate,711.0,5.1,3.57,1.27,0.02,236.0,[]
 D305-234000000-0001,순대국,순대국,국 및 탕류,,,restaurant,main_meal,True,soup_stew,pork,mild_clean,hot,moderate,892.0,5.44,4.13,2.16,0.0,188.0,"[""돼지고기""]"
@@ -6174,8 +6119,6 @@ D309-411000000-0001,굴전,굴전,전·적 및 부침류,,,restaurant,main_meal,
 D309-413000000-0001,깻잎전,깻잎전,전·적 및 부침류,,,restaurant,main_meal,False,fried_pan,other,mild_clean,hot,heavy,1163.5,11.82,17.18,9.7,0.71,320.0,"[""밀""]"
 D309-414020000-0001,꼬치구치_낙지,꼬치구치,전·적 및 부침류,낙지,,restaurant,main_meal,False,fried_pan,seafood,mild_clean,hot,light,689.6,16.43,1.59,3.53,0.0,259.0,"[""밀"", ""해산물""]"
 D309-415000000-0001,녹두빈대떡,녹두빈대떡,전·적 및 부침류,,,restaurant,main_meal,False,fried_pan,other,mild_clean,hot,heavy,1043.5,7.94,10.27,20.93,0.1,232.0,"[""밀""]"
-D309-416030000-0001,달걀말이_달걀만,달걀말이,전·적 및 부침류,달걀만,,restaurant,main_meal,False,fried_pan,egg_dairy,mild_clean,hot,heavy,1069.2,13.3,15.31,4.83,0.4,328.0,"[""알류(달걀)"", ""밀""]"
-D309-416090000-0001,달걀말이_채소,달걀말이,전·적 및 부침류,채소,,restaurant,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,heavy,985.6,11.15,13.31,4.62,1.29,297.0,"[""알류(달걀)"", ""밀""]"
 D309-418000000-0001,동태전,동태전,전·적 및 부침류,,,restaurant,main_meal,False,fried_pan,seafood,mild_clean,hot,heavy,1012.5,16.48,11.63,6.11,0.26,318.0,"[""밀"", ""해산물""]"
 D309-419000000-0001,두부부침,두부부침,전·적 및 부침류,,,restaurant,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,moderate,860.8,12.13,9.4,2.69,0.33,132.0,"[""대두(콩)"", ""밀""]"
 D309-420000000-0001,두부전,두부전,전·적 및 부침류,,,restaurant,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,moderate,938.3,13.64,10.58,5.0,0.02,211.0,"[""대두(콩)"", ""밀""]"
@@ -6198,10 +6141,8 @@ D309-445000000-0001,호박전,호박전,전·적 및 부침류,,,restaurant,main
 D309-446000000-0001,홍합산적,홍합산적,전·적 및 부침류,,,restaurant,main_meal,False,fried_pan,seafood,spicy_bold,hot,heavy,992.8,22.23,6.0,13.22,4.17,900.0,"[""밀"", ""조개류(굴/전복/홍합 포함)"", ""해산물""]"
 D309-447000000-0001,화양적,화양적,전·적 및 부침류,,,restaurant,main_meal,False,fried_pan,other,spicy_bold,hot,heavy,969.0,9.05,9.85,14.23,0.81,531.0,"[""밀""]"
 D310-449000000-0002,감바스_간편조리세트_감바스 알 아히요,감바스,볶음류,,,franchise,main_meal,False,grill_stir,other,mild_clean,hot,heavy,1650.0,6.54,22.52,18.56,1.42,346.0,[]
-D310-450040000-0001,감자볶음_감자만,감자볶음,볶음류,감자만,,restaurant,main_meal,False,grill_stir,veggie_tofu,mild_clean,hot,moderate,822.6,1.9,6.86,16.18,1.44,353.0,[]
 D310-453000000-0001,고추잡채_간편조리세트_고추잡채 꽃빵키트,고추잡채,볶음류,,,franchise,main_meal,False,grill_stir,other,mild_clean,hot,heavy,1198.5,6.76,5.62,22.5,4.77,199.0,"[""밀""]"
 D310-455170000-0001,곱창볶음_돼지껍데기,곱창볶음,볶음류,돼지껍데기,,restaurant,main_meal,False,grill_stir,beef,spicy_bold,hot,heavy,1122.5,17.2,11.13,16.33,3.67,520.0,"[""돼지고기""]"
-D310-456120000-0001,김치볶음_김치만,김치볶음,볶음류,김치만,,restaurant,main_meal,False,grill_stir,other,spicy_bold,hot,moderate,831.0,2.63,10.35,7.17,2.99,782.0,[]
 D310-459000000-0001,느타리버섯볶음,느타리버섯볶음,볶음류,,,restaurant,main_meal,False,grill_stir,veggie_tofu,spicy_bold,hot,light,682.2,3.61,4.66,7.69,3.24,453.0,[]
 D310-460000000-0001,닭모래집볶음,닭모래집볶음,볶음류,,,restaurant,main_meal,False,grill_stir,poultry,mild_clean,hot,moderate,936.0,28.11,5.8,2.82,2.73,364.0,"[""닭고기""]"
 D310-462000000-0001,닭볶음(닭갈비)_간편조리세트_모짜렐라 치즈 닭갈비,닭볶음(닭갈비),볶음류,,,franchise,main_meal,False,grill_stir,beef,spicy_bold,hot,heavy,1116.6,11.59,5.41,13.82,6.51,473.0,"[""우유"", ""닭고기"", ""쇠고기(소고기)""]"
@@ -6244,8 +6185,6 @@ D310-493000000-0001,주꾸미볶음,주꾸미볶음,볶음류,,,restaurant,main_
 D310-494000000-0001,주꾸미삼겹살,주꾸미삼겹살,볶음류,,,restaurant,main_meal,False,grill_stir,seafood,mild_clean,hot,moderate,905.4,10.11,8.66,10.66,5.41,280.0,"[""돼지고기"", ""해산물""]"
 D310-502000000-0001,해물볶음,해물볶음,볶음류,,,restaurant,main_meal,False,grill_stir,seafood,mild_clean,hot,moderate,855.3,9.55,3.83,8.05,1.85,439.0,"[""해산물""]"
 D311-514000000-0001,닭볶음탕_간편조리세트_곱도리탕,닭볶음탕,조림류,,,franchise,main_meal,False,steamed_braised,poultry,mild_clean,hot,moderate,918.3,6.66,4.21,10.62,4.29,359.0,"[""닭고기""]"
-D312-537000000-0001,감자튀김_간편조리세트_몬스터 치즈 프라이,감자튀김,튀김류,,,franchise,main_meal,False,fried_pan,veggie_tofu,sweet_savory,hot,heavy,1650.0,5.54,17.74,21.78,3.56,334.0,"[""우유"", ""밀""]"
-D312-537000000-0003,감자튀김_간편조리세트_감자튀김,감자튀김,튀김류,,,restaurant,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,heavy,1334.6,4.5,13.75,41.35,0.32,299.0,"[""밀""]"
 D312-538000000-0001,고구마맛탕,고구마맛탕,튀김류,,,restaurant,main_meal,False,fried_pan,veggie_tofu,sweet_savory,hot,heavy,1130.8,1.65,5.5,47.3,19.35,38.0,"[""밀""]"
 D312-539000000-0001,고구마튀김,고구마튀김,튀김류,,,restaurant,main_meal,False,fried_pan,veggie_tofu,sweet_savory,hot,heavy,1175.9,2.72,11.87,33.8,7.72,148.0,"[""밀""]"
 D312-540000000-0001,고추튀김,고추튀김,튀김류,,,restaurant,main_meal,False,fried_pan,other,mild_clean,hot,heavy,1036.0,7.6,12.6,14.6,2.3,249.0,"[""밀""]"
@@ -6313,14 +6252,11 @@ D312-558030000-0001,북어강정_고추장양념,북어강정,튀김류,고추�
 D312-559000000-0001,생선까스,생선까스,튀김류,,,restaurant,main_meal,False,fried_pan,seafood,mild_clean,hot,heavy,1417.8,12.17,20.55,23.28,0.98,394.0,"[""밀"", ""해산물""]"
 D312-560000000-0001,양파링튀김,양파링튀김,튀김류,,,restaurant,main_meal,False,fried_pan,other,spicy_bold,hot,heavy,1650.0,3.86,25.23,43.58,5.43,776.0,"[""밀""]"
 D312-561000000-0001,쥐포튀김,쥐포튀김,튀김류,,,restaurant,main_meal,False,fried_pan,other,spicy_bold,hot,heavy,1485.6,9.62,16.49,42.5,7.96,717.0,"[""밀""]"
-D312-563000000-0001,치즈볼,치즈볼,튀김류,,,restaurant,main_meal,False,fried_pan,egg_dairy,spicy_bold,hot,heavy,1432.4,9.56,20.0,28.66,5.48,532.0,"[""우유"", ""밀""]"
-D312-564000000-0001,치즈스틱,치즈스틱,튀김류,,,restaurant,main_meal,False,fried_pan,egg_dairy,spicy_bold,hot,heavy,1428.6,12.59,21.85,20.57,1.84,596.0,"[""우유"", ""밀""]"
 D312-565000000-0001,치킨가스,치킨가스,튀김류,,,restaurant,main_meal,False,fried_pan,poultry,mild_clean,hot,heavy,1316.6,13.96,16.96,22.01,2.08,390.0,"[""밀"", ""닭고기""]"
 D312-566000000-0001,탕수육_간편조리세트_김치피자탕수육,탕수육,튀김류,,,franchise,main_meal,False,fried_pan,pork,spicy_bold,hot,heavy,1484.2,12.36,10.67,20.47,7.37,399.0,"[""밀"", ""돼지고기""]"
 D312-567000000-0001,닭껍데기튀김,닭껍데기튀김,튀김류,,,restaurant,main_meal,False,fried_pan,poultry,spicy_bold,hot,heavy,1650.0,16.19,48.23,27.99,0.7,532.0,"[""밀"", ""닭고기""]"
 D312-584000000-0001,난자완스,난자완스,튀김류,,,restaurant,main_meal,False,fried_pan,other,mild_clean,hot,moderate,945.1,10.81,10.17,9.57,0.25,352.0,"[""밀""]"
 D314-612380000-0001,냉채_해파리,냉채,생채·무침류,해파리,,restaurant,main_meal,False,raw_salad,other,mild_clean,cold,light,473.5,4.13,0.93,8.93,7.6,339.0,[]
-D314-619000000-0001,도라지생채,도라지생채,생채·무침류,,,restaurant,main_meal,False,raw_salad,other,spicy_bold,cold,light,676.5,2.75,1.11,24.52,9.6,522.0,[]
 D314-630000000-0001,물회,물회,생채·무침류,,,restaurant,main_meal,False,raw_salad,seafood,mild_clean,cold,light,640.0,4.91,2.7,7.9,2.86,299.0,"[""해산물""]"
 D314-630180000-0001,물회_생선,물회,생채·무침류,생선,,restaurant,main_meal,False,raw_salad,seafood,mild_clean,cold,light,620.0,4.29,1.54,10.31,6.5,347.0,"[""해산물""]"
 D314-640000000-0001,샐러드_간편조리세트_콥샐러드&시저드레싱,샐러드,생채·무침류,,,franchise,main_meal,False,raw_salad,veggie_tofu,mild_clean,cold,moderate,886.9,8.75,8.4,4.55,1.89,339.0,[]
@@ -6330,11 +6266,7 @@ D314-640224600-0001,샐러드_양배추_코올슬로,샐러드,생채·무침류
 D314-652000000-0001,탕평채,탕평채,생채·무침류,,,restaurant,main_meal,False,raw_salad,other,mild_clean,cold,light,599.5,3.55,3.81,12.26,0.39,260.0,[]
 D316-686010000-0001,게장_간장,게장,젓갈류,간장,,restaurant,main_meal,False,other,seafood,spicy_bold,neutral,light,675.6,12.25,2.31,4.47,2.93,910.0,"[""게"", ""해산물""]"
 D316-686020000-0001,게장_양념,게장,젓갈류,양념,,restaurant,main_meal,False,other,seafood,spicy_bold,neutral,moderate,744.0,12.24,3.3,8.07,4.93,607.0,"[""게"", ""해산물""]"
-D318-705000000-0001,소스/드레싱_간편조리세트_오야꼬동 (밥제외),소스/드레싱,"장류, 양념류",,,franchise,main_meal,False,other,other,spicy_bold,hot,heavy,964.2,8.93,5.54,7.66,5.93,530.0,[]
-D318-707000000-0001,카레소스,카레소스,"장류, 양념류",,,restaurant,main_meal,False,other,other,mild_clean,hot,heavy,978.5,9.16,8.38,6.02,2.86,264.0,[]
 D324-128012800-0001,고구마_밤고구마_삶은것,고구마,"곡류, 서류 제품",밤고구마,삶은것,restaurant,main_meal,False,other,veggie_tofu,sweet_savory,hot,moderate,790.1,2.45,0.12,30.17,18.43,79.0,[]
-D324-756000000-0001,팝콘,팝콘,"곡류, 서류 제품",,,restaurant,main_meal,False,other,other,spicy_bold,hot,heavy,1650.0,8.3,27.34,58.06,0.38,500.0,[]
-D324-756020000-0001,팝콘_카라멜,팝콘,"곡류, 서류 제품",카라멜,,restaurant,main_meal,False,other,other,sweet_savory,hot,heavy,1650.0,5.92,19.56,69.79,27.42,105.0,[]
 D327-758010000-0001,달걀_삶은것,달걀,수·조·어·육류,삶은것,,restaurant,main_meal,False,other,egg_dairy,mild_clean,hot,moderate,882.6,12.8,10.65,0.63,0.62,127.0,"[""알류(달걀)""]"
 D327-758011000-0001,달걀_삶은것_노른자,달걀,수·조·어·육류,삶은것,노른자,restaurant,main_meal,False,other,egg_dairy,mild_clean,hot,heavy,1551.6,15.66,32.31,1.17,0.23,46.0,"[""알류(달걀)""]"
 D327-758015600-0001,달걀_삶은것_흰자,달걀,수·조·어·육류,삶은것,흰자,restaurant,main_meal,False,other,egg_dairy,mild_clean,hot,light,555.6,11.42,0.29,0.01,0.32,186.0,"[""알류(달걀)""]"
@@ -6481,9 +6413,6 @@ D405-226370000-0001,북어국_콩나물,북어국,국 및 탕류,콩나물,,rest
 D405-226480000-0001,북어국_달걀,북어국,국 및 탕류,달걀,,restaurant,main_meal,True,soup_stew,seafood,mild_clean,hot,light,594.0,4.9,0.91,0.89,0.3,150.0,"[""알류(달걀)""]"
 D405-245240000-0001,육개장_소고기,육개장,국 및 탕류,소고기,,restaurant,main_meal,True,soup_stew,beef,spicy_bold,hot,light,691.2,2.0,2.69,2.03,0.63,220.0,"[""쇠고기(소고기)""]"
 D405-245500000-0001,육개장_돼지고기,육개장,국 및 탕류,돼지고기,,restaurant,main_meal,True,soup_stew,beef,spicy_bold,hot,light,657.0,5.8,1.23,3.47,1.1,186.0,"[""돼지고기""]"
-D405-253020000-0001,콩나물국_고춧가루,콩나물국,국 및 탕류,고춧가루,,restaurant,main_meal,True,soup_stew,veggie_tofu,spicy_bold,hot,light,486.0,0.8,0.25,0.92,0.14,171.0,"[""대두(콩)""]"
-D405-253060000-0001,콩나물국_김치,콩나물국,국 및 탕류,김치,,restaurant,main_meal,True,soup_stew,veggie_tofu,spicy_bold,hot,light,490.5,0.9,0.27,1.1,0.26,164.0,"[""대두(콩)""]"
-D405-253530000-0001,콩나물국_청양고추,콩나물국,국 및 탕류,청양고추,,restaurant,main_meal,True,soup_stew,veggie_tofu,mild_clean,hot,light,486.0,0.9,0.25,0.97,0.16,179.0,"[""대두(콩)""]"
 D405-261000000-0001,감자 된장국,감자 된장국,국 및 탕류,,,restaurant,main_meal,True,soup_stew,veggie_tofu,mild_clean,hot,light,549.0,1.4,0.32,3.31,0.3,216.0,"[""대두(콩)""]"
 D405-263000000-0001,건새우 미역국,건새우 미역국,국 및 탕류,,,restaurant,main_meal,True,soup_stew,seafood,mild_clean,hot,light,571.5,3.8,1.04,0.92,0.0,364.0,"[""새우"", ""해산물""]"
 D405-264000000-0001,고디국(다슬기맑은국),고디국(다슬기맑은국),국 및 탕류,,,restaurant,main_meal,True,soup_stew,seafood,mild_clean,hot,light,526.5,1.4,0.71,1.58,0.23,96.0,[]
@@ -6706,7 +6635,6 @@ D409-415050000-0001,녹두빈대떡_돼지고기,녹두빈대떡,전·적 및 �
 D409-415090000-0001,녹두빈대떡_채소,녹두빈대떡,전·적 및 부침류,채소,,restaurant,main_meal,False,fried_pan,veggie_tofu,spicy_bold,hot,moderate,707.9,4.3,1.98,16.57,2.02,704.0,"[""밀""]"
 D409-415110000-0001,녹두빈대떡_해물,녹두빈대떡,전·적 및 부침류,해물,,restaurant,main_meal,False,fried_pan,seafood,spicy_bold,hot,light,668.9,6.0,2.02,10.95,1.58,656.0,"[""밀"", ""해산물""]"
 D409-415111500-0001,녹두빈대떡_해물_돼지고기,녹두빈대떡,전·적 및 부침류,해물,돼지고기,restaurant,main_meal,False,fried_pan,seafood,spicy_bold,hot,moderate,718.7,9.0,2.58,10.63,1.49,560.0,"[""밀"", ""돼지고기"", ""해산물""]"
-D409-416150000-0001,달걀말이_부추,달걀말이,전·적 및 부침류,부추,,restaurant,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,moderate,735.2,7.0,7.4,0.9,0.4,187.0,"[""알류(달걀)"", ""밀""]"
 D409-428000000-0001,새송이버섯전,새송이버섯전,전·적 및 부침류,,,restaurant,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,light,611.3,3.16,3.73,5.89,0.17,93.0,"[""밀""]"
 D409-435000000-0001,어육소시지전,어육소시지전,전·적 및 부침류,,,restaurant,main_meal,False,fried_pan,pork,mild_clean,hot,heavy,956.2,8.23,10.14,12.73,2.04,441.0,"[""밀"", ""돼지고기""]"
 D409-437000000-0001,완자전,완자전,전·적 및 부침류,,,restaurant,main_meal,False,fried_pan,other,mild_clean,hot,heavy,1081.2,7.1,15.49,10.73,0.36,108.0,"[""밀""]"
@@ -6729,14 +6657,7 @@ D409-460000000-0001,해물 완자전,해물 완자전,전·적 및 부침류,,,r
 D410-448010000-0001,가지볶음_가지,가지볶음,볶음류,가지,,restaurant,main_meal,False,grill_stir,veggie_tofu,mild_clean,hot,light,526.7,0.9,2.17,3.36,1.55,207.0,[]
 D410-448010400-0001,가지볶음_가지_고추,가지볶음,볶음류,가지,고추,restaurant,main_meal,False,grill_stir,veggie_tofu,mild_clean,hot,light,500.7,0.91,1.27,3.36,1.65,163.0,[]
 D410-448011300-0001,가지볶음_가지_당근,가지볶음,볶음류,가지,당근,restaurant,main_meal,False,grill_stir,veggie_tofu,mild_clean,hot,light,531.4,0.93,1.94,4.56,2.21,169.0,[]
-D410-450030000-0001,감자볶음_감자,감자볶음,볶음류,감자,,restaurant,main_meal,False,grill_stir,veggie_tofu,mild_clean,hot,light,570.8,1.23,1.31,8.95,0.19,162.0,[]
-D410-450031300-0001,감자볶음_감자_당근,감자볶음,볶음류,감자,당근,restaurant,main_meal,False,grill_stir,veggie_tofu,mild_clean,hot,light,557.0,1.08,1.36,7.79,0.42,125.0,[]
-D410-450360000-0001,감자볶음_풋고추,감자볶음,볶음류,풋고추,,restaurant,main_meal,False,grill_stir,veggie_tofu,mild_clean,hot,moderate,718.0,2.8,3.09,16.68,3.88,405.0,[]
-D410-450470000-0001,감자볶음_양파,감자볶음,볶음류,양파,,restaurant,main_meal,False,grill_stir,veggie_tofu,mild_clean,hot,moderate,781.4,2.5,4.96,17.12,3.51,287.0,[]
-D410-450520000-0001,감자볶음_햄,감자볶음,볶음류,햄,,restaurant,main_meal,False,grill_stir,pork,spicy_bold,hot,moderate,904.1,5.0,9.72,13.05,0.88,665.0,"[""돼지고기""]"
 D410-453000000-0001,고추잡채,고추잡채,볶음류,,,restaurant,main_meal,False,grill_stir,other,mild_clean,hot,moderate,703.6,4.18,3.91,4.21,1.49,159.0,[]
-D410-456110000-0001,김치볶음_김치,김치볶음,볶음류,김치,,restaurant,main_meal,False,grill_stir,other,spicy_bold,hot,light,521.7,0.98,1.62,3.76,1.97,347.0,[]
-D410-456160000-0001,김치볶음_돼지고기,김치볶음,볶음류,돼지고기,,restaurant,main_meal,False,grill_stir,pork,spicy_bold,hot,light,595.8,2.4,3.34,4.6,2.23,398.0,"[""돼지고기""]"
 D410-459140000-0001,느타리버섯볶음_느타리버섯,느타리버섯볶음,볶음류,느타리버섯,,restaurant,main_meal,False,grill_stir,veggie_tofu,mild_clean,hot,light,484.5,1.25,1.42,2.36,0.5,130.0,[]
 D410-464160000-0001,돼지고기볶음_돼지고기,돼지고기볶음,볶음류,돼지고기,,restaurant,main_meal,False,grill_stir,pork,mild_clean,hot,heavy,987.5,9.53,7.88,6.43,2.85,168.0,"[""돼지고기""]"
 D410-464162400-0001,돼지고기볶음_돼지고기_버섯,돼지고기볶음,볶음류,돼지고기,버섯,restaurant,main_meal,False,grill_stir,pork,mild_clean,hot,moderate,898.5,8.41,4.87,6.51,2.95,211.0,"[""돼지고기""]"
@@ -6757,8 +6678,6 @@ D410-481000000-0001,소고기볶음,소고기볶음,볶음류,,,restaurant,main_
 D410-482320000-0001,소시지볶음_채소,소시지볶음,볶음류,채소,,restaurant,main_meal,False,grill_stir,pork,mild_clean,hot,moderate,831.0,7.01,8.95,6.15,2.13,439.0,"[""돼지고기""]"
 D410-483100000-0001,순대볶음_곱창,순대볶음,볶음류,곱창,,restaurant,main_meal,False,grill_stir,beef,mild_clean,hot,heavy,956.5,5.45,4.74,13.19,2.63,312.0,"[""돼지고기""]"
 D410-483320000-0001,순대볶음_채소,순대볶음,볶음류,채소,,restaurant,main_meal,False,grill_stir,pork,mild_clean,hot,light,697.8,1.8,2.71,14.81,2.52,312.0,"[""돼지고기""]"
-D410-486290000-0001,어묵볶음_어묵,어묵볶음,볶음류,어묵,,restaurant,main_meal,False,grill_stir,seafood,mild_clean,hot,light,680.9,5.07,2.93,11.02,2.39,399.0,"[""해산물""]"
-D410-486294300-0001,어묵볶음_어묵_채소,어묵볶음,볶음류,어묵,채소,restaurant,main_meal,False,grill_stir,seafood,mild_clean,hot,light,655.0,4.23,2.76,9.87,2.36,345.0,"[""해산물""]"
 D410-487000000-0001,오리볶음,오리볶음,볶음류,,,restaurant,main_meal,False,grill_stir,poultry,mild_clean,hot,heavy,1183.3,10.47,11.27,7.3,2.65,254.0,[]
 D410-488320000-0001,오징어볶음_채소,오징어볶음,볶음류,채소,,restaurant,main_meal,False,grill_stir,seafood,mild_clean,hot,moderate,719.0,10.06,2.16,7.23,3.38,288.0,"[""오징어"", ""해산물""]"
 D410-492270000-0001,잡채_소고기,잡채,볶음류,소고기,,restaurant,main_meal,False,grill_stir,beef,mild_clean,hot,moderate,902.9,3.8,7.33,21.09,2.83,412.0,"[""쇠고기(소고기)""]"
@@ -6841,7 +6760,6 @@ D412-616000000-0001,조기튀김,조기튀김,튀김류,,,restaurant,main_meal,F
 D412-618000000-0001,채소튀김,채소튀김,튀김류,,,restaurant,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,moderate,723.9,1.3,5.28,11.65,1.45,138.0,"[""밀""]"
 D412-619000000-0001,탕수어,탕수어,튀김류,,,restaurant,main_meal,False,fried_pan,other,sweet_savory,hot,heavy,1237.6,12.6,7.71,38.96,8.41,322.0,"[""밀""]"
 D414-608000000-0001,과일샐러드,과일샐러드,생채·무침류,,,restaurant,main_meal,False,raw_salad,veggie_tofu,mild_clean,cold,light,522.5,0.38,5.49,6.74,4.79,37.0,[]
-D414-619500000-0001,도라지생채_북어,도라지생채,생채·무침류,북어,,restaurant,main_meal,False,raw_salad,seafood,spicy_bold,cold,moderate,792.0,20.1,2.38,12.47,4.66,745.0,[]
 D414-621000000-0001,돌나물,돌나물,생채·무침류,,,restaurant,main_meal,False,raw_salad,veggie_tofu,mild_clean,cold,light,380.0,0.64,0.39,5.23,2.46,154.0,[]
 D414-664000000-0001,감자샐러드,감자샐러드,생채·무침류,,,restaurant,main_meal,False,raw_salad,veggie_tofu,mild_clean,cold,moderate,823.5,2.7,9.97,15.59,3.11,308.0,[]
 D414-665000000-0001,겨자채,겨자채,생채·무침류,,,restaurant,main_meal,False,raw_salad,other,mild_clean,cold,light,680.0,5.4,8.88,4.02,2.31,18.0,[]
@@ -6867,11 +6785,6 @@ D414-721000000-0001,콩나물냉채,콩나물냉채,생채·무침류,,,restaura
 D414-721260000-0001,콩나물냉채_오이,콩나물냉채,생채·무침류,오이,,restaurant,main_meal,False,raw_salad,veggie_tofu,mild_clean,cold,light,407.0,2.8,0.96,6.95,3.36,153.0,"[""대두(콩)""]"
 D414-723000000-0001,해파리냉채,해파리냉채,생채·무침류,,,restaurant,main_meal,False,raw_salad,other,mild_clean,cold,light,380.0,1.5,0.46,5.64,3.23,321.0,[]
 D414-724000000-0001,햄샐러드,햄샐러드,생채·무침류,,,restaurant,main_meal,False,raw_salad,pork,mild_clean,cold,moderate,781.5,4.4,7.38,16.65,5.87,178.0,"[""돼지고기""]"
-D418-706000000-0001,짜장소스,짜장소스,"장류, 양념류",,,restaurant,main_meal,False,other,other,spicy_bold,hot,moderate,717.6,4.3,3.71,12.86,4.15,538.0,[]
-D418-708000000-0001,고춧가루 양념장,고춧가루 양념장,"장류, 양념류",,,restaurant,main_meal,False,other,other,spicy_bold,hot,moderate,840.8,5.9,7.19,14.39,1.95,1416.0,[]
-D418-709000000-0001,기름장,기름장,"장류, 양념류",,,restaurant,main_meal,False,other,other,spicy_bold,hot,heavy,1650.0,0.2,69.06,0.92,0.01,7518.0,[]
-D418-710000000-0001,쌈장,쌈장,"장류, 양념류",,,restaurant,main_meal,False,other,other,spicy_bold,hot,moderate,835.8,6.5,4.55,20.13,8.46,2335.0,[]
-D418-712000000-0001,초간장,초간장,"장류, 양념류",,,restaurant,main_meal,False,other,other,spicy_bold,hot,light,621.6,6.6,0.0,11.33,0.0,3189.0,[]
 D424-757000000-0001,감자범벅,감자범벅,"곡류, 서류 제품",,,restaurant,main_meal,False,other,veggie_tofu,spicy_bold,hot,light,686.2,2.3,0.05,21.91,4.44,600.0,[]
 D426-758000000-0001,파강회,파강회,"채소, 해조류",,,restaurant,main_meal,False,other,seafood,mild_clean,hot,light,544.4,1.2,1.71,6.33,3.39,276.0,"[""해산물""]"
 D427-763000000-0001,모듬회,모듬회,수·조·어·육류,,,restaurant,main_meal,False,other,seafood,spicy_bold,hot,moderate,801.6,22.5,2.31,5.15,2.44,493.0,"[""해산물""]"
@@ -6884,8 +6797,6 @@ D504-206000000-0001,애호박죽,애호박죽,죽 및 스프류,,,cafeteria,main
 D504-209000000-0001,찹쌀죽,찹쌀죽,죽 및 스프류,,,cafeteria,main_meal,True,rice,other,mild_clean,hot,light,480.5,1.1,0.27,13.39,0.05,130.0,[]
 D505-216071700-0001,된장국_냉이_두부,된장국,국 및 탕류,냉이,두부,cafeteria,main_meal,True,soup_stew,veggie_tofu,mild_clean,hot,light,540.0,1.82,0.63,2.0,0.43,179.0,"[""대두(콩)""]"
 D505-219246200-0001,무국_소고기_당면,무국,국 및 탕류,소고기,당면,cafeteria,main_meal,True,soup_stew,beef,mild_clean,hot,light,652.5,1.9,1.78,5.36,0.16,220.0,"[""밀"", ""쇠고기(소고기)""]"
-D505-253170000-0001,콩나물국_바지락,콩나물국,국 및 탕류,바지락,,cafeteria,main_meal,True,soup_stew,seafood,mild_clean,hot,light,477.0,0.7,0.19,0.65,0.08,118.0,"[""대두(콩)"", ""조개류(굴/전복/홍합 포함)"", ""해산물""]"
-D505-253370000-0001,콩나물국_콩나물,콩나물국,국 및 탕류,콩나물,,cafeteria,main_meal,True,soup_stew,veggie_tofu,mild_clean,hot,light,481.5,0.83,0.2,1.01,0.14,179.0,"[""대두(콩)""]"
 D505-289510000-0001,바지락 미역국_떡,바지락 미역국,국 및 탕류,떡,,cafeteria,main_meal,True,soup_stew,seafood,mild_clean,hot,light,486.0,0.9,0.15,1.14,0.04,178.0,"[""조개류(굴/전복/홍합 포함)"", ""해산물""]"
 D505-300370000-0001,소고기 무국_콩나물,소고기 무국,국 및 탕류,콩나물,,cafeteria,main_meal,True,soup_stew,beef,mild_clean,hot,light,571.5,1.9,1.64,1.06,0.37,114.0,"[""대두(콩)"", ""쇠고기(소고기)""]"
 D505-301510000-0001,소고기 미역국_떡,소고기 미역국,국 및 탕류,떡,,cafeteria,main_meal,True,soup_stew,beef,mild_clean,hot,light,558.0,1.7,1.39,1.15,0.03,178.0,"[""쇠고기(소고기)""]"
@@ -6905,7 +6816,6 @@ D506-324000000-0001,명란찌개,명란찌개,찌개 및 전골류,,,cafeteria,m
 D506-342110000-0001,애호박찌개_두부,애호박찌개,찌개 및 전골류,두부,,cafeteria,main_meal,True,soup_stew,veggie_tofu,mild_clean,hot,light,625.5,3.7,1.04,3.79,0.76,192.0,"[""대두(콩)"", ""밀""]"
 D507-317070000-0001,달걀찜_두부,달걀찜,찜류,두부,,cafeteria,main_meal,False,steamed_braised,veggie_tofu,mild_clean,hot,light,646.0,6.56,4.01,2.49,0.66,210.0,"[""알류(달걀)"", ""대두(콩)""]"
 D507-367000000-0001,소고기 떡찜,소고기 떡찜,찜류,,,cafeteria,main_meal,False,steamed_braised,beef,mild_clean,hot,heavy,1326.3,10.6,14.48,32.19,1.45,357.0,"[""쇠고기(소고기)""]"
-D509-416125800-0001,달걀말이_햄_김,달걀말이,전·적 및 부침류,햄,김,cafeteria,main_meal,False,fried_pan,pork,spicy_bold,hot,heavy,1013.6,12.6,13.3,4.97,0.52,621.0,"[""알류(달걀)"", ""밀"", ""돼지고기""]"
 D509-459000000-0001,참치 완자전,참치 완자전,전·적 및 부침류,,,cafeteria,main_meal,False,fried_pan,seafood,spicy_bold,hot,heavy,1071.4,18.8,8.84,14.84,1.73,962.0,"[""밀"", ""해산물""]"
 D509-461000000-0001,해물 채소전,해물 채소전,전·적 및 부침류,,,cafeteria,main_meal,False,fried_pan,seafood,mild_clean,hot,heavy,997.1,10.7,7.77,18.92,1.24,267.0,"[""밀"", ""해산물""]"
 D510-457320000-0001,낙지볶음_채소,낙지볶음,볶음류,채소,,cafeteria,main_meal,False,grill_stir,seafood,mild_clean,hot,light,614.0,5.42,1.59,8.11,2.6,265.0,"[""해산물""]"
@@ -6914,7 +6824,6 @@ D510-524000000-0001,양념두부,양념두부,볶음류,,,cafeteria,main_meal,Fa
 D512-551130000-0001,동태까스_소스,동태까스,튀김류,소스,,cafeteria,main_meal,False,fried_pan,seafood,mild_clean,hot,heavy,1247.0,11.6,15.64,19.42,2.61,385.0,"[""밀"", ""해산물""]"
 D512-599000000-0001,뱅어포튀김,뱅어포튀김,튀김류,,,cafeteria,main_meal,False,fried_pan,other,mild_clean,hot,heavy,1650.0,41.2,45.09,34.04,0.0,414.0,"[""밀""]"
 D512-610000000-0001,연어튀김,연어튀김,튀김류,,,cafeteria,main_meal,False,fried_pan,seafood,spicy_bold,hot,moderate,860.0,13.1,5.71,9.66,0.01,971.0,"[""밀"", ""해산물""]"
-D514-619290000-0001,도라지생채_오징어채,도라지생채,생채·무침류,오징어채,,cafeteria,main_meal,False,raw_salad,seafood,mild_clean,cold,light,582.0,9.61,1.4,10.58,4.05,446.0,"[""오징어"", ""해산물""]"
 D514-664440000-0001,감자샐러드_당근,감자샐러드,생채·무침류,당근,,cafeteria,main_meal,False,raw_salad,veggie_tofu,mild_clean,cold,light,529.5,1.2,4.49,8.31,0.87,33.0,[]
 D601-012000000-0001,돼지고기덮밥,돼지고기덮밥,밥류,,,cafeteria,main_meal,False,rice,pork,mild_clean,hot,moderate,945.0,7.92,2.72,26.17,1.91,143.0,"[""돼지고기""]"
 D601-012000000-0002,돼지고기 덮밥,돼지고기 덮밥,밥류,,,cafeteria,main_meal,False,rice,pork,mild_clean,hot,heavy,960.0,8.0,3.12,25.91,2.03,141.0,"[""돼지고기""]"
@@ -6929,12 +6838,9 @@ D603-160520000-0001,수제비_감자,수제비,면 및 만두류,감자,,cafeter
 D605-205064700-0001,김치국_김치_콩나물,김치국,국 및 탕류,김치,콩나물,cafeteria,main_meal,True,soup_stew,veggie_tofu,spicy_bold,hot,light,504.0,1.09,0.31,1.65,0.45,190.0,"[""대두(콩)""]"
 D605-205120000-0001,김치국_두부,김치국,국 및 탕류,두부,,cafeteria,main_meal,True,soup_stew,veggie_tofu,spicy_bold,hot,light,531.0,1.6,0.51,1.7,0.49,129.0,"[""대두(콩)""]"
 D605-219241700-0001,무국_소고기_두부,무국,국 및 탕류,소고기,두부,cafeteria,main_meal,True,soup_stew,beef,mild_clean,hot,light,571.5,2.0,1.58,0.92,0.33,100.0,"[""대두(콩)"", ""쇠고기(소고기)""]"
-D605-223130000-0001,미역국_들깨,미역국,국 및 탕류,들깨,,cafeteria,main_meal,True,soup_stew,veggie_tofu,mild_clean,hot,light,526.5,0.75,1.21,1.29,0.04,194.0,[]
 D605-237020000-0001,어묵국(어묵탕)_고춧가루,어묵국(어묵탕),국 및 탕류,고춧가루,,cafeteria,main_meal,True,soup_stew,seafood,spicy_bold,hot,light,585.0,1.93,0.69,4.31,0.94,252.0,"[""해산물""]"
 D605-241160000-0001,오이냉국_미역,오이냉국,국 및 탕류,미역,,cafeteria,main_meal,True,soup_stew,veggie_tofu,mild_clean,cold,light,481.5,0.7,0.18,1.32,0.31,338.0,[]
 D605-244000000-0001,유부국,유부국,국 및 탕류,,,cafeteria,main_meal,True,soup_stew,other,mild_clean,hot,light,526.5,1.08,1.02,1.13,0.2,162.0,[]
-D605-253150000-0001,콩나물국_무,콩나물국,국 및 탕류,무,,cafeteria,main_meal,True,soup_stew,veggie_tofu,mild_clean,hot,light,477.0,0.7,0.2,0.75,0.12,122.0,"[""대두(콩)""]"
-D605-253373100-0001,콩나물국_콩나물_소고기,콩나물국,국 및 탕류,콩나물,소고기,cafeteria,main_meal,True,soup_stew,beef,mild_clean,hot,light,589.5,2.51,1.66,1.75,0.42,151.0,"[""대두(콩)"", ""쇠고기(소고기)""]"
 D605-261120000-0001,감자 된장국_두부,감자 된장국,국 및 탕류,두부,,cafeteria,main_meal,True,soup_stew,veggie_tofu,mild_clean,hot,light,594.0,2.4,0.77,4.0,0.36,207.0,"[""대두(콩)""]"
 D605-275000000-0001,달래 된장국,달래 된장국,국 및 탕류,,,cafeteria,main_meal,True,soup_stew,other,mild_clean,hot,light,621.0,3.0,1.85,2.57,0.8,188.0,"[""대두(콩)""]"
 D605-300000000-0001,소고기 무국,소고기 무국,국 및 탕류,,,cafeteria,main_meal,True,soup_stew,beef,mild_clean,hot,light,553.5,1.6,1.49,0.53,0.17,135.0,"[""쇠고기(소고기)""]"
@@ -6951,9 +6857,6 @@ D609-412170000-0001,김치전_오징어,김치전,전·적 및 부침류,오징�
 D609-426110000-0001,부추전_해물,부추전,전·적 및 부침류,해물,,cafeteria,main_meal,False,fried_pan,seafood,mild_clean,hot,heavy,1052.3,9.42,7.58,25.53,1.86,374.0,"[""밀"", ""해산물""]"
 D609-444000000-0001,햄전,햄전,전·적 및 부침류,,,cafeteria,main_meal,False,fried_pan,pork,spicy_bold,hot,heavy,1148.8,19.54,13.5,8.44,1.26,731.0,"[""밀"", ""돼지고기""]"
 D609-453000000-0001,애호박부침개,애호박부침개,전·적 및 부침류,,,cafeteria,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,moderate,891.4,4.6,6.56,19.42,1.2,429.0,"[""밀""]"
-D610-450032500-0001,감자볶음_감자_베이컨,감자볶음,볶음류,감자,베이컨,cafeteria,main_meal,False,grill_stir,pork,mild_clean,hot,light,578.4,1.86,2.49,5.91,0.43,139.0,"[""돼지고기""]"
-D610-450035400-0001,감자볶음_감자_햄,감자볶음,볶음류,감자,햄,cafeteria,main_meal,False,grill_stir,pork,mild_clean,hot,light,558.6,2.57,1.75,5.29,0.44,162.0,"[""돼지고기""]"
-D610-450300000-0001,감자볶음_잔멸치,감자볶음,볶음류,잔멸치,,cafeteria,main_meal,False,grill_stir,seafood,spicy_bold,hot,moderate,874.7,6.7,6.57,16.69,2.04,547.0,[]
 D610-462204400-0001,닭볶음(닭갈비)_매운양념_치즈,닭볶음(닭갈비),볶음류,매운양념,치즈,cafeteria,main_meal,False,grill_stir,beef,spicy_bold,hot,moderate,912.2,14.44,5.45,14.98,3.75,301.0,"[""우유"", ""닭고기"", ""쇠고기(소고기)""]"
 D610-464164000-0001,돼지고기볶음_돼지고기_짜장,돼지고기볶음,볶음류,돼지고기,짜장,cafeteria,main_meal,False,grill_stir,pork,mild_clean,hot,moderate,750.0,12.01,4.09,6.37,2.3,291.0,"[""돼지고기""]"
 D610-467091900-0001,떡볶이_고추장_메추리알,떡볶이,볶음류,고추장,메추리알,cafeteria,main_meal,False,grill_stir,egg_dairy,spicy_bold,hot,moderate,705.9,3.11,1.48,19.23,3.05,255.0,"[""알류(달걀)""]"
@@ -6963,7 +6866,6 @@ D610-511000000-0001,돼지고기 피망잡채,돼지고기 피망잡채,볶음�
 D610-531000000-0001,폭찹,폭찹,볶음류,,,cafeteria,main_meal,False,grill_stir,pork,mild_clean,hot,moderate,788.6,12.2,5.35,5.73,3.49,164.0,[]
 D612-615000000-0001,장어튀김,장어튀김,튀김류,,,cafeteria,main_meal,False,fried_pan,seafood,spicy_bold,hot,heavy,1064.2,10.2,14.75,6.64,0.01,899.0,"[""밀"", ""해산물""]"
 D614-703000000-0001,양배추오이  샐러드,양배추오이  샐러드,생채·무침류,,,cafeteria,main_meal,False,raw_salad,veggie_tofu,mild_clean,cold,moderate,918.0,1.8,17.09,8.2,4.28,120.0,[]
-D618-711000000-0001,양념초장,양념초장,"장류, 양념류",,,cafeteria,main_meal,False,other,other,spicy_bold,hot,moderate,799.3,10.4,1.03,21.8,1.39,4784.0,[]
 D701-006470000-0001,기장밥_찹쌀,기장밥,밥류,찹쌀,,cafeteria,main_meal,False,rice,other,mild_clean,hot,moderate,715.0,2.4,0.37,25.52,0.16,1.0,[]
 D701-017455900-0001,볶음밥_참치_김치,볶음밥,밥류,참치,김치,cafeteria,main_meal,False,rice,seafood,spicy_bold,hot,moderate,830.0,6.2,2.16,23.26,0.62,182.0,"[""해산물""]"
 D701-017630000-0001,볶음밥_햄,볶음밥,밥류,햄,,cafeteria,main_meal,False,rice,pork,mild_clean,hot,moderate,750.0,3.0,1.74,23.6,0.66,144.0,"[""돼지고기""]"
@@ -7000,8 +6902,6 @@ D705-225000000-0001,배추국,배추국,국 및 탕류,,,cafeteria,main_meal,Tru
 D705-226151700-0001,북어국_무_두부,북어국,국 및 탕류,무,두부,cafeteria,main_meal,True,soup_stew,seafood,mild_clean,hot,light,562.5,3.4,0.74,1.01,0.23,268.0,"[""대두(콩)""]"
 D705-232000000-0001,소고기육개장,소고기육개장,국 및 탕류,,,cafeteria,main_meal,True,soup_stew,beef,spicy_bold,hot,light,562.5,1.91,1.41,1.49,0.37,125.0,"[""쇠고기(소고기)""]"
 D705-237030000-0001,어묵국(어묵탕)_고춧가루 제외,어묵국(어묵탕),국 및 탕류,고춧가루 제외,,cafeteria,main_meal,True,soup_stew,seafood,spicy_bold,hot,light,544.5,1.4,0.48,2.92,0.6,220.0,"[""해산물""]"
-D705-253380000-0001,콩나물국_콩나물만,콩나물국,국 및 탕류,콩나물만,,cafeteria,main_meal,True,soup_stew,veggie_tofu,mild_clean,hot,light,481.5,0.79,0.22,0.95,0.14,134.0,"[""대두(콩)""]"
-D705-253450000-0001,콩나물국_고추,콩나물국,국 및 탕류,고추,,cafeteria,main_meal,True,soup_stew,veggie_tofu,mild_clean,hot,light,490.5,1.1,0.3,1.12,0.13,255.0,"[""대두(콩)""]"
 D705-260000000-0001,가지냉국,가지냉국,국 및 탕류,,,cafeteria,main_meal,True,soup_stew,veggie_tofu,spicy_bold,cold,light,535.5,1.1,0.39,3.42,1.4,654.0,[]
 D705-262000000-0001,감자 호박된장국,감자 호박된장국,국 및 탕류,,,cafeteria,main_meal,True,soup_stew,veggie_tofu,mild_clean,hot,light,562.5,2.1,0.43,3.51,0.55,377.0,"[""대두(콩)""]"
 D705-265000000-0001,굴 미역국,굴 미역국,국 및 탕류,,,cafeteria,main_meal,True,soup_stew,seafood,mild_clean,hot,light,522.0,1.9,0.47,1.9,0.12,382.0,"[""조개류(굴/전복/홍합 포함)"", ""해산물""]"
@@ -7043,11 +6943,7 @@ D708-420000000-0001,삼치 양념구이,삼치 양념구이,구이류,,,cafeteri
 D708-431000000-0001,오리 간장불고기,오리 간장불고기,구이류,,,cafeteria,main_meal,False,grill_stir,beef,mild_clean,hot,moderate,704.0,12.6,2.41,6.16,2.93,313.0,"[""쇠고기(소고기)""]"
 D709-449000000-0001,달걀후라이,달걀후라이,전·적 및 부침류,,,cafeteria,main_meal,False,fried_pan,egg_dairy,mild_clean,hot,heavy,989.0,11.0,13.45,3.07,0.2,306.0,"[""알류(달걀)"", ""밀""]"
 D709-456000000-0001,연근전,연근전,전·적 및 부침류,,,cafeteria,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,light,663.7,1.9,3.53,10.31,0.57,14.0,"[""밀""]"
-D710-450410000-0001,감자볶음_당근,감자볶음,볶음류,당근,,cafeteria,main_meal,False,grill_stir,veggie_tofu,mild_clean,hot,moderate,750.0,1.7,6.19,11.81,3.34,443.0,[]
-D710-450524300-0001,감자볶음_햄_채소,감자볶음,볶음류,햄,채소,cafeteria,main_meal,False,grill_stir,pork,mild_clean,hot,light,558.6,2.6,1.75,5.29,0.44,162.0,"[""돼지고기""]"
 D710-454000000-0001,고추장볶음,고추장볶음,볶음류,,,cafeteria,main_meal,False,grill_stir,other,spicy_bold,hot,heavy,1631.1,9.5,25.57,34.64,14.29,1670.0,[]
-D710-456114200-0001,김치볶음_김치_참치,김치볶음,볶음류,김치,참치,cafeteria,main_meal,False,grill_stir,seafood,spicy_bold,hot,light,614.4,5.93,2.4,4.95,2.57,480.0,"[""해산물""]"
-D710-456520000-0001,김치볶음_햄,김치볶음,볶음류,햄,,cafeteria,main_meal,False,grill_stir,pork,spicy_bold,hot,moderate,702.0,4.2,6.81,3.23,1.78,291.0,"[""돼지고기""]"
 D710-457180000-0001,낙지볶음_떡,낙지볶음,볶음류,떡,,cafeteria,main_meal,False,grill_stir,seafood,spicy_bold,hot,moderate,717.0,16.1,0.75,8.21,2.92,598.0,"[""해산물""]"
 D710-459144300-0001,느타리버섯볶음_느타리버섯_채소,느타리버섯볶음,볶음류,느타리버섯,채소,cafeteria,main_meal,False,grill_stir,veggie_tofu,mild_clean,hot,light,542.8,1.78,2.69,4.28,1.38,213.0,[]
 D710-462200000-0001,닭볶음(닭갈비)_매운양념,닭볶음(닭갈비),볶음류,매운양념,,cafeteria,main_meal,False,grill_stir,beef,spicy_bold,hot,moderate,905.0,13.93,5.76,14.5,4.65,309.0,"[""닭고기"", ""쇠고기(소고기)""]"
@@ -7066,10 +6962,8 @@ D710-519000000-0001,세발낙지볶음,세발낙지볶음,볶음류,,,cafeteria,
 D712-576000000-0001,감자연근튀김,감자연근튀김,튀김류,,,cafeteria,main_meal,False,fried_pan,veggie_tofu,mild_clean,hot,moderate,854.4,3.8,4.31,22.74,0.38,405.0,"[""밀""]"
 D712-601000000-0001,삼치튀김,삼치튀김,튀김류,,,cafeteria,main_meal,False,fried_pan,seafood,spicy_bold,hot,moderate,828.2,13.8,6.86,3.43,0.01,912.0,"[""밀""]"
 D712-617000000-0001,참치강정,참치강정,튀김류,,,cafeteria,main_meal,False,fried_pan,seafood,spicy_bold,hot,heavy,1464.9,30.3,14.12,23.55,6.87,948.0,"[""밀"", ""해산물""]"
-D714-619260000-0001,도라지생채_오이,도라지생채,생채·무침류,오이,,cafeteria,main_meal,False,raw_salad,veggie_tofu,mild_clean,cold,light,403.5,1.3,0.52,8.79,3.9,220.0,[]
 D714-628000000-0001,무생채(무만),무생채(무만),생채·무침류,,,cafeteria,main_meal,False,raw_salad,veggie_tofu,mild_clean,cold,light,380.0,1.03,0.56,5.77,2.57,249.0,[]
 D714-640120000-0001,샐러드_마카로니,샐러드,생채·무침류,마카로니,,cafeteria,main_meal,False,raw_salad,veggie_tofu,mild_clean,cold,moderate,750.0,2.37,8.17,13.76,2.72,124.0,[]
 D714-664260000-0001,감자샐러드_오이,감자샐러드,생채·무침류,오이,,cafeteria,main_meal,False,raw_salad,veggie_tofu,spicy_bold,cold,light,624.0,1.7,6.05,11.17,0.34,1010.0,[]
 D714-670000000-0001,닭고기 샐러드,닭고기 샐러드,생채·무침류,,,cafeteria,main_meal,False,raw_salad,poultry,mild_clean,cold,light,641.5,8.6,6.85,3.17,1.08,359.0,"[""닭고기""]"
 D714-700000000-0001,양배추 사과 샐러드,양배추 사과 샐러드,생채·무침류,,,cafeteria,main_meal,False,raw_salad,veggie_tofu,sweet_savory,cold,moderate,753.5,1.1,10.68,11.56,8.29,74.0,[]
-D222-754000000-0001,과일_하루 한 컵 RED,과일,과일류,,,franchise,bakery_snack,False,other,other,mild_clean,hot,light,64.5,0.47,,,7.07,18.0,[]
