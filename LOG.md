@@ -5,6 +5,35 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-20
 
+### #64 초기 인기 메뉴 8종 공개 구현
+
+#### 변경 이유 및 내용
+
+- 실제 인기 순위가 처음 발행되기 전에도 로그인하지 않은 방문자가 홈에서 합의한 초기 인기 메뉴 8종(떡볶이 → 돈까스 → 햄버거 → 마라탕 → 파스타 → 국밥 → 짜장면 → 제육볶음)을 정해진 순서대로 조회할 수 있도록 `InitialPopularFoodKind`(`initial_popular_food_kinds`) 모델과 공개 조회 API `GET /api/menus/popular`를 구현했다.
+- 향후 #65/#66에서 추가할 실제 집계 인기 순위 테이블과 분리된 `initial_popular_food_kinds` 테이블에 위치(`position` 1~8 `CHECK` 및 `UNIQUE`)와 `food_kind_id`(`UNIQUE`, `FK -> food_kinds.id`, `NOT NULL`) 제약을 적용했다.
+- `app/menus/popular.py`에서 초기 8종 키 목록 검증·원자적 위치 교체 및 롤백(`seed_initial_popular_food_kinds`), 멱등 보장(`ensure_initial_popular_food_kinds`), 위치순 조인 조회 및 일러스트 경로 해석(`get_popular_menus`)을 구현하고 `scripts/seed_menus.py`, `scripts/migrate_issue62_food_kinds.py`, `app/main.py` 앱 수명주기에 연동했다.
+
+#### 주요 변경 파일
+
+- `app/menus/models.py`, `app/menus/popular.py`, `app/menus/schemas.py`, `app/menus/router.py`, `app/main.py`, `scripts/seed_menus.py`, `scripts/migrate_issue62_food_kinds.py`, `tests/test_ticket64_initial_popular_menus.py`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/menus/popular` 추가: 인증 없이 공개 조회 가능, 기존 `ApiResponse` 형식으로 `source: "initial"`, `as_of: null`, `items[]`(`food_kind_id`, `name`, 실제 조회 가능한 상대 `image_url`) 반환. 사용자 이름이나 개별 식사 기록을 포함하지 않으며 최근 메뉴 API와 독립적으로 동작한다.
+
+#### DB 변경
+
+- `initial_popular_food_kinds` 테이블(`id`, `position` 1..8 CHECK + UNIQUE, `food_kind_id` UNIQUE + FK `fk_initial_popular_food_kinds_food_kind -> food_kinds.id`, `created_at`, `updated_at`) 추가 및 `scripts/migrate_issue62_food_kinds.py`·`scripts/seed_menus.py` 초기 8종 멱등 적재 반영.
+
+#### 검증
+
+- `pytest tests/test_ticket64_initial_popular_menus.py tests/test_ticket62_food_kinds_and_recent_card.py` 실행(SQLite 및 격리 MySQL 8.4.13 `MYSQL_TEST_DATABASE_URL`): 40개 테스트 모두 통과(비인증 공개 조회, ID 순서가 섞인 `food_kinds` 환경에서의 합의 8종 순서 보장, 정적 일러스트 HTTP 200 및 누락 시 공통 이미지 폴백, 사용자/식사 기록 비노출 및 최근 메뉴 API 독립성, `CHECK`/`UNIQUE`/`FK`/`NOT NULL` DB 제약, 원자적 8종 순서 교체 및 오류·중간 실패 롤백, 시드·마이그레이션 멱등성 및 커스텀 순서 보존 검증).
+- `pytest tests/ --ignore=tests/test_user_meals.py` 회귀 검증: 327 passed, 16 skipped (`test_user_meals.py`는 기존 `display.py` 변경으로 인한 선행 베이스라인 실패 2건으로 제외).
+
+#### 남은 작업 및 주의 사항
+
+- 후속 티켓(#65, #66)에서 자정 집계 실제 인기 순위를 별도 테이블에 저장하고 발행된 실제 순위가 있을 때 `GET /api/menus/popular`가 `source="aggregated"`와 `as_of`를 반환하도록 확장한다.
+
 ### #62 음식 종류 연결과 최근 메뉴 첫 카드 구현
 
 #### 변경 이유 및 내용

@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
@@ -9,6 +10,7 @@ from sqlalchemy import (
     Integer,
     JSON,
     String,
+    UniqueConstraint,
     event,
 )
 from sqlalchemy.orm import Session, relationship
@@ -25,6 +27,35 @@ class FoodKind(Base):
     name = Column(String(100), index=True, nullable=False)
     representative_image_url = Column(String(500), nullable=True)
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class InitialPopularFoodKind(Base):
+    """실제 인기 순위가 처음 발행되기 전 홈에 공개하는 초기 인기 메뉴 8종 순서 테이블"""
+    __tablename__ = "initial_popular_food_kinds"
+    __table_args__ = (
+        CheckConstraint(
+            "position >= 1 AND position <= 8",
+            name="ck_initial_popular_food_kinds_position_range",
+        ),
+        UniqueConstraint("position", name="uq_initial_popular_food_kinds_position"),
+        UniqueConstraint("food_kind_id", name="uq_initial_popular_food_kinds_food_kind_id"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    position = Column(Integer, nullable=False)
+    food_kind_id = Column(
+        Integer,
+        ForeignKey("food_kinds.id", name="fk_initial_popular_food_kinds_food_kind"),
+        nullable=False,
+    )
+    food_kind = relationship("FoodKind")
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 
 class Menu(Base):

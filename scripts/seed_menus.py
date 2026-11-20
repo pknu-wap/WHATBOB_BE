@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.core.database import Base, SessionLocal, engine
 from app.menus.food_kinds import CANONICAL_FOOD_KINDS, classify_food_kind
 from app.menus.models import FoodKind, Menu, OrderSheetQuestion
+from app.menus.popular import ensure_initial_popular_food_kinds
 from app.recommend.common import derive_allergens_from_text
 from app.recommend.order_sheet import rank_and_score_question_pool
 from app.recommend.question_pool import (
@@ -442,10 +443,13 @@ def seed_database(
         db.bulk_save_objects(new_menu_objs)
     db.commit()
 
+    initial_popular_rows = ensure_initial_popular_food_kinds(db, commit=True)
+
     question_summary = seed_question_pool(db, use_llm=use_llm)
     return {
         "total_menus_in_db": db.query(Menu).count(),
         "inserted_menus": len(new_menu_objs),
+        "initial_popular_food_kinds": len(initial_popular_rows),
         **question_summary,
     }
 

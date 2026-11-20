@@ -14,6 +14,8 @@ from app.auth.cookie_router import router as cookie_auth_router, allowed_web_ori
 from app.auth.router import router as auth_router
 from app.auth.transition_router import router as transition_auth_router
 from app.core.database import Base, SessionLocal, engine
+from app.menus.popular import ensure_initial_popular_food_kinds
+from app.menus.router import router as menus_router
 from app.recommend.common import RecommendationDomainException
 from app.recommend.router import router as recommend_router
 from app.rooms.router import operations_router as room_operations_router, router as rooms_router
@@ -33,6 +35,7 @@ async def lifespan(app: FastAPI):
         Base.metadata.create_all(bind=engine)
         with SessionLocal() as db:
             recover_rooms_after_restart(db)
+            ensure_initial_popular_food_kinds(db)
         logger.info("데이터베이스 테이블 생성/확인 및 방 재시작 유예 복구 완료")
     except Exception as e:
         logger.warning(f"데이터베이스 연결 실패 (DB가 아직 실행되지 않았을 수 있습니다): {e}")
@@ -95,6 +98,7 @@ app.include_router(rooms_router)
 app.include_router(room_operations_router)
 app.include_router(rooms_websocket_router)
 app.include_router(users_router)
+app.include_router(menus_router)
 app.include_router(profile_uploads_router)
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 

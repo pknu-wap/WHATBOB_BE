@@ -19,7 +19,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.database import engine
 from app.menus.food_kinds import CANONICAL_FOOD_KINDS, classify_food_kind
-from app.menus.models import FoodKind
+from app.menus.models import FoodKind, InitialPopularFoodKind
+from app.menus.popular import DEFAULT_INITIAL_POPULAR_KIND_KEYS
 import app.users.models  # noqa: F401
 from scripts.migrate_uuid_auth import (
     MigrationError,
@@ -31,7 +32,7 @@ from scripts.migrate_uuid_auth import (
 )
 
 MANIFEST_VERSION = 62
-EXCLUDED_MANIFEST_TABLES = {"food_kinds"}
+EXCLUDED_MANIFEST_TABLES = {"food_kinds", "initial_popular_food_kinds"}
 ADDED_MENU_COLUMNS = {"food_kind_id"}
 
 
@@ -104,6 +105,27 @@ def validate_issue62_schema(connection, *, final: bool = False) -> None:
                 _require(has_fk, "Missing foreign key on menus.food_kind_id -> food_kinds.id.")
     else:
         _require(not final, "Missing menus.food_kind_id")
+
+    if "initial_popular_food_kinds" in existing_tables:
+        ip_cols = _columns(connection, "initial_popular_food_kinds")
+        _require(
+            {"id", "position", "food_kind_id", "created_at", "updated_at"} <= ip_cols.keys(),
+            "Incompatible initial_popular_food_kinds columns.",
+        )
+        if final and connection.dialect.name == "mysql":
+            ip_fks = inspector.get_foreign_keys("initial_popular_food_kinds")
+            has_ip_fk = any(
+                fk.get("constrained_columns") == ["food_kind_id"]
+                and fk.get("referred_table") == "food_kinds"
+                and fk.get("referred_columns") == ["id"]
+                for fk in ip_fks
+            )
+            _require(
+                has_ip_fk,
+                "Missing foreign key on initial_popular_food_kinds.food_kind_id -> food_kinds.id.",
+            )
+    else:
+        _require(not final, "Missing required table: initial_popular_food_kinds")
 
 
 def inspect_issue62_data(connection, *, final: bool = False) -> dict[str, int]:
@@ -360,6 +382,55 @@ def backfill_food_kinds(connection) -> dict[str, int]:
     }
 
 
+def backfill_initial_popular_food_kinds(connection) -> dict[str, int]:
+    """초기 인기 메뉴 8종 테이블을 보장하고, 비어 있을 때만 합의된 8종을 위치 1~8로 적재한다."""
+    existing_tables = set(inspect(connection).get_table_names())
+    if "initial_popular_food_kinds" not in existing_tables:
+        InitialPopularFoodKind.__table__.create(connection)
+        connection.commit()
+
+    existing_count = int(
+        connection.execute(text("SELECT COUNT(*) FROM initial_popular_food_kinds")).scalar_one()
+    )
+    if existing_count > 0:
+        return {
+            "seeded_initial_popular": 0,
+            "total_initial_popular": existing_count,
+        }
+
+    kind_ids_by_key = {
+        str(row["kind_key"]): int(row["id"])
+        for row in connection.execute(text("SELECT id, kind_key FROM food_kinds")).mappings()
+    }
+    missing = [key for key in DEFAULT_INITIAL_POPULAR_KIND_KEYS if key not in kind_ids_by_key]
+    _require(
+        not missing,
+        f"Missing canonical food_kinds required for initial popular list: {', '.join(missing)}",
+    )
+
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    connection.execute(
+        text(
+            "INSERT INTO initial_popular_food_kinds (position, food_kind_id, created_at, updated_at) "
+            "VALUES (:position, :food_kind_id, :created_at, :updated_at)"
+        ),
+        [
+            {
+                "position": position,
+                "food_kind_id": kind_ids_by_key[kind_key],
+                "created_at": now_utc,
+                "updated_at": now_utc,
+            }
+            for position, kind_key in enumerate(DEFAULT_INITIAL_POPULAR_KIND_KEYS, start=1)
+        ],
+    )
+    connection.commit()
+    return {
+        "seeded_initial_popular": len(DEFAULT_INITIAL_POPULAR_KIND_KEYS),
+        "total_initial_popular": len(DEFAULT_INITIAL_POPULAR_KIND_KEYS),
+    }
+
+
 def apply_issue62_migration(connection, manifest: dict) -> None:
     verify_issue62_preservation(connection, manifest)
     validate_issue62_schema(connection, final=False)
@@ -415,6 +486,8 @@ def apply_issue62_migration(connection, manifest: dict) -> None:
                 )
             )
             connection.commit()
+
+    backfill_initial_popular_food_kinds(connection)
 
     validate_issue62_schema(connection, final=True)
     inspect_issue62_data(connection, final=True)
