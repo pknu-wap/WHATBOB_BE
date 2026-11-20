@@ -8,8 +8,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.auth.credentials import shred_kakao_credential_tokens
 from app.auth.errors import AuthError, database_errors
-from app.auth.models import AuthSession
+from app.auth.models import AuthSession, KakaoSessionCredential
 from app.auth import repository
 from app.auth.schemas import PreparationResponse, TokenResponse
 from app.core.config import settings
@@ -127,9 +128,20 @@ def create_uuid_user(db: Session) -> User:
     raise AuthError("AUTH_TEMPORARILY_UNAVAILABLE", "사용자 생성이 혼잡합니다. 잠시 후 다시 시도해 주세요.", 503)
 
 
+def hash_oauth_state(state: str) -> bytes:
+    cleaned = (state or "").strip()
+    if not cleaned:
+        raise AuthError("INVALID_OAUTH_STATE", "카카오 로그인 state 값을 확인해 주세요.", 400)
+    return hashlib.sha256(cleaned.encode("utf-8")).digest()
+
+
 def token_response(user: User, record: AuthSession, *, is_new_user: bool = False) -> TokenResponse:
-    return TokenResponse(access_token=create_access_token({"sub": str(user.id), "sid": str(record.id)}),
-                         user=UserResponse.model_validate(user), is_new_user=is_new_user)
+    return TokenResponse(
+        access_token=create_access_token({"sub": str(user.id), "sid": str(record.id)}),
+        user=UserResponse.model_validate(user),
+        is_new_user=is_new_user,
+        requires_reauth=bool(getattr(record, "requires_reauth", False)),
+    )
 
 
 def issue_cookie_token(
@@ -209,9 +221,28 @@ def cleanup_auth_sessions_once(db: Session) -> int:
                              .order_by(AuthSession.id).with_for_update()
                              .execution_options(populate_existing=True)).scalars().all()
         deleted = 0
+        deleted_ids: list[int] = []
         for record in records:
             if record.revoked_at is not None or as_utc_naive(record.expires_at) <= now:
+                deleted_ids.append(int(record.id))
                 db.delete(record)
                 deleted += 1
+        if deleted_ids:
+            active_creds = (
+                db.query(KakaoSessionCredential)
+                .filter(
+                    KakaoSessionCredential.auth_session_id.in_(deleted_ids),
+                    KakaoSessionCredential.status == "ACTIVE",
+                )
+                .with_for_update()
+                .all()
+            )
+            for cred in active_creds:
+                shred_kakao_credential_tokens(
+                    cred,
+                    status="EXPIRED",
+                    now=now,
+                    terminal_reason="SESSION_EXPIRED",
+                )
         db.commit()
         return deleted

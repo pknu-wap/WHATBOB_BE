@@ -11,6 +11,7 @@ import app.menus.models  # noqa: F401
 import app.users.models  # noqa: F401
 import app.auth.models  # noqa: F401
 from app.auth.cookie_router import router as cookie_auth_router, allowed_web_origins
+from app.auth.revocations import kakao_revocation_loop
 from app.auth.router import router as auth_router
 from app.auth.transition_router import router as transition_auth_router
 from app.core.database import Base, SessionLocal, engine
@@ -40,12 +41,19 @@ async def lifespan(app: FastAPI):
     cleanup_task = asyncio.create_task(room_cleanup_loop())
     notification_task = asyncio.create_task(notification_loop(engine))
     summary_task = asyncio.create_task(summary_cleanup_loop(engine))
+    kakao_revocation_task = asyncio.create_task(kakao_revocation_loop(engine))
     try:
         yield
     finally:
-        for task in (cleanup_task, notification_task, summary_task):
+        for task in (cleanup_task, notification_task, summary_task, kakao_revocation_task):
             task.cancel()
-        await asyncio.gather(cleanup_task, notification_task, summary_task, return_exceptions=True)
+        await asyncio.gather(
+            cleanup_task,
+            notification_task,
+            summary_task,
+            kakao_revocation_task,
+            return_exceptions=True,
+        )
 
 
 app = FastAPI(
@@ -67,7 +75,14 @@ app.add_middleware(
         "Idempotency-Key",
         "ngrok-skip-browser-warning",
         "X-Whatbob-Auth-Context",
+        "X-Whatbob-Auth-Secret",
+        "X-Whatbob-Client",
         "X-Whatbob-Request",
+        "X-Whatbob-Transition-Secret",
+    ],
+    expose_headers=[
+        "X-Whatbob-Auth-Secret",
+        "X-Whatbob-Transition-Secret",
     ],
 )
 
