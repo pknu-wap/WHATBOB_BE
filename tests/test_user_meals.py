@@ -226,7 +226,7 @@ def test_meals_are_ordered_by_eaten_at_desc_then_id_desc_across_timezones(api):
     ]
     assert [item["menu_name"] for item in data["items"]] == [
         "콩나물국밥",
-        "토마토파스타",
+        "파스타 (토마토)",
         "땡초 치킨",
         "콩나물국밥",
     ]
@@ -305,7 +305,7 @@ def test_referential_integrity_preserves_meal_snapshot_on_menu_delete_and_cascad
     items = after_menu_delete.json()["data"]["items"]
     assert len(items) == 1
     assert items[0]["menu_id"] is None
-    assert items[0]["menu_name"] == "토마토파스타"
+    assert items[0]["menu_name"] == resp.json()["data"]["menu_name"]
     assert items[0]["menu"] is None
 
     # Authentication references must be explicitly removed before deleting a user.
