@@ -5,6 +5,38 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-20
 
+### #65 자정에 전날 인기 순위 집계 및 공개 구현
+
+#### 변경 이유 및 내용
+
+- 매일 `Asia/Seoul` 자정에 전날 하루치 식사 기록(`[전날 00:00 KST, 집계일 00:00 KST)`을 UTC로 변환해 비교)을 집계하고, 유효한 식사를 기록한 서로 다른 사용자가 5명 이상이면 실제 인기 순위 최대 8종을 DB에 저장해 홈 공개 API(`GET /api/menus/popular`)로 제공하도록 구현했다.
+- `app/menus/models.py`에 확정 설계(A안, #66과 호환되는 단일 세트 스키마)에 따라 단일 상태 행 테이블 `PopularMenuRankingState`(`popular_menu_ranking_state`)와 현재 공개 순위 항목 테이블 `PopularMenuRankingItem`(`popular_menu_ranking_items`)을 추가했다.
+- `app/menus/popular.py`에 `get_seoul_tz()`(`ZoneInfo("Asia/Seoul")` 우선, `tzdata` 미설치 Windows 환경에서는 고정 `UTC+9` 폴백), `get_kst_previous_day_window_utc()`, `aggregate_popular_menus_for_kst_date()`를 구현했다. `UserMeal`과 `Menu`를 내부 조인해 삭제된 카탈로그 메뉴를 5명 전환 기준과 음식 종류 점수 양쪽에서 모두 제외하고, 음식 종류별 고유 사용자 수 내림차순·최근 식사 시각 내림차순·음식 종류 ID 오름차순으로 최대 8종을 단일 트랜잭션(savepoint)으로 교체한다. 5명 미만이면 기존 순위와 `published_as_of`를 유지하고 `last_succeeded_kst_date`만 갱신한다.
+- `get_popular_menus()`가 저장된 `PopularMenuRankingState`와 `PopularMenuRankingItem`을 우선 조회해 발행된 순위가 있으면 `source="aggregated"`와 UTC ISO 8601 `as_of`를 반환하고, 발행 전에는 기존 #64의 `source="initial"`, `as_of=null` 초기 8종을 반환하도록 확장했다.
+- `app/menus/popular_scheduler.py`에 제어 가능한 시계·대기 주입(`now_fn`, `sleep_fn`, `session_factory`)과 `asyncio.to_thread` 기반 동기 DB 집계 실행을 갖춘 `popular_ranking_scheduler_loop()`를 구현하고, `app/main.py` FastAPI 수명주기에서 기존 `room_cleanup_loop()`와 함께 시작·종료 시 정리되도록 연동했다.
+
+#### 주요 변경 파일
+
+- `app/menus/models.py`, `app/menus/popular.py`, `app/menus/popular_scheduler.py`, `app/main.py`, `tests/test_ticket65_midnight_popular_aggregation.py`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/menus/popular` 동작 확장: 실제 인기 순위가 발행된 경우 DB 저장 결과를 읽어 `source: "aggregated"`, `as_of: "<UTC ISO 8601>"`(예: `"2026-11-19T15:00:00Z"`), `items[]`(`food_kind_id`, `name`, 상대 `image_url`)를 인증 없이 반환하며 사용자 이름·개별 식사 기록·내부 집계 수치를 노출하지 않는다. 발행 전에는 기존 `source: "initial"`, `as_of: null` 계약을 유지한다.
+
+#### DB 변경
+
+- `popular_menu_ranking_state` 테이블(`id` PK + `id = 1` CHECK, `last_succeeded_kst_date` DATE NULL, `published_as_of` DATETIME NULL, `updated_at` DATETIME NOT NULL) 추가.
+- `popular_menu_ranking_items` 테이블(`rank_position` PK + `1..8` CHECK, `food_kind_id` UNIQUE + FK `fk_popular_ranking_items_food_kind -> food_kinds.id` NOT NULL, `user_count` `>= 1` CHECK NOT NULL, `last_eaten_at` DATETIME NOT NULL) 추가.
+
+#### 검증
+
+- `pytest -v tests/test_ticket65_midnight_popular_aggregation.py tests/test_ticket64_initial_popular_menus.py tests/test_ticket63_recent_food_kinds_max6.py tests/test_ticket62_food_kinds_and_recent_card.py` 실행(SQLite 및 격리 MySQL 8.4.13 `MYSQL_TEST_DATABASE_URL`): 63 passed (KST 자정 UTC 경계 및 지연 시각 정규화, 4명 초기 유지·5명 발행 전환, 삭제 메뉴의 5명 기준 및 점수 양쪽 제외, 동일 사용자 반복 식사 1회 집계 및 `버거`/`햄버거`·`자장면`/`짜장면`·`제육볶음`/`돼지고기볶음(제육볶음)` 별칭 합산, 동률 정렬 및 8종 상한, 이후 5명 미만 일자 이전 순위 유지, 비인증 공개 API 개인정보 비노출 및 이미지 조회, DB 제약 및 쓰기 실패 롤백, 제어 시계 자정 스케줄러 루프·일시 오류 복구·FastAPI 수명주기 취소, MySQL 8.4.13 통합 검증).
+- `pytest -q tests/ --ignore=tests/test_user_meals.py` 전체 회귀 검증: 348 passed, 18 skipped (`test_user_meals.py`는 기존 `display.py` 변경으로 인한 선행 베이스라인 실패 2건으로 제외).
+
+#### 남은 작업 및 주의 사항
+
+- 후속 티켓(#66)에서 서버 재시작 시 가장 최근 놓친 자정 집계 복구, 상태 행 쓰기 잠금(`FOR UPDATE`) 및 동일 날짜 중복 실행 방지, 저장 순위에서 카탈로그 메뉴가 모두 삭제된 음식 종류 숨김 처리를 확장한다.
+
 ### #64 초기 인기 메뉴 8종 공개 구현
 
 #### 변경 이유 및 내용

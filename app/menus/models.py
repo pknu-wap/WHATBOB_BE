@@ -3,6 +3,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -56,6 +57,56 @@ class InitialPopularFoodKind(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+class PopularMenuRankingState(Base):
+    """마지막 실제 인기 순위 공개 상태 및 최근 성공 집계일 단일 행 테이블"""
+    __tablename__ = "popular_menu_ranking_state"
+    __table_args__ = (
+        CheckConstraint(
+            "id = 1",
+            name="ck_popular_menu_ranking_state_singleton",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, default=1, autoincrement=False)
+    last_succeeded_kst_date = Column(Date, nullable=True)
+    published_as_of = Column(DateTime, nullable=True)
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class PopularMenuRankingItem(Base):
+    """현재 공개 중인 실제 인기 메뉴 순위(최대 8종) 단일 세트 테이블"""
+    __tablename__ = "popular_menu_ranking_items"
+    __table_args__ = (
+        CheckConstraint(
+            "rank_position >= 1 AND rank_position <= 8",
+            name="ck_popular_menu_ranking_items_rank_range",
+        ),
+        CheckConstraint(
+            "user_count >= 1",
+            name="ck_popular_menu_ranking_items_user_count_positive",
+        ),
+        UniqueConstraint(
+            "food_kind_id",
+            name="uq_popular_menu_ranking_items_food_kind_id",
+        ),
+    )
+
+    rank_position = Column(Integer, primary_key=True, autoincrement=False)
+    food_kind_id = Column(
+        Integer,
+        ForeignKey("food_kinds.id", name="fk_popular_ranking_items_food_kind"),
+        nullable=False,
+    )
+    user_count = Column(Integer, nullable=False)
+    last_eaten_at = Column(DateTime, nullable=False)
+    food_kind = relationship("FoodKind")
 
 
 class Menu(Base):
