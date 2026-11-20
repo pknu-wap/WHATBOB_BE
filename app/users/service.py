@@ -48,6 +48,8 @@ from app.users.schemas import (
 )
 
 NICKNAME_ALLOWED_RE = re.compile(r"^[가-힣A-Za-z0-9 ]+$")
+MAX_RECENT_FOOD_CARDS = 6
+RECENT_FOOD_SCAN_CHUNK_SIZE = 32
 
 
 def validate_and_clean_nickname(raw_nickname: str) -> str:
@@ -472,25 +474,52 @@ def get_my_home_card_recently_eaten_foods(
     user_id: int,
     *,
     now: datetime | None = None,
+    max_cards: int = MAX_RECENT_FOOD_CARDS,
+    chunk_size: int = RECENT_FOOD_SCAN_CHUNK_SIZE,
 ) -> HomeRecentFoodCardsResponse:
-    """홈 최근에 먹은 메뉴 첫 카드 데이터를 조회한다."""
-    reference_now = _as_utc(now) if now is not None else datetime.now(timezone.utc)
-    row = repository.find_latest_valid_user_meal_with_food_kind(
-        db,
-        user_id,
-        as_of=reference_now,
-    )
-    if row is None:
+    """홈 최근에 먹은 메뉴를 음식 종류별 최신 기록 기준 최대 6개까지 조회한다."""
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be at least 1")
+    if max_cards < 1:
         return HomeRecentFoodCardsResponse(items=[])
-    meal, menu, food_kind = row
-    rep_url = food_kind.representative_image_url if food_kind is not None else None
-    return HomeRecentFoodCardsResponse(
-        items=[
-            HomeRecentFoodCardItemResponse(
-                food_kind_id=int(menu.food_kind_id),
-                menu_name=meal.menu_name,
-                eaten_at=_as_utc(meal.eaten_at),
-                image_url=resolve_menu_illustration_url(rep_url),
+
+    reference_now = as_utc_naive(now) if now is not None else utc_now()
+    items: list[HomeRecentFoodCardItemResponse] = []
+    seen_food_kind_ids: set[int] = set()
+    cursor: tuple[datetime, int] | None = None
+
+    while len(items) < max_cards:
+        chunk = repository.find_valid_user_meals_with_food_kind_chunk(
+            db,
+            user_id,
+            as_of=reference_now,
+            limit=chunk_size,
+            cursor=cursor,
+        )
+        if not chunk:
+            break
+
+        for meal, menu, food_kind in chunk:
+            food_kind_id = int(menu.food_kind_id)
+            if food_kind_id in seen_food_kind_ids:
+                continue
+            seen_food_kind_ids.add(food_kind_id)
+            rep_url = food_kind.representative_image_url if food_kind is not None else None
+            items.append(
+                HomeRecentFoodCardItemResponse(
+                    food_kind_id=food_kind_id,
+                    menu_name=meal.menu_name,
+                    eaten_at=_as_utc(meal.eaten_at),
+                    image_url=resolve_menu_illustration_url(rep_url),
+                )
             )
-        ]
-    )
+            if len(items) >= max_cards:
+                break
+
+        if len(chunk) < chunk_size:
+            break
+
+        last_meal = chunk[-1][0]
+        cursor = (as_utc_naive(last_meal.eaten_at), int(last_meal.id))
+
+    return HomeRecentFoodCardsResponse(items=items)

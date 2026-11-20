@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, File, Header, Path, Query, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
@@ -215,6 +217,11 @@ def delete_my_meal_endpoint(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+def get_utc_now() -> datetime:
+    """요청별 단일 UTC 기준 시각을 반환한다."""
+    return datetime.now(timezone.utc)
+
+
 @router.get(
     "/me/home-card-recently-eaten-food-max-6",
     response_model=ApiResponse[HomeRecentFoodCardsResponse],
@@ -223,7 +230,10 @@ def get_my_home_card_recently_eaten_food_max_6(
     response: Response,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    reference_now: datetime = Depends(get_utc_now),
 ):
-    """홈의 최근에 먹은 메뉴 첫 카드 데이터를 조회한다."""
+    """홈의 최근에 먹은 메뉴(음식 종류별 최신 기록 최대 6개) 데이터를 조회한다."""
     response.headers["Cache-Control"] = "no-store"
-    return ApiResponse(data=get_my_home_card_recently_eaten_foods(db, current_user.id))
+    return ApiResponse(
+        data=get_my_home_card_recently_eaten_foods(db, current_user.id, now=reference_now)
+    )

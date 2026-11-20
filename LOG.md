@@ -34,6 +34,35 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 - 후속 티켓(#65, #66)에서 자정 집계 실제 인기 순위를 별도 테이블에 저장하고 발행된 실제 순위가 있을 때 `GET /api/menus/popular`가 `source="aggregated"`와 `as_of`를 반환하도록 확장한다.
 
+### #63 최근에 먹은 메뉴를 종류별 최대 6개로 표시 구현
+
+#### 변경 이유 및 내용
+
+- `GET /api/users/me/home-card-recently-eaten-food-max-6`가 최신 1건만 반환하던 동작을 확장해, 음식 종류(`food_kind_id`)별 최신 식사 기록을 최신순(`eaten_at DESC, id DESC`)으로 최대 6개까지 반환하도록 구현했다.
+- 설계 문서(`docs/plans/54-menu-photo-design.md`)의 확정 조회 방식에 따라 요청당 단일 UTC 기준 시각(`get_utc_now`)을 고정하고, 현재 카탈로그 메뉴가 존재하며 `eaten_at <= as_of`인 본인 식사 기록을 복합 커서 `(eaten_at, id)`로 청크 단위(`RECENT_FOOD_SCAN_CHUNK_SIZE=32`, 전체 스캔 상한 없음)로 읽어 처음 등장한 `food_kind_id`를 최대 6개까지 수집하도록 변경했다.
+- 미래 시각 식사 기록과 삭제된 카탈로그 메뉴를 음식 종류 중복 제거 전에 먼저 제외하므로, 미래 기록이나 삭제된 메뉴가 같은 음식 종류의 유효한 과거 기록을 가리지 않으며 삭제된 메뉴의 저장된 `menu_name`은 기존 `GET /api/users/me/meals`에서 계속 조회된다.
+
+#### 주요 변경 파일
+
+- `app/users/repository.py`, `app/users/service.py`, `app/users/router.py`, `tests/test_ticket63_recent_food_kinds_max6.py`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/users/me/home-card-recently-eaten-food-max-6` 동작 확장: 기존 Bearer 인증, `ApiResponse` 형식, `Cache-Control: no-store`, 항목 스키마(`food_kind_id`, `menu_name`, UTC ISO 8601 `eaten_at`, 상대 `image_url`)는 유지하고 `data.items`를 음식 종류별 최신 기록 최대 6개로 반환하도록 변경.
+
+#### DB 변경
+
+- 없음
+
+#### 검증
+
+- `pytest -v tests/test_ticket63_recent_food_kinds_max6.py tests/test_ticket62_food_kinds_and_recent_card.py` 실행(SQLite 및 격리 MySQL 8.4.13 `MYSQL_TEST_DATABASE_URL`): 40 passed (6개 상한, 6개 미만·빈 목록, 같은 음식 종류 세부 메뉴 중복 제거, 100건 연속 동일 종류 및 동시각·역전 ID 청크 경계 돌파, 동시각 `id DESC` 동률 정렬, 미래 시각 직전·정확 경계 및 비차폐, 삭제 메뉴 제외·비차폐 및 `/api/users/me/meals` 보존, 카카오·UUID 계정 격리, `Cache-Control: no-store`, MySQL 8.4.13 통합 검증).
+- 전체 저장소 `pytest -q` 실행: 366 passed, 16 skipped, 2 failed(`tests/test_user_meals.py`의 기존 베이스라인 `display.py` 포맷 불일치 2건만 실패, 신규 회귀 없음).
+
+#### 남은 작업 및 주의 사항
+
+- 후속 티켓(#67)에서 메뉴별 공통 일러스트 예외(`menu_illustration_exceptions`)와 대표 일러스트 파일 연결을 반영한다.
+
 ### #62 음식 종류 연결과 최근 메뉴 첫 카드 구현
 
 #### 변경 이유 및 내용
