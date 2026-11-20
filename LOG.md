@@ -5,6 +5,37 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-20
 
+### #68 빠진 음식 일러스트 추가(디자이너 PNG 검증·배포·등록 도구 및 즉시 반영 검증) 구현
+
+#### 변경 이유 및 내용
+
+- Figma 원본 대조에서 누락된 국밥(`gukbap`)·짜장면(`jjajangmyeon`)을 포함한 신규 디자이너 PNG를 수령했을 때 안전하게 검증·정적 배포·DB 등록할 수 있는 서비스 함수와 운영 CLI를 구현하고, 미등록/파일 누락 시 공통 이미지 폴백과 PNG 등록 후 자정 집계와 무관한 즉시 반영 및 메뉴별 예외 유지를 통합 검증했다.
+- `app/menus/illustrations.py`에 Pillow(`PIL.Image`) 및 PNG 청크/CRC32 무결성 검사를 결합한 `validate_menu_illustration_png()`(`MenuIllustrationAssetCheck` 반환: 형식 `PNG`, 해상도 `>= 1x1`, `mode`, 알파/투명도 `has_alpha`, `size_bytes` 검증 및 JPEG·SVG·빈 파일·손상 PNG 거절), `food_kinds` 선행 존재 확인·안전 파일명 검증·원자적 파일 배치(`os.replace`)·DB 실패 시 디스크 정리/복원을 보장하는 `deploy_and_register_food_kind_png()`, 초기 8종 음식 종류의 원본 대조 상태(`reusable_figma` / `missing_for_#68`)·DB 등록 경로·디스크 파일 존재 여부·실조회 URL(`effective_image_url`)을 보고하는 `inspect_food_kind_illustration_status()`를 추가했다.
+- `scripts/register_menu_illustration.py` 운영 CLI를 추가해 `--status`(초기 8종 상태 및 `#68` 미등록 대상 JSON 요약), `--kind-key <key> --source-png <path> [--filename <name>.png] [--require-transparency]`(검증·원자 배포·DB 등록), `--kind-key <key> --image-url </static/menu-illustrations/...>`(기배포 파일 검증 후 DB 등록), `--sync-deployed`(배포 파일 일괄 동기화) 모드를 지원하도록 구현했다.
+- 설계 및 명세 제약에 따라 AI 생성 또는 임시 PNG를 `app/static/menu-illustrations/`에 커밋하지 않고 기존 `default.svg`만 유지했다.
+
+#### 주요 변경 파일
+
+- `app/menus/illustrations.py`, `scripts/register_menu_illustration.py`, `tests/test_ticket68_missing_illustration_registration.py`, `LOG.md`
+
+#### API 변경
+
+- 없음 (기존 `GET /api/users/me/home-card-recently-eaten-food-max-6` 및 `GET /api/menus/popular`의 `source="initial"`·`source="aggregated"` 양쪽 모드에서 미등록·파일 누락 시 `/static/menu-illustrations/default.svg` HTTP 200 폴백, 신규 PNG 배포·등록 시 자정 집계 재실행 없이 `as_of`·카드 순서를 유지한 즉시 반영 및 `menu_illustration_exceptions` 예외 유지 동작을 통합 테스트로 검증).
+
+#### DB 변경
+
+- 없음 (기존 `food_kinds.representative_image_url` 및 `menu_illustration_exceptions` 스키마 사용).
+
+#### 검증
+
+- `pytest tests/test_ticket68_missing_illustration_registration.py tests/test_ticket67_illustrations_and_exceptions.py tests/test_ticket65_midnight_popular_aggregation.py tests/test_ticket64_initial_popular_menus.py tests/test_ticket63_recent_food_kinds_max6.py tests/test_ticket62_food_kinds_and_recent_card.py -v` 실행(SQLite 및 격리 MySQL 8.4.13 `MYSQL_TEST_DATABASE_URL`): 87 passed (PNG RGBA/RGB/팔레트 투명도 및 비PNG·손상 PNG·경로 조작 거절, 원자 배포 및 DB 실패 시 디스크 정리/복원, 8종 상태 점검, CLI `--status`/`--source-png`/`--image-url`/`--sync-deployed`, 미등록 시 최근·초기 인기·집계 인기 공통 이미지 폴백, 임시 디자이너 PNG 배포·등록 후 집계 재실행 없는 즉시 반영과 `image/png` HTTP 200 응답, 크림/토마토 파스타 예외 유지, 디스크 파일 삭제 시 그레이스풀 폴백, 실제 MySQL 8.4.13 CLI 등록 및 홈 API 반영 검증).
+- `pytest tests/ --ignore=tests/test_user_meals.py -q` 전체 회귀 검증: 369 passed, 21 skipped (`tests/test_user_meals.py`는 기존 `display.py` 포맷 불일치 선행 베이스라인 2건으로 제외).
+
+#### 남은 작업 및 주의 사항
+
+- 디자이너에게 `gukbap.png`, `jjajangmyeon.png`(및 Figma 재사용 6종 PNG)를 수령하면 `python -m scripts.register_menu_illustration --kind-key <key> --source-png <path> --require-transparency`로 배포·등록하고 `--status` 및 `/static/menu-illustrations/<file>.png` HTTP 200을 확인한다.
+- 제공된 일러스트를 참조한 AI 이미지 생성은 요청자가 모델을 변경하고 명시적으로 허락하기 전에는 실행하지 않는다.
+
 ### #67 기존 일러스트와 공통 이미지 연결 구현
 
 #### 변경 이유 및 내용
