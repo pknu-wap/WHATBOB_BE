@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import func
+from sqlalchemy import exists, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -221,6 +221,50 @@ class PopularAggregationResult:
     published: bool
     published_as_of: datetime | None
     item_count: int
+    skipped: bool = False
+
+
+def _lock_or_create_ranking_state(
+    db: Session,
+    *,
+    now_utc_naive: datetime,
+    can_rollback_outer: bool,
+) -> PopularMenuRankingState:
+    """popular_menu_ranking_state 단일 행(id=1)을 보장하고 쓰기 잠금(FOR UPDATE)으로 조회한다."""
+    for _attempt in range(2):
+        existing_id = (
+            db.query(PopularMenuRankingState.id)
+            .filter(PopularMenuRankingState.id == POPULAR_RANKING_STATE_ID)
+            .scalar()
+        )
+        if existing_id is None:
+            try:
+                with db.begin_nested():
+                    db.add(
+                        PopularMenuRankingState(
+                            id=POPULAR_RANKING_STATE_ID,
+                            last_succeeded_kst_date=None,
+                            published_as_of=None,
+                            updated_at=now_utc_naive,
+                        )
+                    )
+                    db.flush()
+            except IntegrityError:
+                # 동시 최초 실행이 id=1 행을 먼저 생성한 경우 잠금을 해제한 뒤 잠금 조회로 합류한다.
+                if can_rollback_outer:
+                    db.rollback()
+
+        state = (
+            db.query(PopularMenuRankingState)
+            .filter(PopularMenuRankingState.id == POPULAR_RANKING_STATE_ID)
+            .with_for_update()
+            .populate_existing()
+            .one_or_none()
+        )
+        if state is not None:
+            return state
+
+    raise RuntimeError("popular_menu_ranking_state 단일 행(id=1) 잠금 획득에 실패했습니다.")
 
 
 def aggregate_popular_menus_for_kst_date(
@@ -234,8 +278,28 @@ def aggregate_popular_menus_for_kst_date(
     window_start_naive = window_start_utc.replace(tzinfo=None)
     window_end_naive = window_end_utc.replace(tzinfo=None)
     now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    can_rollback_outer = commit and not db.new and not db.dirty and not db.deleted
 
-    with db.begin_nested():
+    def _run_locked_aggregation() -> PopularAggregationResult:
+        state = _lock_or_create_ranking_state(
+            db,
+            now_utc_naive=now_utc_naive,
+            can_rollback_outer=can_rollback_outer,
+        )
+
+        if state.last_succeeded_kst_date is not None and kst_date <= state.last_succeeded_kst_date:
+            active_as_of = _as_utc(state.published_as_of) if state.published_as_of is not None else None
+            return PopularAggregationResult(
+                target_kst_date=kst_date,
+                window_start_utc=window_start_utc,
+                window_end_utc=window_end_utc,
+                distinct_user_count=0,
+                published=False,
+                published_as_of=active_as_of,
+                item_count=0,
+                skipped=True,
+            )
+
         distinct_user_count = int(
             db.query(func.count(func.distinct(UserMeal.user_id)))
             .join(Menu, UserMeal.menu_id == Menu.id)
@@ -247,95 +311,115 @@ def aggregate_popular_menus_for_kst_date(
             or 0
         )
 
-        state = (
-            db.query(PopularMenuRankingState)
-            .filter(PopularMenuRankingState.id == POPULAR_RANKING_STATE_ID)
-            .one_or_none()
-        )
-        if state is None:
-            state = PopularMenuRankingState(
-                id=POPULAR_RANKING_STATE_ID,
-                last_succeeded_kst_date=None,
-                published_as_of=None,
-                updated_at=now_utc_naive,
-            )
-            db.add(state)
-            db.flush()
-
         if distinct_user_count < POPULAR_RANKING_MIN_USERS:
             state.last_succeeded_kst_date = kst_date
             state.updated_at = now_utc_naive
             db.flush()
-            published = False
             active_as_of = _as_utc(state.published_as_of) if state.published_as_of is not None else None
-            item_count = 0
-        else:
-            user_count_expr = func.count(func.distinct(UserMeal.user_id)).label("user_count")
-            last_eaten_at_expr = func.max(UserMeal.eaten_at).label("last_eaten_at")
-
-            ranked_rows = (
-                db.query(
-                    Menu.food_kind_id.label("food_kind_id"),
-                    user_count_expr,
-                    last_eaten_at_expr,
-                )
-                .join(Menu, UserMeal.menu_id == Menu.id)
-                .filter(
-                    UserMeal.eaten_at >= window_start_naive,
-                    UserMeal.eaten_at < window_end_naive,
-                )
-                .group_by(Menu.food_kind_id)
-                .order_by(
-                    user_count_expr.desc(),
-                    last_eaten_at_expr.desc(),
-                    Menu.food_kind_id.asc(),
-                )
-                .limit(POPULAR_RANKING_MAX_ITEMS)
-                .all()
+            return PopularAggregationResult(
+                target_kst_date=kst_date,
+                window_start_utc=window_start_utc,
+                window_end_utc=window_end_utc,
+                distinct_user_count=distinct_user_count,
+                published=False,
+                published_as_of=active_as_of,
+                item_count=0,
+                skipped=False,
             )
 
-            db.query(PopularMenuRankingItem).delete(synchronize_session=False)
-            db.flush()
+        user_count_expr = func.count(func.distinct(UserMeal.user_id)).label("user_count")
+        last_eaten_at_expr = func.max(UserMeal.eaten_at).label("last_eaten_at")
 
-            new_items = [
-                PopularMenuRankingItem(
-                    rank_position=rank_position,
-                    food_kind_id=int(row.food_kind_id),
-                    user_count=int(row.user_count),
-                    last_eaten_at=_coerce_db_datetime(row.last_eaten_at),
-                )
-                for rank_position, row in enumerate(ranked_rows, start=1)
-            ]
-            db.add_all(new_items)
-            state.published_as_of = window_end_naive
-            state.last_succeeded_kst_date = kst_date
-            state.updated_at = now_utc_naive
-            db.flush()
+        ranked_rows = (
+            db.query(
+                Menu.food_kind_id.label("food_kind_id"),
+                user_count_expr,
+                last_eaten_at_expr,
+            )
+            .join(Menu, UserMeal.menu_id == Menu.id)
+            .filter(
+                UserMeal.eaten_at >= window_start_naive,
+                UserMeal.eaten_at < window_end_naive,
+            )
+            .group_by(Menu.food_kind_id)
+            .order_by(
+                user_count_expr.desc(),
+                last_eaten_at_expr.desc(),
+                Menu.food_kind_id.asc(),
+            )
+            .limit(POPULAR_RANKING_MAX_ITEMS)
+            .all()
+        )
 
-            published = True
-            active_as_of = window_end_utc
-            item_count = len(new_items)
+        db.query(PopularMenuRankingItem).delete(synchronize_session=False)
+        db.flush()
 
+        new_items = [
+            PopularMenuRankingItem(
+                rank_position=rank_position,
+                food_kind_id=int(row.food_kind_id),
+                user_count=int(row.user_count),
+                last_eaten_at=_coerce_db_datetime(row.last_eaten_at),
+            )
+            for rank_position, row in enumerate(ranked_rows, start=1)
+        ]
+        db.add_all(new_items)
+        state.published_as_of = window_end_naive
+        state.last_succeeded_kst_date = kst_date
+        state.updated_at = now_utc_naive
+        db.flush()
+
+        return PopularAggregationResult(
+            target_kst_date=kst_date,
+            window_start_utc=window_start_utc,
+            window_end_utc=window_end_utc,
+            distinct_user_count=distinct_user_count,
+            published=True,
+            published_as_of=window_end_utc,
+            item_count=len(new_items),
+            skipped=False,
+        )
+
+    if can_rollback_outer:
+        try:
+            result = _run_locked_aggregation()
+            db.commit()
+            return result
+        except Exception:
+            db.rollback()
+            raise
+
+    with db.begin_nested():
+        result = _run_locked_aggregation()
     if commit:
         db.commit()
+    return result
 
-    return PopularAggregationResult(
-        target_kst_date=kst_date,
-        window_start_utc=window_start_utc,
-        window_end_utc=window_end_utc,
-        distinct_user_count=distinct_user_count,
-        published=published,
-        published_as_of=active_as_of,
-        item_count=item_count,
+
+def recover_missed_popular_menu_ranking(
+    db: Session,
+    *,
+    now: datetime | None = None,
+    commit: bool = True,
+) -> PopularAggregationResult:
+    """서버 재시작 시 현재 시각 기준 가장 최근에 지난 한국시간 자정 집계 1회만 보충 실행한다."""
+    current_utc = datetime.now(timezone.utc) if now is None else _as_utc(now)
+    latest_passed_kst_date = current_utc.astimezone(get_seoul_tz()).date()
+    return aggregate_popular_menus_for_kst_date(
+        db,
+        latest_passed_kst_date,
+        commit=commit,
     )
 
 
 def _fetch_published_popular_rows(
     db: Session,
 ) -> list[tuple[PopularMenuRankingItem, FoodKind]]:
+    has_catalog_menu = exists(1).where(Menu.food_kind_id == PopularMenuRankingItem.food_kind_id)
     return (
         db.query(PopularMenuRankingItem, FoodKind)
         .join(FoodKind, PopularMenuRankingItem.food_kind_id == FoodKind.id)
+        .filter(has_catalog_menu)
         .order_by(PopularMenuRankingItem.rank_position.asc())
         .all()
     )

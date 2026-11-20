@@ -14,7 +14,10 @@ from app.auth.cookie_router import router as cookie_auth_router, allowed_web_ori
 from app.auth.router import router as auth_router
 from app.auth.transition_router import router as transition_auth_router
 from app.core.database import Base, SessionLocal, engine
-from app.menus.popular import ensure_initial_popular_food_kinds
+from app.menus.popular import (
+    ensure_initial_popular_food_kinds,
+    recover_missed_popular_menu_ranking,
+)
 from app.menus.popular_scheduler import popular_ranking_scheduler_loop
 from app.menus.router import router as menus_router
 from app.recommend.common import RecommendationDomainException
@@ -37,6 +40,10 @@ async def lifespan(app: FastAPI):
         with SessionLocal() as db:
             recover_rooms_after_restart(db)
             ensure_initial_popular_food_kinds(db)
+            try:
+                recover_missed_popular_menu_ranking(db)
+            except Exception:
+                logger.exception("서버 시작 시 놓친 인기 메뉴 자정 집계 복구에 실패했습니다.")
         logger.info("데이터베이스 테이블 생성/확인 및 방 재시작 유예 복구 완료")
     except Exception as e:
         logger.warning(f"데이터베이스 연결 실패 (DB가 아직 실행되지 않았을 수 있습니다): {e}")
