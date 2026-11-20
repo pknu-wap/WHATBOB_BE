@@ -1,11 +1,13 @@
-from starlette.concurrency import run_in_threadpool
-from app.rooms.notifications import dispatch_room
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, File, Header, Path, Query, Response, UploadFile, status
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.auth.dependencies import get_current_user
 from app.core.database import get_db
 from app.recommend.schemas import ApiResponse
+from app.rooms.notifications import dispatch_room
 from app.users.models import User
 from app.users.profile_image import replace_my_profile_image, reset_my_profile_image
 from app.users.schemas import (
@@ -13,6 +15,7 @@ from app.users.schemas import (
     CatalogExclusionsUpdateRequest,
     DislikedFoodsResponse,
     DislikedFoodsUpdateRequest,
+    HomeRecentFoodCardsResponse,
     NicknameUpdateRequest,
     UserMealCreateRequest,
     UserMealItemResponse,
@@ -24,6 +27,7 @@ from app.users.service import (
     delete_my_meal,
     get_my_catalog_exclusions,
     get_my_disliked_foods,
+    get_my_home_card_recently_eaten_foods,
     get_my_meals,
     record_my_meal,
     replace_my_catalog_exclusions,
@@ -219,3 +223,25 @@ def delete_my_meal_endpoint(
     """본인의 식사 기록 항목 하나를 삭제한다."""
     delete_my_meal(db, current_user.id, meal_id, current_user=current_user)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def get_utc_now() -> datetime:
+    """요청별 단일 UTC 기준 시각을 반환한다."""
+    return datetime.now(timezone.utc)
+
+
+@router.get(
+    "/me/home-card-recently-eaten-food-max-6",
+    response_model=ApiResponse[HomeRecentFoodCardsResponse],
+)
+def get_my_home_card_recently_eaten_food_max_6(
+    response: Response,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    reference_now: datetime = Depends(get_utc_now),
+):
+    """홈의 최근에 먹은 메뉴(음식 종류별 최신 기록 최대 6개) 데이터를 조회한다."""
+    response.headers["Cache-Control"] = "no-store"
+    return ApiResponse(
+        data=get_my_home_card_recently_eaten_foods(db, current_user.id, now=reference_now)
+    )

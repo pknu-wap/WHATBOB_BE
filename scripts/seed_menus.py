@@ -14,7 +14,13 @@ from sqlalchemy.orm import Session
 import app.users.models  # noqa: F401
 from app.core.config import settings
 from app.core.database import Base, SessionLocal, engine
-from app.menus.models import Menu, OrderSheetQuestion
+from app.menus.food_kinds import CANONICAL_FOOD_KINDS, classify_food_kind
+from app.menus.illustrations import (
+    seed_menu_illustration_exceptions,
+    sync_food_kind_representative_illustrations,
+)
+from app.menus.models import FoodKind, Menu, OrderSheetQuestion
+from app.menus.popular import ensure_initial_popular_food_kinds
 from app.recommend.common import derive_allergens_from_text
 from app.recommend.order_sheet import rank_and_score_question_pool
 from app.recommend.question_pool import (
@@ -358,6 +364,31 @@ def fetch_llm_generated_questions(base_pool: list[dict[str, Any]]) -> list[dict[
         return []
 
 
+def _ensure_food_kinds(
+    db: Session,
+    required_kinds: dict[str, str],
+) -> tuple[dict[str, int], set[int]]:
+    """필요한 음식 종류(food_kinds) 행을 보장하고 (kind_key -> id 매핑, 유효한 id 집합)을 반환한다."""
+    existing_kinds = {fk.kind_key: fk for fk in db.query(FoodKind).all()}
+    for spec in CANONICAL_FOOD_KINDS:
+        required_kinds.setdefault(spec.kind_key, spec.name)
+
+    created = False
+    for kind_key, display_name in required_kinds.items():
+        if kind_key not in existing_kinds:
+            new_kind = FoodKind(kind_key=kind_key, name=display_name)
+            db.add(new_kind)
+            existing_kinds[kind_key] = new_kind
+            created = True
+
+    if created:
+        db.flush()
+
+    kind_id_by_key = {k: fk.id for k, fk in existing_kinds.items()}
+    valid_kind_ids = set(kind_id_by_key.values())
+    return kind_id_by_key, valid_kind_ids
+
+
 def seed_database(
     db: Session,
     csv_path: Path = DEFAULT_CSV_PATH,
@@ -366,7 +397,7 @@ def seed_database(
     use_llm: bool = False,
 ) -> dict[str, int]:
     """
-    1단계: CSV 파싱 및 MySQL menus 테이블 적재
+    1단계: CSV 파싱 및 MySQL menus 테이블 적재 (음식 종류 food_kinds 연결 및 수동 분류 보존)
     2단계: 200+ 질문 후보 풀(LLM 연동 포함) 생성
     3단계: 샤논 엔트로피·커버리지와 주제 다양성으로 초기 중요도를 계산해 질문 테이블에 적재
     """
@@ -376,26 +407,65 @@ def seed_database(
         include_beverages_and_bakery=include_beverages_and_bakery,
     )
 
-    existing_menus = {m.food_code: m for m in db.query(Menu).all()}
+    all_existing_menus = db.query(Menu).all()
+    existing_menus: dict[str, Optional[Menu]] = {m.food_code: m for m in all_existing_menus}
+
+    required_kinds: dict[str, str] = {}
+    for m_data in parsed_menus:
+        kind_key, display_name = classify_food_kind(
+            base_name=m_data["base_name"],
+            name=m_data["name"],
+        )
+        required_kinds.setdefault(kind_key, display_name)
+    for existing_m in all_existing_menus:
+        kind_key, display_name = classify_food_kind(
+            base_name=existing_m.base_name,
+            name=existing_m.name,
+        )
+        required_kinds.setdefault(kind_key, display_name)
+
+    kind_id_by_key, valid_kind_ids = _ensure_food_kinds(db, required_kinds)
+
     new_menu_objs: list[Menu] = []
     for m_data in parsed_menus:
         code = m_data["food_code"]
+        kind_key, _ = classify_food_kind(base_name=m_data["base_name"], name=m_data["name"])
+        default_kind_id = kind_id_by_key[kind_key]
+
         if code not in existing_menus:
-            new_menu_objs.append(Menu(**m_data))
+            new_menu_objs.append(Menu(**m_data, food_kind_id=default_kind_id))
             existing_menus[code] = None
         elif existing_menus[code] is not None:
             existing_m = existing_menus[code]
             for field, value in m_data.items():
                 setattr(existing_m, field, value)
+            if existing_m.food_kind_id is None or existing_m.food_kind_id not in valid_kind_ids:
+                existing_m.food_kind_id = default_kind_id
+
+    for existing_m in all_existing_menus:
+        if existing_m.food_kind_id is None or existing_m.food_kind_id not in valid_kind_ids:
+            kind_key, _ = classify_food_kind(
+                base_name=existing_m.base_name,
+                name=existing_m.name,
+            )
+            existing_m.food_kind_id = kind_id_by_key[kind_key]
 
     if new_menu_objs:
         db.bulk_save_objects(new_menu_objs)
     db.commit()
 
+    initial_popular_rows = ensure_initial_popular_food_kinds(db, commit=True)
+    illustration_sync = sync_food_kind_representative_illustrations(db, commit=True)
+    exception_summary = seed_menu_illustration_exceptions(db, commit=True)
+
     question_summary = seed_question_pool(db, use_llm=use_llm)
     return {
         "total_menus_in_db": db.query(Menu).count(),
         "inserted_menus": len(new_menu_objs),
+        "initial_popular_food_kinds": len(initial_popular_rows),
+        "synced_food_kind_illustrations": illustration_sync["updated"],
+        "inserted_illustration_exceptions": exception_summary["inserted"],
+        "total_illustration_exceptions": exception_summary["total_exceptions"],
         **question_summary,
     }
 

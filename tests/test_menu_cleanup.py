@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.models import RequestOperation
 from app.core.database import Base
-from app.menus.models import Menu, OrderSheetQuestion, Recommendation, RecommendationFeedback, UserMeal
+from app.menus.models import FoodKind, Menu, OrderSheetQuestion, Recommendation, RecommendationFeedback, UserMeal
 from app.recommend.common import InvalidOrderSheetException
 from app.recommend.order_sheet import record_recommendation_feedback
 from app.recommend.schemas import RecommendationFeedbackRequest
@@ -54,9 +54,13 @@ def test_cleanup_preserves_other_menus_in_the_same_records():
 
     with engine.begin() as connection:
         connection.execute(User.__table__.insert().values(id=1))
+        connection.execute(FoodKind.__table__.insert(), [
+            dict(id=1, kind_key="멸치볶음", name="멸치볶음"),
+            dict(id=2, kind_key="김치찌개", name="김치찌개"),
+        ])
         connection.execute(Menu.__table__.insert(), [
-            dict(id=1, food_code=REMOVED_CODE, name="멸치볶음", base_name="멸치볶음", category_large="볶음류"),
-            dict(id=2, food_code=RETAINED_CODE, name="김치찌개", base_name="김치찌개", category_large="찌개 및 전골류"),
+            dict(id=1, food_code=REMOVED_CODE, name="멸치볶음", base_name="멸치볶음", food_kind_id=1, category_large="볶음류"),
+            dict(id=2, food_code=RETAINED_CODE, name="김치찌개", base_name="김치찌개", food_kind_id=2, category_large="찌개 및 전골류"),
         ])
         connection.execute(UserMeal.__table__.insert(), [
             dict(id=1, user_id=1, menu_id=1, menu_name="멸치볶음"),
