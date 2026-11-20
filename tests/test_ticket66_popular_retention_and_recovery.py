@@ -25,9 +25,11 @@ from app.menus.models import (
 )
 from app.menus.popular import (
     aggregate_popular_menus_for_kst_date,
+    ensure_initial_popular_food_kinds,
     get_seoul_tz,
     recover_missed_popular_menu_ranking,
 )
+from app.menus.popular_scheduler import popular_ranking_scheduler_loop
 from app.users.models import User
 
 POPULAR_MENUS_URL = "/api/menus/popular"
@@ -95,6 +97,7 @@ def popular_api(sqlite_engine):
 
 def test_quiet_day_before_and_after_publication_updates_only_last_succeeded_date(popular_api):
     db = popular_api.db
+    ensure_initial_popular_food_kinds(db)
     burger = _build_menu("T66-Q-BG", "버거_치즈버거", "버거")
     gukbap = _build_menu("T66-Q-GB", "국밥_돼지국밥", "국밥")
     pasta = _build_menu("T66-Q-PS", "스파게티_토마토파스타", "스파게티")
@@ -486,13 +489,13 @@ def test_first_ever_restart_with_no_state_runs_latest_passed_kst_midnight_once(p
     assert res_repeat.published is False
 
 
-def test_fastapi_lifespan_runs_missed_midnight_recovery_once_and_survives_recovery_error(
+def test_fastapi_lifespan_runs_nonblocking_startup_recovery_and_survives_recovery_error(
     sqlite_engine,
     monkeypatch,
 ):
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=sqlite_engine)
 
-    # 현재 한국 날짜의 전날(어제)에 5명 식사 기록을 미리 넣어 두고 서버 재시작 복구를 검증한다.
+    # 현재 한국 날짜의 전날(어제)에 5명 식사 기록을 미리 넣어 두고 서버 재시작 비차단 복구를 검증한다.
     seoul_tz = get_seoul_tz()
     today_kst = datetime.now(timezone.utc).astimezone(seoul_tz).date()
     yesterday_kst = today_kst - timedelta(days=1)
@@ -529,16 +532,28 @@ def test_fastapi_lifespan_runs_missed_midnight_recovery_once_and_survives_recove
         )
         setup_db.commit()
 
-    async def idle_loop():
+    async def idle_room_loop():
         try:
             await asyncio.Future()
         except asyncio.CancelledError:
             raise
 
+    recovery_started = threading.Event()
+    allow_recovery_finish = threading.Event()
+    recovery_finished = threading.Event()
+
+    def gated_recovery(db: Session, now: datetime | None = None):
+        recovery_started.set()
+        assert allow_recovery_finish.wait(timeout=5.0), "Timed out waiting to release recovery gate"
+        try:
+            return recover_missed_popular_menu_ranking(db, now=now)
+        finally:
+            recovery_finished.set()
+
     monkeypatch.setattr(app_main, "engine", sqlite_engine)
     monkeypatch.setattr(app_main, "SessionLocal", TestingSessionLocal)
-    monkeypatch.setattr(app_main, "room_cleanup_loop", idle_loop)
-    monkeypatch.setattr(app_main, "popular_ranking_scheduler_loop", idle_loop)
+    monkeypatch.setattr(app_main, "room_cleanup_loop", idle_room_loop)
+    monkeypatch.setattr(app_main, "recover_missed_popular_menu_ranking", gated_recovery)
 
     def override_get_db():
         with TestingSessionLocal() as db:
@@ -547,8 +562,19 @@ def test_fastapi_lifespan_runs_missed_midnight_recovery_once_and_survives_recove
     overrides = dict(app.dependency_overrides)
     app.dependency_overrides[get_db] = override_get_db
     try:
-        # 1) 첫 FastAPI 시작: 놓친 자정 집계 자동 복구 -> 즉시 aggregated 반환
+        # 1) 첫 FastAPI 시작: 복구가 워커 스레드에서 진행 중이어도 앱은 즉시 yield하여 기존 목록을 서빙한다.
         with TestClient(app) as client:
+            assert recovery_started.wait(timeout=5.0), "Background startup recovery did not start"
+            during_resp = client.get(POPULAR_MENUS_URL)
+            assert during_resp.status_code == 200
+            during_data = during_resp.json()["data"]
+            assert during_data["source"] == "initial"
+            assert len(during_data["items"]) == 8
+
+            # 복구 완료 허용 -> 이후 조회는 즉시 복구된 aggregated 순위를 반환한다.
+            allow_recovery_finish.set()
+            assert recovery_finished.wait(timeout=5.0), "Background startup recovery did not finish"
+
             resp1 = client.get(POPULAR_MENUS_URL)
             assert resp1.status_code == 200
             data1 = resp1.json()["data"]
@@ -556,7 +582,7 @@ def test_fastapi_lifespan_runs_missed_midnight_recovery_once_and_survives_recove
             assert data1["as_of"] == expected_as_of_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
             assert [item["name"] for item in data1["items"]] == ["햄버거"]
 
-        # 어제 국밥 기록을 더 추가한 뒤 같은 날 서버를 다시 시작해도 이미 성공한 오늘 집계는 중복 게시하지 않는다.
+        # 2) 어제 국밥 기록을 더 추가한 뒤 같은 날 서버를 다시 시작해도 이미 성공한 오늘 집계는 중복 게시하지 않는다.
         with TestingSessionLocal() as db:
             db.add_all(
                 [
@@ -571,24 +597,114 @@ def test_fastapi_lifespan_runs_missed_midnight_recovery_once_and_survives_recove
             )
             db.commit()
 
+        second_recovery_done = threading.Event()
+
+        def tracking_second_recovery(db: Session, now: datetime | None = None):
+            try:
+                return recover_missed_popular_menu_ranking(db, now=now)
+            finally:
+                second_recovery_done.set()
+
+        monkeypatch.setattr(app_main, "recover_missed_popular_menu_ranking", tracking_second_recovery)
         with TestClient(app) as client:
+            assert second_recovery_done.wait(timeout=5.0)
             resp2 = client.get(POPULAR_MENUS_URL)
             assert resp2.status_code == 200
             data2 = resp2.json()["data"]
             assert data2["source"] == "aggregated"
             assert [item["name"] for item in data2["items"]] == ["햄버거"]
 
-        # 3) 시작 복구 중 일시 오류가 발생해도 FastAPI 앱 기동 자체는 실패하지 않는다.
-        def broken_recovery(_db):
+        # 3) 시작 복구 중 일시 오류가 발생해도 FastAPI 앱 기동 및 조회는 실패하지 않는다.
+        error_recovery_invoked = threading.Event()
+
+        def broken_recovery(_db, _now=None):
+            error_recovery_invoked.set()
             raise RuntimeError("transient recovery failure")
 
         monkeypatch.setattr(app_main, "recover_missed_popular_menu_ranking", broken_recovery)
         with TestClient(app) as client:
             assert client.get("/").status_code == 200
             assert client.get(POPULAR_MENUS_URL).status_code == 200
+            assert error_recovery_invoked.wait(timeout=5.0)
+            assert client.get(POPULAR_MENUS_URL).status_code == 200
     finally:
+        allow_recovery_finish.set()
         app.dependency_overrides.clear()
         app.dependency_overrides.update(overrides)
+
+
+def test_scheduler_startup_recovery_crossing_kst_midnight_immediately_runs_next_day(
+    sqlite_engine,
+):
+    with Session(sqlite_engine) as setup_db:
+        burger = _build_menu("T66-MID-BG", "버거_치즈버거", "버거")
+        gukbap = _build_menu("T66-MID-GB", "국밥_돼지국밥", "국밥")
+        setup_db.add_all([burger, gukbap])
+        setup_db.flush()
+        users = _create_users(setup_db, 5, start_kakao_id=66651)
+        # Day D-1 (KST 2026-11-18 -> 2026-11-19 복구 대상): 햄버거 5명
+        day1_utc = datetime(2026, 11, 18, 3, 0, 0, tzinfo=timezone.utc)
+        # Day D (KST 2026-11-19 -> 2026-11-20 자정 대상): 국밥 5명
+        day2_utc = datetime(2026, 11, 19, 3, 0, 0, tzinfo=timezone.utc)
+        setup_db.add_all(
+            [
+                *[UserMeal(user_id=u.id, menu_id=burger.id, menu_name="치즈버거", eaten_at=day1_utc) for u in users],
+                *[UserMeal(user_id=u.id, menu_id=gukbap.id, menu_name="돼지국밥", eaten_at=day2_utc) for u in users],
+            ]
+        )
+        setup_db.commit()
+
+    # 서버 시작 시각: KST 2026-11-19 23:59:59 (= UTC 2026-11-19 14:59:59)
+    current_utc = [datetime(2026, 11, 19, 14, 59, 59, tzinfo=timezone.utc)]
+    recovered_dates: list[date] = []
+    aggregated_dates: list[date] = []
+    recorded_delays: list[float] = []
+
+    def crossing_midnight_recover(db: Session, now: datetime | None = None):
+        result = recover_missed_popular_menu_ranking(db, now=now)
+        recovered_dates.append(result.target_kst_date)
+        # 복구가 2초 걸려 한국시간 자정을 넘겨 KST 2026-11-20 00:00:01이 됨!
+        current_utc[0] = current_utc[0] + timedelta(seconds=2)
+        return result
+
+    def recording_aggregate(db: Session, target_kst_date: date):
+        aggregated_dates.append(target_kst_date)
+        return aggregate_popular_menus_for_kst_date(db, target_kst_date)
+
+    async def _run():
+        entered_sleep = asyncio.Event()
+
+        async def fake_sleep(delay: float) -> None:
+            recorded_delays.append(delay)
+            entered_sleep.set()
+            await asyncio.Future()
+
+        task = asyncio.create_task(
+            popular_ranking_scheduler_loop(
+                now_fn=lambda: current_utc[0],
+                sleep_fn=fake_sleep,
+                session_factory=lambda: Session(sqlite_engine),
+                recover_fn=crossing_midnight_recover,
+                aggregate_fn=recording_aggregate,
+                run_startup_recovery=True,
+            )
+        )
+        await asyncio.wait_for(entered_sleep.wait(), timeout=5.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+
+    # 2026-11-19 복구 후 자정을 넘겼으므로 2026-11-20 집계를 건너뛰지 않고 즉시 실행한 뒤 2026-11-21 자정(86399초)까지 대기!
+    assert recovered_dates == [date(2026, 11, 19)]
+    assert aggregated_dates == [date(2026, 11, 20)]
+    assert recorded_delays == [86399.0]
+
+    with Session(sqlite_engine) as verify_db:
+        state = verify_db.query(PopularMenuRankingState).filter(PopularMenuRankingState.id == 1).one()
+        assert state.last_succeeded_kst_date == date(2026, 11, 20)
+        assert state.published_as_of == datetime(2026, 11, 19, 15, 0, 0)
 
 
 def test_saved_popular_ranking_hides_only_food_kinds_with_zero_remaining_catalog_menus(popular_api):

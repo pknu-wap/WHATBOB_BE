@@ -31,7 +31,11 @@ from app.menus.illustrations import (
     FOOD_KIND_ILLUSTRATION_SPEC_BY_KEY,
     FOOD_KIND_ILLUSTRATION_SPECS,
     MISSING_ILLUSTRATION_KIND_KEYS_FOR_ISSUE68,
+    PENDING_VERIFICATION_ILLUSTRATION_KIND_KEYS,
     REUSABLE_ILLUSTRATION_KIND_KEYS,
+    FoodKindNotFoundException,
+    IllustrationAuditStatus,
+    InvalidMenuIllustrationException,
     register_food_kind_illustration,
     seed_menu_illustration_exceptions,
     sync_food_kind_representative_illustrations,
@@ -91,23 +95,20 @@ def _make_menu(
     )
 
 
-def test_figma_illustration_manifest_records_reusable_and_missing_for_issue68():
+def test_figma_illustration_manifest_records_reusable_pending_and_missing_for_issue68():
     # 8 canonical food kinds must all be tracked in agreed order
     assert [spec.kind_key for spec in FOOD_KIND_ILLUSTRATION_SPECS] == [
         spec.kind_key for spec in CANONICAL_FOOD_KINDS
     ]
 
-    # Reusable Figma originals (including priority checked malatang, jeyuk_bokkeum, and Firefly candidate)
+    # Confirmed reusable named Figma originals (5 kinds)
     assert REUSABLE_ILLUSTRATION_KIND_KEYS == (
-        "tteokbokki",
         "tonkatsu",
         "burger",
         "malatang",
         "pasta",
         "jeyuk_bokkeum",
     )
-    assert FOOD_KIND_ILLUSTRATION_SPEC_BY_KEY["tteokbokki"].figma_source_name is not None
-    assert "Firefly (2) 1" in FOOD_KIND_ILLUSTRATION_SPEC_BY_KEY["tteokbokki"].figma_source_name
     assert FOOD_KIND_ILLUSTRATION_SPEC_BY_KEY["tonkatsu"].figma_source_name == "돈까스"
     assert FOOD_KIND_ILLUSTRATION_SPEC_BY_KEY["burger"].figma_source_name == "햄버거"
     assert FOOD_KIND_ILLUSTRATION_SPEC_BY_KEY["malatang"].figma_source_name == "마라탕"
@@ -117,15 +118,24 @@ def test_figma_illustration_manifest_records_reusable_and_missing_for_issue68():
     for key in REUSABLE_ILLUSTRATION_KIND_KEYS:
         spec = FOOD_KIND_ILLUSTRATION_SPEC_BY_KEY[key]
         assert spec.usable is True
-        assert spec.status == "reusable_figma"
+        assert spec.status is IllustrationAuditStatus.CONFIRMED_REUSABLE
         assert spec.expected_image_url == f"/static/menu-illustrations/{key}.png"
+
+    # Pending verification candidate (tteokbokki from Firefly (2) 1 — distinguished from confirmed & missing)
+    assert PENDING_VERIFICATION_ILLUSTRATION_KIND_KEYS == ("tteokbokki",)
+    tteok_spec = FOOD_KIND_ILLUSTRATION_SPEC_BY_KEY["tteokbokki"]
+    assert tteok_spec.usable is False
+    assert tteok_spec.status is IllustrationAuditStatus.PENDING_VERIFICATION
+    assert tteok_spec.figma_source_name is not None
+    assert "Firefly (2) 1" in tteok_spec.figma_source_name
+    assert tteok_spec.expected_image_url == "/static/menu-illustrations/tteokbokki.png"
 
     # Missing originals handed off to #68
     assert MISSING_ILLUSTRATION_KIND_KEYS_FOR_ISSUE68 == ("gukbap", "jjajangmyeon")
     for key in MISSING_ILLUSTRATION_KIND_KEYS_FOR_ISSUE68:
         spec = FOOD_KIND_ILLUSTRATION_SPEC_BY_KEY[key]
         assert spec.usable is False
-        assert spec.status == "missing_for_#68"
+        assert spec.status is IllustrationAuditStatus.MISSING_ORIGINAL
         assert spec.figma_source_name is None
         assert spec.expected_image_url == f"/static/menu-illustrations/{key}.png"
 
@@ -348,15 +358,15 @@ def test_sync_and_register_food_kind_illustrations_verify_files_and_preserve_cus
             verify_file_exists=True,
         )
 
-    # Reject unknown kind_key and invalid URL format
-    with pytest.raises(ValueError, match="찾을 수 없습니다"):
+    # Reject unknown kind_key and invalid URL format with domain exceptions
+    with pytest.raises(FoodKindNotFoundException, match="찾을 수 없습니다"):
         register_food_kind_illustration(
             sqlite_db,
             kind_key="nonexistent_kind",
             image_url="/static/menu-illustrations/burger.png",
             static_dir=tmp_path,
         )
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidMenuIllustrationException):
         register_food_kind_illustration(
             sqlite_db,
             kind_key="burger",

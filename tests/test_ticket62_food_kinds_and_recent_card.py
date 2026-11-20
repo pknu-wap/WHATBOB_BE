@@ -163,6 +163,47 @@ def test_seed_database_links_food_kinds_and_preserves_manual_mapping_and_meals_o
     assert reloaded_meal.menu_name == "치즈버거"
 
 
+def test_persisted_menu_setting_food_kind_id_to_none_enforces_not_null_and_models_has_no_session_listener(
+    sqlite_db: Session,
+):
+    menu = Menu(
+        food_code="DIRTY-NULL-01",
+        name="버거_치즈버거",
+        base_name="버거",
+        category_large="빵 및 과자류",
+    )
+    sqlite_db.add(menu)
+    sqlite_db.commit()
+    original_kind_id = menu.food_kind_id
+    assert original_kind_id is not None
+
+    # Setting food_kind_id = None on an already-persisted Menu (session.dirty) MUST raise IntegrityError,
+    # never silently refill food_kind_id via a before_flush listener.
+    menu.food_kind_id = None
+    with pytest.raises(IntegrityError):
+        sqlite_db.commit()
+    sqlite_db.rollback()
+
+    reloaded = sqlite_db.query(Menu).filter(Menu.food_code == "DIRTY-NULL-01").one()
+    assert reloaded.food_kind_id == original_kind_id
+
+    # Clearing the food_kind relationship on an already-persisted Menu MUST also enforce NOT NULL.
+    reloaded.food_kind = None
+    with pytest.raises(IntegrityError):
+        sqlite_db.commit()
+    sqlite_db.rollback()
+
+    reloaded_again = sqlite_db.query(Menu).filter(Menu.food_code == "DIRTY-NULL-01").one()
+    assert reloaded_again.food_kind_id == original_kind_id
+
+    # Entity module app/menus/models.py must stay pure ORM models without session event listeners.
+    models_source = (
+        Path(__file__).resolve().parent.parent / "app" / "menus" / "models.py"
+    ).read_text(encoding="utf-8")
+    assert "before_flush" not in models_source
+    assert "event.listens_for" not in models_source
+
+
 @pytest.fixture
 def recent_card_api():
     engine = create_engine(

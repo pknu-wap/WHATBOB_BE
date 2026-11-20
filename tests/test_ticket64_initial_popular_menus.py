@@ -101,6 +101,7 @@ def test_public_popular_menus_returns_initial_eight_in_agreed_order_even_with_sc
         db.flush()
         kind_id_by_key[kind_key] = fk.id
     db.commit()
+    ensure_initial_popular_food_kinds(db)
 
     resp = popular_api.client.get(POPULAR_MENUS_URL)
     assert resp.status_code == 200
@@ -138,7 +139,43 @@ def test_public_popular_menus_returns_initial_eight_in_agreed_order_even_with_sc
         assert asset_resp.status_code == 200
 
 
-def test_public_popular_menus_works_on_fresh_empty_db_without_token(popular_api):
+def test_public_popular_menus_is_strictly_read_only_when_initial_table_is_empty(
+    popular_api,
+    sqlite_engine,
+):
+    db = popular_api.db
+    commits: list[str] = []
+    write_statements: list[str] = []
+
+    def _record_commit(_session):
+        commits.append("commit")
+
+    def _record_write_sql(_conn, _cursor, statement, _parameters, _context, _executemany):
+        normalized = statement.lstrip().upper()
+        if normalized.startswith(("INSERT", "UPDATE", "DELETE", "REPLACE")):
+            write_statements.append(statement)
+
+    event.listen(db, "before_commit", _record_commit)
+    event.listen(sqlite_engine, "before_cursor_execute", _record_write_sql)
+    try:
+        resp = popular_api.client.get(POPULAR_MENUS_URL)
+    finally:
+        event.remove(db, "before_commit", _record_commit)
+        event.remove(sqlite_engine, "before_cursor_execute", _record_write_sql)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["data"] == {"source": "initial", "as_of": None, "items": []}
+    assert commits == []
+    assert write_statements == []
+    assert db.query(InitialPopularFoodKind).count() == 0
+    assert db.query(FoodKind).count() == 0
+
+
+def test_public_popular_menus_returns_initial_eight_after_startup_seed_without_token(popular_api):
+    ensure_initial_popular_food_kinds(popular_api.db)
+
     resp = popular_api.client.get(POPULAR_MENUS_URL)
     assert resp.status_code == 200
     body = resp.json()
@@ -189,6 +226,7 @@ def test_public_popular_menus_exposes_no_user_or_meal_data_and_is_independent_fr
         ]
     )
     db.commit()
+    ensure_initial_popular_food_kinds(db)
 
     # 인증 없이 최근 메뉴는 401이지만 인기 메뉴는 200으로 독립 조회된다.
     recent_unauth = popular_api.client.get(RECENT_HOME_CARD_URL)

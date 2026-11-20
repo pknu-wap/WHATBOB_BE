@@ -1,10 +1,13 @@
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
+from http.server import BaseHTTPRequestHandler, SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -26,11 +29,19 @@ from app.menus.food_kinds import (
     STATIC_DIR,
 )
 from app.menus.illustrations import (
+    FoodKindIllustrationStatus,
+    FoodKindNotFoundException,
+    IllustrationAuditStatus,
+    IllustrationDeploymentResult,
+    InvalidMenuIllustrationException,
     MenuIllustrationAssetCheck,
+    MenuIllustrationVerificationError,
     deploy_and_register_food_kind_png,
     inspect_food_kind_illustration_status,
+    register_food_kind_illustration,
     seed_menu_illustration_exceptions,
     validate_menu_illustration_png,
+    verify_static_illustration_http_200,
 )
 from app.menus.models import FoodKind, Menu, UserMeal
 from app.menus.popular import (
@@ -215,17 +226,19 @@ def test_deploy_and_register_food_kind_png_deploys_atomically_and_updates_db(
         require_transparency=True,
     )
     deployed_gukbap = static_root / "menu-illustrations" / "gukbap.png"
+    assert isinstance(result, IllustrationDeploymentResult)
     assert deployed_gukbap.is_file()
     assert deployed_gukbap.read_bytes() == gukbap_src.read_bytes()
-    assert result["kind_key"] == "gukbap"
-    assert result["name"] == "국밥"
-    assert result["image_url"] == "/static/menu-illustrations/gukbap.png"
-    assert result["previous_image_url"] is None
-    assert result["width"] == 256
-    assert result["height"] == 256
-    assert result["mode"] == "RGBA"
-    assert result["has_alpha"] is True
-    assert Path(result["deployed_path"]).resolve() == deployed_gukbap.resolve()
+    assert result.kind_key == "gukbap"
+    assert result.name == "국밥"
+    assert result.image_url == "/static/menu-illustrations/gukbap.png"
+    assert result.previous_image_url is None
+    assert result.width == 256
+    assert result.height == 256
+    assert result.mode == "RGBA"
+    assert result.has_alpha is True
+    assert Path(result.deployed_path).resolve() == deployed_gukbap.resolve()
+    assert result.to_dict()["image_url"] == "/static/menu-illustrations/gukbap.png"
 
     sqlite_db.expire_all()
     gukbap_fk = sqlite_db.query(FoodKind).filter(FoodKind.kind_key == "gukbap").one()
@@ -242,7 +255,7 @@ def test_deploy_and_register_food_kind_png_deploys_atomically_and_updates_db(
     )
     deployed_jj = static_root / "menu-illustrations" / "jjajangmyeon-v2.png"
     assert deployed_jj.is_file()
-    assert jj_result["image_url"] == "/static/menu-illustrations/jjajangmyeon-v2.png"
+    assert jj_result.image_url == "/static/menu-illustrations/jjajangmyeon-v2.png"
 
     inplace_result = deploy_and_register_food_kind_png(
         sqlite_db,
@@ -251,8 +264,8 @@ def test_deploy_and_register_food_kind_png_deploys_atomically_and_updates_db(
         filename="jjajangmyeon-v2.png",
         static_dir=static_root,
     )
-    assert inplace_result["image_url"] == "/static/menu-illustrations/jjajangmyeon-v2.png"
-    assert inplace_result["previous_image_url"] == "/static/menu-illustrations/jjajangmyeon-v2.png"
+    assert inplace_result.image_url == "/static/menu-illustrations/jjajangmyeon-v2.png"
+    assert inplace_result.previous_image_url == "/static/menu-illustrations/jjajangmyeon-v2.png"
     assert deployed_jj.read_bytes() == jj_src.read_bytes()
 
 
@@ -271,7 +284,7 @@ def test_deploy_and_register_food_kind_png_rejects_invalid_inputs_without_side_e
     Image.new("RGB", (64, 64), (10, 20, 30)).save(fake_jpeg, format="JPEG")
 
     # Unknown kind_key -> rejected BEFORE writing disk
-    with pytest.raises(ValueError, match="찾을 수 없습니다"):
+    with pytest.raises(FoodKindNotFoundException, match="찾을 수 없습니다"):
         deploy_and_register_food_kind_png(
             sqlite_db,
             kind_key="nonexistent_kind",
@@ -293,7 +306,7 @@ def test_deploy_and_register_food_kind_png_rejects_invalid_inputs_without_side_e
         "gukbap.PNG",
         "",
     ):
-        with pytest.raises(ValueError):
+        with pytest.raises(InvalidMenuIllustrationException):
             deploy_and_register_food_kind_png(
                 sqlite_db,
                 kind_key="gukbap",
@@ -303,7 +316,7 @@ def test_deploy_and_register_food_kind_png_rejects_invalid_inputs_without_side_e
             )
 
     # JPEG disguised as PNG
-    with pytest.raises(ValueError, match="PNG"):
+    with pytest.raises(InvalidMenuIllustrationException, match="PNG"):
         deploy_and_register_food_kind_png(
             sqlite_db,
             kind_key="gukbap",
@@ -312,7 +325,7 @@ def test_deploy_and_register_food_kind_png_rejects_invalid_inputs_without_side_e
         )
 
     # Opaque RGB rejected when require_transparency=True
-    with pytest.raises(ValueError, match="투명도|알파"):
+    with pytest.raises(InvalidMenuIllustrationException, match="투명도|알파"):
         deploy_and_register_food_kind_png(
             sqlite_db,
             kind_key="gukbap",
@@ -380,23 +393,25 @@ def test_inspect_food_kind_illustration_status_reports_audit_disk_and_live_effec
 
     # State 1: nothing deployed yet
     initial_report = inspect_food_kind_illustration_status(sqlite_db, static_dir=static_root)
-    assert [row["kind_key"] for row in initial_report] == [spec.kind_key for spec in CANONICAL_FOOD_KINDS]
+    assert all(isinstance(row, FoodKindIllustrationStatus) for row in initial_report)
+    assert [row.kind_key for row in initial_report] == [spec.kind_key for spec in CANONICAL_FOOD_KINDS]
 
-    by_key = {row["kind_key"]: row for row in initial_report}
-    assert by_key["gukbap"] == {
+    by_key = {row.kind_key: row for row in initial_report}
+    assert by_key["gukbap"].to_dict() == {
         "kind_key": "gukbap",
-        "food_kind_id": by_key["gukbap"]["food_kind_id"],
+        "food_kind_id": by_key["gukbap"].food_kind_id,
         "name": "국밥",
-        "audit_status": "missing_for_#68",
+        "audit_status": IllustrationAuditStatus.MISSING_ORIGINAL.value,
         "expected_image_url": "/static/menu-illustrations/gukbap.png",
         "registered_image_url": None,
         "file_exists_on_disk": False,
         "effective_image_url": DEFAULT_MENU_ILLUSTRATION_URL,
         "using_common_fallback": True,
     }
-    assert by_key["jjajangmyeon"]["audit_status"] == "missing_for_#68"
-    assert by_key["jjajangmyeon"]["effective_image_url"] == DEFAULT_MENU_ILLUSTRATION_URL
-    assert by_key["pasta"]["audit_status"] == "reusable_figma"
+    assert by_key["jjajangmyeon"].audit_status is IllustrationAuditStatus.MISSING_ORIGINAL
+    assert by_key["jjajangmyeon"].effective_image_url == DEFAULT_MENU_ILLUSTRATION_URL
+    assert by_key["tteokbokki"].audit_status is IllustrationAuditStatus.PENDING_VERIFICATION
+    assert by_key["pasta"].audit_status is IllustrationAuditStatus.CONFIRMED_REUSABLE
 
     # State 2: burger.png exists on disk, not yet registered in DB
     _write_png(illus_dir / "burger.png", mode="RGBA", size=(128, 128))
@@ -419,22 +434,272 @@ def test_inspect_food_kind_illustration_status_reports_audit_disk_and_live_effec
     (illus_dir / "pasta.png").unlink()
 
     updated_by_key = {
-        row["kind_key"]: row
+        row.kind_key: row
         for row in inspect_food_kind_illustration_status(sqlite_db, static_dir=static_root)
     }
-    assert updated_by_key["burger"]["registered_image_url"] is None
-    assert updated_by_key["burger"]["file_exists_on_disk"] is True
-    assert updated_by_key["burger"]["effective_image_url"] == DEFAULT_MENU_ILLUSTRATION_URL
+    assert updated_by_key["burger"].registered_image_url is None
+    assert updated_by_key["burger"].file_exists_on_disk is True
+    assert updated_by_key["burger"].effective_image_url == DEFAULT_MENU_ILLUSTRATION_URL
 
-    assert updated_by_key["gukbap"]["registered_image_url"] == "/static/menu-illustrations/gukbap.png"
-    assert updated_by_key["gukbap"]["file_exists_on_disk"] is True
-    assert updated_by_key["gukbap"]["effective_image_url"] == "/static/menu-illustrations/gukbap.png"
-    assert updated_by_key["gukbap"]["using_common_fallback"] is False
+    assert updated_by_key["gukbap"].registered_image_url == "/static/menu-illustrations/gukbap.png"
+    assert updated_by_key["gukbap"].file_exists_on_disk is True
+    assert updated_by_key["gukbap"].effective_image_url == "/static/menu-illustrations/gukbap.png"
+    assert updated_by_key["gukbap"].using_common_fallback is False
 
-    assert updated_by_key["pasta"]["registered_image_url"] == "/static/menu-illustrations/pasta.png"
-    assert updated_by_key["pasta"]["file_exists_on_disk"] is False
-    assert updated_by_key["pasta"]["effective_image_url"] == DEFAULT_MENU_ILLUSTRATION_URL
-    assert updated_by_key["pasta"]["using_common_fallback"] is True
+    assert updated_by_key["pasta"].registered_image_url == "/static/menu-illustrations/pasta.png"
+    assert updated_by_key["pasta"].file_exists_on_disk is False
+    assert updated_by_key["pasta"].effective_image_url == DEFAULT_MENU_ILLUSTRATION_URL
+    assert updated_by_key["pasta"].using_common_fallback is True
+
+
+@contextmanager
+def _local_http_server(handler_cls):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5.0)
+
+
+def test_verify_static_illustration_http_200_via_static_files_and_live_http_server(
+    tmp_path: Path,
+):
+    static_root = tmp_path / "static"
+    illus_dir = static_root / "menu-illustrations"
+    illus_dir.mkdir(parents=True)
+    _write_png(illus_dir / "gukbap.png", mode="RGBA", size=(64, 64))
+    (illus_dir / "empty.png").write_bytes(b"")
+
+    # 1) Local Starlette StaticFiles probe (verify_base_url=None)
+    assert (
+        verify_static_illustration_http_200(
+            "/static/menu-illustrations/gukbap.png",
+            static_dir=static_root,
+        )
+        == "/static/menu-illustrations/gukbap.png"
+    )
+    with pytest.raises(MenuIllustrationVerificationError):
+        verify_static_illustration_http_200(
+            "/static/menu-illustrations/missing.png",
+            static_dir=static_root,
+        )
+    with pytest.raises(MenuIllustrationVerificationError):
+        verify_static_illustration_http_200(
+            "/static/menu-illustrations/empty.png",
+            static_dir=static_root,
+        )
+
+    # 2) Live HTTP base URL probe
+    class _StaticProbeHandler(SimpleHTTPRequestHandler):
+        def translate_path(self, path: str) -> str:
+            rel = path.removeprefix("/static/").lstrip("/")
+            return str(static_root / rel)
+
+        def log_message(self, format: str, *args) -> None:
+            pass
+
+    with _local_http_server(_StaticProbeHandler) as base_url:
+        assert (
+            verify_static_illustration_http_200(
+                "/static/menu-illustrations/gukbap.png",
+                static_dir=static_root,
+                verify_base_url=base_url,
+            )
+            == "/static/menu-illustrations/gukbap.png"
+        )
+        with pytest.raises(MenuIllustrationVerificationError):
+            verify_static_illustration_http_200(
+                "/static/menu-illustrations/missing.png",
+                static_dir=static_root,
+                verify_base_url=base_url,
+            )
+        with pytest.raises(MenuIllustrationVerificationError):
+            verify_static_illustration_http_200(
+                "/static/menu-illustrations/empty.png",
+                static_dir=static_root,
+                verify_base_url=base_url,
+            )
+
+
+def test_deploy_and_register_rolls_back_db_and_file_on_failed_http_verification_and_logs_cleanup_oserror(
+    sqlite_db: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    ensure_initial_popular_food_kinds(sqlite_db)
+    static_root = tmp_path / "static"
+    illus_dir = static_root / "menu-illustrations"
+    illus_dir.mkdir(parents=True)
+
+    first_png = _write_png(tmp_path / "gukbap_v1.png", mode="RGBA", size=(64, 64), color=(10, 20, 30, 255))
+    second_png = _write_png(tmp_path / "gukbap_v2.png", mode="RGBA", size=(96, 96), color=(200, 100, 50, 255))
+
+    class _Always404Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, format: str, *args) -> None:
+            pass
+
+    with _local_http_server(_Always404Handler) as bad_base_url:
+        # Brand-new deployment fails HTTP 200 check -> DB unchanged & deployed file removed!
+        with pytest.raises(MenuIllustrationVerificationError):
+            deploy_and_register_food_kind_png(
+                sqlite_db,
+                kind_key="gukbap",
+                source_png=first_png,
+                static_dir=static_root,
+                verify_base_url=bad_base_url,
+            )
+        assert not (illus_dir / "gukbap.png").exists()
+        sqlite_db.expire_all()
+        assert sqlite_db.query(FoodKind).filter(FoodKind.kind_key == "gukbap").one().representative_image_url is None
+
+        # Existing file overwrite fails HTTP 200 check -> DB unchanged & previous file restored!
+        existing_target = illus_dir / "gukbap.png"
+        existing_target.write_bytes(first_png.read_bytes())
+        register_food_kind_illustration(
+            sqlite_db,
+            kind_key="gukbap",
+            image_url="/static/menu-illustrations/gukbap.png",
+            static_dir=static_root,
+        )
+        with pytest.raises(MenuIllustrationVerificationError):
+            deploy_and_register_food_kind_png(
+                sqlite_db,
+                kind_key="gukbap",
+                source_png=second_png,
+                static_dir=static_root,
+                verify_base_url=bad_base_url,
+            )
+        assert existing_target.is_file()
+        assert existing_target.read_bytes() == first_png.read_bytes()
+        sqlite_db.expire_all()
+        assert (
+            sqlite_db.query(FoodKind).filter(FoodKind.kind_key == "gukbap").one().representative_image_url
+            == "/static/menu-illustrations/gukbap.png"
+        )
+
+        # Rollback cleanup OSError logs a warning instead of silent pass!
+        original_unlink = Path.unlink
+
+        def _failing_unlink(self: Path, *args, **kwargs):
+            if self.name == "jjajangmyeon.png":
+                raise OSError("simulated permission denied on unlink")
+            return original_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", _failing_unlink)
+        with caplog.at_level(logging.WARNING, logger="app.menus.illustrations"):
+            with pytest.raises(MenuIllustrationVerificationError):
+                deploy_and_register_food_kind_png(
+                    sqlite_db,
+                    kind_key="jjajangmyeon",
+                    source_png=first_png,
+                    static_dir=static_root,
+                    verify_base_url=bad_base_url,
+                )
+        assert any("simulated permission denied on unlink" in rec.message for rec in caplog.records)
+        monkeypatch.setattr(Path, "unlink", original_unlink)
+        if (illus_dir / "jjajangmyeon.png").exists():
+            (illus_dir / "jjajangmyeon.png").unlink()
+
+
+def test_register_menu_illustration_cli_verify_base_url_enforces_http_200(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parent.parent
+    db_file = tmp_path / "cli_verify_t68.sqlite3"
+    db_url = f"sqlite:///{db_file.as_posix()}"
+
+    cli_engine = create_engine(db_url)
+    Base.metadata.create_all(cli_engine)
+    with Session(cli_engine) as seed_db:
+        ensure_initial_popular_food_kinds(seed_db)
+    cli_engine.dispose()
+
+    static_root = tmp_path / "static"
+    illus_dir = static_root / "menu-illustrations"
+    illus_dir.mkdir(parents=True)
+    gukbap_src = _write_png(tmp_path / "designer_gukbap.png", mode="RGBA", size=(128, 128))
+
+    env = {
+        **os.environ,
+        "DATABASE_URL": db_url,
+        "JWT_SECRET": "whatbob-cli-verify-t68-test-signing-key",
+        "KAKAO_REST_API_KEY": "test-kakao-key",
+        "PYTHONPATH": str(repo_root),
+    }
+
+    class _Always404Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, format: str, *args) -> None:
+            pass
+
+    class _StaticServingHandler(SimpleHTTPRequestHandler):
+        def translate_path(self, path: str) -> str:
+            rel = path.removeprefix("/static/").lstrip("/")
+            return str(static_root / rel)
+
+        def log_message(self, format: str, *args) -> None:
+            pass
+
+    with _local_http_server(_Always404Handler) as fail_url:
+        fail_res = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.register_menu_illustration",
+                "--static-dir",
+                str(static_root),
+                "--kind-key",
+                "gukbap",
+                "--source-png",
+                str(gukbap_src),
+                "--verify-base-url",
+                fail_url,
+            ],
+            cwd=str(repo_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert fail_res.returncode != 0
+        assert "404" in fail_res.stderr
+        assert not (illus_dir / "gukbap.png").exists()
+
+    with _local_http_server(_StaticServingHandler) as ok_url:
+        ok_res = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.register_menu_illustration",
+                "--static-dir",
+                str(static_root),
+                "--kind-key",
+                "gukbap",
+                "--source-png",
+                str(gukbap_src),
+                "--verify-base-url",
+                ok_url,
+            ],
+            cwd=str(repo_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert ok_res.returncode == 0, ok_res.stdout + ok_res.stderr
+        assert json.loads(ok_res.stdout)["image_url"] == "/static/menu-illustrations/gukbap.png"
+        assert (illus_dir / "gukbap.png").is_file()
 
 
 def test_register_menu_illustration_cli_supports_status_deploy_existing_url_and_sync(

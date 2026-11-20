@@ -7,6 +7,7 @@ from sqlalchemy import exists, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.auth.sessions import as_utc_naive
 from app.menus.food_kinds import CANONICAL_FOOD_KINDS, resolve_menu_illustration_url
 from app.menus.models import (
     FoodKind,
@@ -25,15 +26,8 @@ POPULAR_RANKING_STATE_ID = 1
 SEOUL_TIMEZONE_NAME = "Asia/Seoul"
 
 # 이슈 #54 댓글 합의 순서: 떡볶이 → 돈까스 → 햄버거 → 마라탕 → 파스타 → 국밥 → 짜장면 → 제육볶음
-DEFAULT_INITIAL_POPULAR_KIND_KEYS: tuple[str, ...] = (
-    "tteokbokki",
-    "tonkatsu",
-    "burger",
-    "malatang",
-    "pasta",
-    "gukbap",
-    "jjajangmyeon",
-    "jeyuk_bokkeum",
+DEFAULT_INITIAL_POPULAR_KIND_KEYS: tuple[str, ...] = tuple(
+    spec.kind_key for spec in CANONICAL_FOOD_KINDS
 )
 
 _CANONICAL_NAME_BY_KEY: dict[str, str] = {
@@ -170,14 +164,10 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _as_utc_naive(value: datetime) -> datetime:
-    return _as_utc(value).replace(tzinfo=None)
-
-
 def _coerce_db_datetime(value: datetime | str) -> datetime:
     if isinstance(value, str):
         value = datetime.fromisoformat(value)
-    return _as_utc_naive(value)
+    return as_utc_naive(value)
 
 
 def _resolve_kst_date(target: date | datetime) -> date:
@@ -267,6 +257,87 @@ def _lock_or_create_ranking_state(
     raise RuntimeError("popular_menu_ranking_state 단일 행(id=1) 잠금 획득에 실패했습니다.")
 
 
+def _query_window_distinct_user_count(
+    db: Session,
+    *,
+    window_start_naive: datetime,
+    window_end_naive: datetime,
+) -> int:
+    """집계 기간 내 카탈로그에 존재하는 메뉴를 먹은 서로 다른 사용자 수를 계산한다."""
+    return int(
+        db.query(func.count(func.distinct(UserMeal.user_id)))
+        .join(Menu, UserMeal.menu_id == Menu.id)
+        .filter(
+            UserMeal.eaten_at >= window_start_naive,
+            UserMeal.eaten_at < window_end_naive,
+        )
+        .scalar()
+        or 0
+    )
+
+
+def _query_window_kind_rankings(
+    db: Session,
+    *,
+    window_start_naive: datetime,
+    window_end_naive: datetime,
+):
+    """집계 기간 내 음식 종류별 고유 사용자 수·최근 식사 시각 기준으로 상위 8종을 조회한다."""
+    user_count_expr = func.count(func.distinct(UserMeal.user_id)).label("user_count")
+    last_eaten_at_expr = func.max(UserMeal.eaten_at).label("last_eaten_at")
+
+    return (
+        db.query(
+            Menu.food_kind_id.label("food_kind_id"),
+            user_count_expr,
+            last_eaten_at_expr,
+        )
+        .join(Menu, UserMeal.menu_id == Menu.id)
+        .filter(
+            UserMeal.eaten_at >= window_start_naive,
+            UserMeal.eaten_at < window_end_naive,
+        )
+        .group_by(Menu.food_kind_id)
+        .order_by(
+            user_count_expr.desc(),
+            last_eaten_at_expr.desc(),
+            Menu.food_kind_id.asc(),
+        )
+        .limit(POPULAR_RANKING_MAX_ITEMS)
+        .all()
+    )
+
+
+def _replace_published_ranking_items(
+    db: Session,
+    ranked_rows,
+    state: PopularMenuRankingState,
+    *,
+    window_end_naive: datetime,
+    kst_date: date,
+    now_utc_naive: datetime,
+) -> list[PopularMenuRankingItem]:
+    """기존 공개 순위 항목을 새 순위로 교체하고 상태 행의 기준 시각·성공 날짜를 함께 갱신한다."""
+    db.query(PopularMenuRankingItem).delete(synchronize_session=False)
+    db.flush()
+
+    new_items = [
+        PopularMenuRankingItem(
+            rank_position=rank_position,
+            food_kind_id=int(row.food_kind_id),
+            user_count=int(row.user_count),
+            last_eaten_at=_coerce_db_datetime(row.last_eaten_at),
+        )
+        for rank_position, row in enumerate(ranked_rows, start=1)
+    ]
+    db.add_all(new_items)
+    state.published_as_of = window_end_naive
+    state.last_succeeded_kst_date = kst_date
+    state.updated_at = now_utc_naive
+    db.flush()
+    return new_items
+
+
 def aggregate_popular_menus_for_kst_date(
     db: Session,
     target_kst_date: date | datetime,
@@ -300,15 +371,10 @@ def aggregate_popular_menus_for_kst_date(
                 skipped=True,
             )
 
-        distinct_user_count = int(
-            db.query(func.count(func.distinct(UserMeal.user_id)))
-            .join(Menu, UserMeal.menu_id == Menu.id)
-            .filter(
-                UserMeal.eaten_at >= window_start_naive,
-                UserMeal.eaten_at < window_end_naive,
-            )
-            .scalar()
-            or 0
+        distinct_user_count = _query_window_distinct_user_count(
+            db,
+            window_start_naive=window_start_naive,
+            window_end_naive=window_end_naive,
         )
 
         if distinct_user_count < POPULAR_RANKING_MIN_USERS:
@@ -327,47 +393,19 @@ def aggregate_popular_menus_for_kst_date(
                 skipped=False,
             )
 
-        user_count_expr = func.count(func.distinct(UserMeal.user_id)).label("user_count")
-        last_eaten_at_expr = func.max(UserMeal.eaten_at).label("last_eaten_at")
-
-        ranked_rows = (
-            db.query(
-                Menu.food_kind_id.label("food_kind_id"),
-                user_count_expr,
-                last_eaten_at_expr,
-            )
-            .join(Menu, UserMeal.menu_id == Menu.id)
-            .filter(
-                UserMeal.eaten_at >= window_start_naive,
-                UserMeal.eaten_at < window_end_naive,
-            )
-            .group_by(Menu.food_kind_id)
-            .order_by(
-                user_count_expr.desc(),
-                last_eaten_at_expr.desc(),
-                Menu.food_kind_id.asc(),
-            )
-            .limit(POPULAR_RANKING_MAX_ITEMS)
-            .all()
+        ranked_rows = _query_window_kind_rankings(
+            db,
+            window_start_naive=window_start_naive,
+            window_end_naive=window_end_naive,
         )
-
-        db.query(PopularMenuRankingItem).delete(synchronize_session=False)
-        db.flush()
-
-        new_items = [
-            PopularMenuRankingItem(
-                rank_position=rank_position,
-                food_kind_id=int(row.food_kind_id),
-                user_count=int(row.user_count),
-                last_eaten_at=_coerce_db_datetime(row.last_eaten_at),
-            )
-            for rank_position, row in enumerate(ranked_rows, start=1)
-        ]
-        db.add_all(new_items)
-        state.published_as_of = window_end_naive
-        state.last_succeeded_kst_date = kst_date
-        state.updated_at = now_utc_naive
-        db.flush()
+        new_items = _replace_published_ranking_items(
+            db,
+            ranked_rows,
+            state,
+            window_end_naive=window_end_naive,
+            kst_date=kst_date,
+            now_utc_naive=now_utc_naive,
+        )
 
         return PopularAggregationResult(
             target_kst_date=kst_date,
@@ -398,8 +436,8 @@ def aggregate_popular_menus_for_kst_date(
 
 def recover_missed_popular_menu_ranking(
     db: Session,
-    *,
     now: datetime | None = None,
+    *,
     commit: bool = True,
 ) -> PopularAggregationResult:
     """서버 재시작 시 현재 시각 기준 가장 최근에 지난 한국시간 자정 집계 1회만 보충 실행한다."""
@@ -425,8 +463,19 @@ def _fetch_published_popular_rows(
     )
 
 
+def _to_popular_menu_items(food_kinds: Sequence[FoodKind]) -> list[PopularMenuItemResponse]:
+    return [
+        PopularMenuItemResponse(
+            food_kind_id=food_kind.id,
+            name=food_kind.name,
+            image_url=resolve_menu_illustration_url(food_kind.representative_image_url),
+        )
+        for food_kind in food_kinds
+    ]
+
+
 def get_popular_menus(db: Session) -> PopularMenusResponse:
-    """요즘 인기 메뉴를 조회한다. 발행된 실제 순위가 있으면 저장 순위를, 없으면 초기 인기 8종을 반환한다."""
+    """요즘 인기 메뉴를 읽기 전용으로 조회한다. 발행된 실제 순위가 있으면 저장 순위를, 없으면 초기 인기 목록을 반환한다."""
     state = (
         db.query(PopularMenuRankingState)
         .filter(PopularMenuRankingState.id == POPULAR_RANKING_STATE_ID)
@@ -434,39 +483,15 @@ def get_popular_menus(db: Session) -> PopularMenusResponse:
     )
     if state is not None and state.published_as_of is not None:
         ranking_rows = _fetch_published_popular_rows(db)
-        items = [
-            PopularMenuItemResponse(
-                food_kind_id=food_kind.id,
-                name=food_kind.name,
-                image_url=resolve_menu_illustration_url(food_kind.representative_image_url),
-            )
-            for _item, food_kind in ranking_rows
-        ]
         return PopularMenusResponse(
             source="aggregated",
             as_of=_as_utc(state.published_as_of),
-            items=items,
+            items=_to_popular_menu_items([food_kind for _item, food_kind in ranking_rows]),
         )
 
     rows = _fetch_initial_popular_rows(db)
-    if not rows:
-        try:
-            ensure_initial_popular_food_kinds(db, commit=True)
-        except IntegrityError:
-            # 최초 동시 요청이 겹친 경우 다른 트랜잭션이 채운 초기 목록을 다시 조회한다.
-            db.rollback()
-        rows = _fetch_initial_popular_rows(db)
-
-    items = [
-        PopularMenuItemResponse(
-            food_kind_id=food_kind.id,
-            name=food_kind.name,
-            image_url=resolve_menu_illustration_url(food_kind.representative_image_url),
-        )
-        for _entry, food_kind in rows
-    ]
     return PopularMenusResponse(
         source="initial",
         as_of=None,
-        items=items,
+        items=_to_popular_menu_items([food_kind for _entry, food_kind in rows]),
     )

@@ -40,15 +40,17 @@ async def lifespan(app: FastAPI):
         with SessionLocal() as db:
             recover_rooms_after_restart(db)
             ensure_initial_popular_food_kinds(db)
-            try:
-                recover_missed_popular_menu_ranking(db)
-            except Exception:
-                logger.exception("서버 시작 시 놓친 인기 메뉴 자정 집계 복구에 실패했습니다.")
         logger.info("데이터베이스 테이블 생성/확인 및 방 재시작 유예 복구 완료")
     except Exception as e:
         logger.warning(f"데이터베이스 연결 실패 (DB가 아직 실행되지 않았을 수 있습니다): {e}")
     cleanup_task = asyncio.create_task(room_cleanup_loop())
-    popular_ranking_task = asyncio.create_task(popular_ranking_scheduler_loop())
+    popular_ranking_task = asyncio.create_task(
+        popular_ranking_scheduler_loop(
+            run_startup_recovery=True,
+            session_factory=SessionLocal,
+            recover_fn=recover_missed_popular_menu_ranking,
+        )
+    )
     try:
         yield
     finally:

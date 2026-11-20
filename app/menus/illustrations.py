@@ -1,21 +1,67 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum
+import logging
 import os
 from pathlib import Path
-from typing import Literal
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 from uuid import uuid4
 import zlib
 
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.testclient import TestClient
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy.orm import Session
 
 from app.menus import food_kinds
 from app.menus.models import FoodKind, Menu, MenuIllustrationException
 
+logger = logging.getLogger(__name__)
+
 MENU_ILLUSTRATIONS_URL_PREFIX = "/static/menu-illustrations/"
+MENU_ILLUSTRATIONS_SUBDIR = "menu-illustrations"
 DEFAULT_NON_TOMATO_PASTA_EXCEPTION_REASON = (
     "대표 파스타(토마토 스파게티) 일러스트와 소스·외형이 크게 다른 메뉴"
 )
+
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+PNG_SIGNATURE_LENGTH = len(PNG_SIGNATURE)
+PNG_CHUNK_LENGTH_FIELD_BYTES = 4
+PNG_CHUNK_TYPE_FIELD_BYTES = 4
+PNG_CHUNK_HEADER_BYTES = PNG_CHUNK_LENGTH_FIELD_BYTES + PNG_CHUNK_TYPE_FIELD_BYTES
+PNG_CHUNK_CRC_BYTES = 4
+PNG_CHUNK_MIN_BYTES = PNG_CHUNK_HEADER_BYTES + PNG_CHUNK_CRC_BYTES
+PNG_CRC_MASK = 0xFFFFFFFF
+PNG_IEND_CHUNK_TYPE = b"IEND"
+PNG_FORMAT_NAME = "PNG"
+PNG_FILE_EXTENSION = ".png"
+MIN_PNG_DIMENSION = 1
+MIN_PRINTABLE_ASCII = 32
+HTTP_VERIFY_TIMEOUT_SECONDS = 5.0
+ALLOWED_VERIFY_HTTP_SCHEMES = frozenset({"http", "https"})
+
+_FORBIDDEN_FILENAME_CHARS = frozenset('/\\:*?"<>|\x00')
+
+
+class FoodKindNotFoundException(ValueError):
+    """요청한 음식 종류 키(kind_key)를 food_kinds에서 찾을 수 없을 때 발생하는 도메인 예외."""
+
+
+class InvalidMenuIllustrationException(ValueError):
+    """메뉴 일러스트 경로·파일명·PNG 형식이 유효하지 않을 때 발생하는 도메인 예외."""
+
+
+class MenuIllustrationVerificationError(RuntimeError):
+    """배포된 정적 일러스트 URL의 HTTP 200 응답 검증에 실패했을 때 발생하는 도메인 예외."""
+
+
+class IllustrationAuditStatus(str, Enum):
+    CONFIRMED_REUSABLE = "confirmed_reusable"
+    PENDING_VERIFICATION = "pending_verification"
+    MISSING_ORIGINAL = "missing_original"
 
 
 @dataclass(frozen=True)
@@ -34,10 +80,66 @@ class FoodKindIllustrationSpec:
     kind_key: str
     name: str
     expected_image_url: str
-    status: Literal["reusable_figma", "missing_for_#68"]
+    status: IllustrationAuditStatus
     figma_source_name: str | None
     usable: bool
     notes: str
+
+
+@dataclass(frozen=True)
+class FoodKindIllustrationStatus:
+    kind_key: str
+    food_kind_id: int | None
+    name: str
+    audit_status: IllustrationAuditStatus
+    expected_image_url: str
+    registered_image_url: str | None
+    file_exists_on_disk: bool
+    effective_image_url: str
+    using_common_fallback: bool
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "kind_key": self.kind_key,
+            "food_kind_id": self.food_kind_id,
+            "name": self.name,
+            "audit_status": self.audit_status.value,
+            "expected_image_url": self.expected_image_url,
+            "registered_image_url": self.registered_image_url,
+            "file_exists_on_disk": self.file_exists_on_disk,
+            "effective_image_url": self.effective_image_url,
+            "using_common_fallback": self.using_common_fallback,
+        }
+
+
+@dataclass(frozen=True)
+class IllustrationDeploymentResult:
+    kind_key: str
+    food_kind_id: int
+    name: str
+    image_url: str
+    deployed_path: str
+    previous_image_url: str | None
+    width: int
+    height: int
+    mode: str
+    has_alpha: bool
+    size_bytes: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "kind_key": self.kind_key,
+            "food_kind_id": self.food_kind_id,
+            "name": self.name,
+            "image_url": self.image_url,
+            "deployed_path": self.deployed_path,
+            "previous_image_url": self.previous_image_url,
+            "width": self.width,
+            "height": self.height,
+            "mode": self.mode,
+            "has_alpha": self.has_alpha,
+            "size_bytes": self.size_bytes,
+        }
 
 
 # Figma 원본('음식일러스트' 페이지) 대조 결과 및 정적 파일 경로 매핑 (이슈 #54 / #67 / #68)
@@ -46,16 +148,16 @@ FOOD_KIND_ILLUSTRATION_SPECS: tuple[FoodKindIllustrationSpec, ...] = (
         kind_key="tteokbokki",
         name="떡볶이",
         expected_image_url=f"{MENU_ILLUSTRATIONS_URL_PREFIX}tteokbokki.png",
-        status="reusable_figma",
+        status=IllustrationAuditStatus.PENDING_VERIFICATION,
         figma_source_name="Firefly (2) 1 (왼쪽 위 후보)",
-        usable=True,
-        notes="Firefly (2) 1 왼쪽 위에서 떡볶이 후보를 확인했다. 개별 내보내기 후 배포한다.",
+        usable=False,
+        notes="Firefly (2) 1 왼쪽 위에서 떡볶이 후보를 확인했으나 개별 이름이 없어 확인 대기 상태다.",
     ),
     FoodKindIllustrationSpec(
         kind_key="tonkatsu",
         name="돈까스",
         expected_image_url=f"{MENU_ILLUSTRATIONS_URL_PREFIX}tonkatsu.png",
-        status="reusable_figma",
+        status=IllustrationAuditStatus.CONFIRMED_REUSABLE,
         figma_source_name="돈까스",
         usable=True,
         notes="Figma 원본 '돈까스' 그림 재사용.",
@@ -64,7 +166,7 @@ FOOD_KIND_ILLUSTRATION_SPECS: tuple[FoodKindIllustrationSpec, ...] = (
         kind_key="burger",
         name="햄버거",
         expected_image_url=f"{MENU_ILLUSTRATIONS_URL_PREFIX}burger.png",
-        status="reusable_figma",
+        status=IllustrationAuditStatus.CONFIRMED_REUSABLE,
         figma_source_name="햄버거",
         usable=True,
         notes="Figma 원본 '햄버거' 그림 재사용.",
@@ -73,7 +175,7 @@ FOOD_KIND_ILLUSTRATION_SPECS: tuple[FoodKindIllustrationSpec, ...] = (
         kind_key="malatang",
         name="마라탕",
         expected_image_url=f"{MENU_ILLUSTRATIONS_URL_PREFIX}malatang.png",
-        status="reusable_figma",
+        status=IllustrationAuditStatus.CONFIRMED_REUSABLE,
         figma_source_name="마라탕",
         usable=True,
         notes="Figma 원본 '마라탕' 그림 재사용 (우선 대조 확인).",
@@ -82,7 +184,7 @@ FOOD_KIND_ILLUSTRATION_SPECS: tuple[FoodKindIllustrationSpec, ...] = (
         kind_key="pasta",
         name="파스타",
         expected_image_url=f"{MENU_ILLUSTRATIONS_URL_PREFIX}pasta.png",
-        status="reusable_figma",
+        status=IllustrationAuditStatus.CONFIRMED_REUSABLE,
         figma_source_name="스파게티",
         usable=True,
         notes="Figma 원본 '스파게티' 그림 재사용. 크림·로제·오일·뇨끼 메뉴는 공통 이미지 예외로 처리한다.",
@@ -91,7 +193,7 @@ FOOD_KIND_ILLUSTRATION_SPECS: tuple[FoodKindIllustrationSpec, ...] = (
         kind_key="gukbap",
         name="국밥",
         expected_image_url=f"{MENU_ILLUSTRATIONS_URL_PREFIX}gukbap.png",
-        status="missing_for_#68",
+        status=IllustrationAuditStatus.MISSING_ORIGINAL,
         figma_source_name=None,
         usable=False,
         notes="Figma 원본에서 국밥으로 확실히 식별되는 그림이 없어 #68 제작·등록 대상으로 전달한다.",
@@ -100,7 +202,7 @@ FOOD_KIND_ILLUSTRATION_SPECS: tuple[FoodKindIllustrationSpec, ...] = (
         kind_key="jjajangmyeon",
         name="짜장면",
         expected_image_url=f"{MENU_ILLUSTRATIONS_URL_PREFIX}jjajangmyeon.png",
-        status="missing_for_#68",
+        status=IllustrationAuditStatus.MISSING_ORIGINAL,
         figma_source_name=None,
         usable=False,
         notes="Figma 원본에서 짜장면·자장면으로 확실히 식별되는 그림이 없어 #68 제작·등록 대상으로 전달한다.",
@@ -109,7 +211,7 @@ FOOD_KIND_ILLUSTRATION_SPECS: tuple[FoodKindIllustrationSpec, ...] = (
         kind_key="jeyuk_bokkeum",
         name="제육볶음",
         expected_image_url=f"{MENU_ILLUSTRATIONS_URL_PREFIX}jeyuk_bokkeum.png",
-        status="reusable_figma",
+        status=IllustrationAuditStatus.CONFIRMED_REUSABLE,
         figma_source_name="제육볶음",
         usable=True,
         notes="Figma 원본 '제육볶음' 그림 재사용 (우선 대조 확인).",
@@ -121,13 +223,21 @@ FOOD_KIND_ILLUSTRATION_SPEC_BY_KEY: dict[str, FoodKindIllustrationSpec] = {
 }
 
 REUSABLE_ILLUSTRATION_KIND_KEYS: tuple[str, ...] = tuple(
-    spec.kind_key for spec in FOOD_KIND_ILLUSTRATION_SPECS if spec.usable
+    spec.kind_key
+    for spec in FOOD_KIND_ILLUSTRATION_SPECS
+    if spec.status is IllustrationAuditStatus.CONFIRMED_REUSABLE
+)
+
+PENDING_VERIFICATION_ILLUSTRATION_KIND_KEYS: tuple[str, ...] = tuple(
+    spec.kind_key
+    for spec in FOOD_KIND_ILLUSTRATION_SPECS
+    if spec.status is IllustrationAuditStatus.PENDING_VERIFICATION
 )
 
 MISSING_ILLUSTRATION_KIND_KEYS_FOR_ISSUE68: tuple[str, ...] = tuple(
     spec.kind_key
     for spec in FOOD_KIND_ILLUSTRATION_SPECS
-    if spec.status == "missing_for_#68"
+    if spec.status is IllustrationAuditStatus.MISSING_ORIGINAL
 )
 
 # 대표 파스타(토마토 스파게티) 일러스트와 크게 다른 크림·까르보나라·투움바·로제·오일·뇨끼 메뉴 food_code 목록
@@ -166,28 +276,15 @@ DEFAULT_MENU_ILLUSTRATION_EXCEPTION_FOOD_CODES: tuple[str, ...] = (
 )
 
 
-def _resolve_static_candidate(
+def _resolve_static_url_or_raise(
     image_url: str,
     *,
     static_dir: Path | None = None,
 ) -> tuple[str, Path]:
-    cleaned = (image_url or "").strip()
-    if not cleaned.startswith("/static/") or "\\" in cleaned:
-        raise ValueError(
-            f"일러스트 경로는 '/static/'으로 시작하는 백엔드 상대 경로여야 합니다: {image_url!r}"
-        )
-    rel_path = cleaned.removeprefix("/static/")
-    if not rel_path or rel_path.startswith("/"):
-        raise ValueError(f"유효하지 않은 정적 일러스트 경로입니다: {image_url!r}")
-
-    effective_static_dir = food_kinds.STATIC_DIR if static_dir is None else static_dir
-    static_root = effective_static_dir.resolve()
-    candidate = (static_root / rel_path).resolve()
     try:
-        candidate.relative_to(static_root)
+        return food_kinds.resolve_safe_static_file_path(image_url, static_dir=static_dir)
     except ValueError as exc:
-        raise ValueError(f"정적 파일 루트 밖의 경로는 허용되지 않습니다: {image_url!r}") from exc
-    return cleaned, candidate
+        raise InvalidMenuIllustrationException(str(exc)) from exc
 
 
 def validate_static_illustration_url(
@@ -197,7 +294,7 @@ def validate_static_illustration_url(
     verify_file_exists: bool = True,
 ) -> str:
     """상대 정적 일러스트 URL 형식과(선택적으로) 실제 배포 파일 존재 여부를 검증한다."""
-    cleaned, candidate = _resolve_static_candidate(image_url, static_dir=static_dir)
+    cleaned, candidate = _resolve_static_url_or_raise(image_url, static_dir=static_dir)
     if verify_file_exists and not candidate.is_file():
         raise FileNotFoundError(
             f"배포된 정적 일러스트 파일을 찾을 수 없습니다: {cleaned} ({candidate})"
@@ -205,34 +302,121 @@ def validate_static_illustration_url(
     return cleaned
 
 
+def _verify_live_http_200(verify_base_url: str, image_url: str) -> None:
+    parsed = urlparse(verify_base_url.strip())
+    if parsed.scheme not in ALLOWED_VERIFY_HTTP_SCHEMES or not parsed.netloc:
+        raise MenuIllustrationVerificationError(
+            f"HTTP 검증 기준 URL은 http(s) 스킴과 호스트를 포함해야 합니다: {verify_base_url!r}"
+        )
+
+    target_url = f"{verify_base_url.strip().rstrip('/')}{image_url}"
+    request = Request(target_url, method="GET")
+    try:
+        with urlopen(request, timeout=HTTP_VERIFY_TIMEOUT_SECONDS) as response:
+            status_code = getattr(response, "status", response.getcode())
+            body = response.read()
+    except HTTPError as exc:
+        raise MenuIllustrationVerificationError(
+            f"정적 일러스트 HTTP 검증에 실패했습니다 (status={exc.code}, url={target_url})"
+        ) from exc
+    except (URLError, OSError, TimeoutError) as exc:
+        raise MenuIllustrationVerificationError(
+            f"정적 일러스트 HTTP 검증 요청에 실패했습니다 (url={target_url}): {exc}"
+        ) from exc
+
+    if status_code != 200 or not body:
+        raise MenuIllustrationVerificationError(
+            f"정적 일러스트가 HTTP 200 비어 있지 않은 본문으로 응답하지 않았습니다 "
+            f"(status={status_code}, bytes={len(body)}, url={target_url})"
+        )
+
+
+def _verify_static_files_route_http_200(static_root: Path, image_url: str) -> None:
+    probe_app = FastAPI()
+    probe_app.mount("/static", StaticFiles(directory=static_root), name="static")
+    with TestClient(probe_app) as client:
+        response = client.get(image_url)
+
+    if response.status_code != 200 or not response.content:
+        raise MenuIllustrationVerificationError(
+            f"정적 파일 라우트 검증에서 HTTP 200 비어 있지 않은 응답을 받지 못했습니다 "
+            f"(status={response.status_code}, bytes={len(response.content)}, url={image_url})"
+        )
+
+
+def verify_static_illustration_http_200(
+    image_url: str,
+    *,
+    static_dir: Path | None = None,
+    verify_base_url: str | None = None,
+) -> str:
+    """정적 일러스트 URL이 실제 HTTP 200과 비어 있지 않은 본문으로 응답하는지 검증한다."""
+    effective_static_dir = food_kinds.STATIC_DIR if static_dir is None else Path(static_dir)
+    cleaned, _candidate = _resolve_static_url_or_raise(image_url, static_dir=effective_static_dir)
+
+    if verify_base_url is not None:
+        _verify_live_http_200(verify_base_url, cleaned)
+    else:
+        _verify_static_files_route_http_200(effective_static_dir.resolve(), cleaned)
+    return cleaned
+
+
 def _verify_png_chunks(raw_bytes: bytes, resolved_path: Path) -> None:
-    if len(raw_bytes) < 8 or raw_bytes[:8] != b"\x89PNG\r\n\x1a\n":
-        raise ValueError(f"유효한 PNG 시그니처가 아닙니다: {resolved_path}")
-    offset = 8
+    if len(raw_bytes) < PNG_SIGNATURE_LENGTH or raw_bytes[:PNG_SIGNATURE_LENGTH] != PNG_SIGNATURE:
+        raise InvalidMenuIllustrationException(f"유효한 PNG 시그니처가 아닙니다: {resolved_path}")
+
+    offset = PNG_SIGNATURE_LENGTH
     total = len(raw_bytes)
     found_iend = False
-    while offset + 12 <= total:
-        length = int.from_bytes(raw_bytes[offset : offset + 4], "big")
-        chunk_type = raw_bytes[offset + 4 : offset + 8]
-        data_start = offset + 8
+    while offset + PNG_CHUNK_MIN_BYTES <= total:
+        length = int.from_bytes(
+            raw_bytes[offset : offset + PNG_CHUNK_LENGTH_FIELD_BYTES],
+            "big",
+        )
+        type_start = offset + PNG_CHUNK_LENGTH_FIELD_BYTES
+        data_start = offset + PNG_CHUNK_HEADER_BYTES
+        chunk_type = raw_bytes[type_start:data_start]
         data_end = data_start + length
-        crc_end = data_end + 4
+        crc_end = data_end + PNG_CHUNK_CRC_BYTES
         if crc_end > total:
-            raise ValueError(f"손상되었거나 잘린 PNG 청크가 포함되어 있습니다: {resolved_path}")
+            raise InvalidMenuIllustrationException(
+                f"손상되었거나 잘린 PNG 청크가 포함되어 있습니다: {resolved_path}"
+            )
+
         expected_crc = int.from_bytes(raw_bytes[data_end:crc_end], "big")
-        actual_crc = zlib.crc32(raw_bytes[offset + 4 : data_end]) & 0xFFFFFFFF
+        actual_crc = zlib.crc32(raw_bytes[type_start:data_end]) & PNG_CRC_MASK
         if actual_crc != expected_crc:
-            raise ValueError(
+            raise InvalidMenuIllustrationException(
                 f"손상된 PNG 체크섬이 감지되었습니다 ({chunk_type!r}): {resolved_path}"
             )
+
         offset = crc_end
-        if chunk_type == b"IEND":
+        if chunk_type == PNG_IEND_CHUNK_TYPE:
             if length != 0:
-                raise ValueError(f"손상된 PNG 종료 청크(IEND)입니다: {resolved_path}")
+                raise InvalidMenuIllustrationException(
+                    f"손상된 PNG 종료 청크(IEND)입니다: {resolved_path}"
+                )
             found_iend = True
             break
+
     if not found_iend:
-        raise ValueError(f"PNG 종료 청크(IEND)가 누락되었습니다: {resolved_path}")
+        raise InvalidMenuIllustrationException(
+            f"PNG 종료 청크(IEND)가 누락되었습니다: {resolved_path}"
+        )
+
+
+def _load_validated_png_metadata(resolved_path: Path) -> tuple[int, int, str, bool]:
+    with Image.open(resolved_path) as image:
+        width, height = image.size
+        if width < MIN_PNG_DIMENSION or height < MIN_PNG_DIMENSION:
+            raise InvalidMenuIllustrationException(
+                f"PNG 이미지 크기는 {MIN_PNG_DIMENSION}x{MIN_PNG_DIMENSION} 이상이어야 합니다 "
+                f"({width}x{height}): {resolved_path}"
+            )
+        mode = image.mode
+        has_alpha = ("A" in image.getbands()) or ("transparency" in image.info)
+        image.load()
+        return int(width), int(height), mode, bool(has_alpha)
 
 
 def validate_menu_illustration_png(png_path: Path) -> MenuIllustrationAssetCheck:
@@ -241,53 +425,53 @@ def validate_menu_illustration_png(png_path: Path) -> MenuIllustrationAssetCheck
     if not resolved_path.exists():
         raise FileNotFoundError(f"PNG 일러스트 파일을 찾을 수 없습니다: {resolved_path}")
     if not resolved_path.is_file():
-        raise ValueError(f"일반 파일이 아닌 경로는 PNG로 검증할 수 없습니다: {resolved_path}")
+        raise InvalidMenuIllustrationException(
+            f"일반 파일이 아닌 경로는 PNG로 검증할 수 없습니다: {resolved_path}"
+        )
 
     size_bytes = resolved_path.stat().st_size
     if size_bytes <= 0:
-        raise ValueError(f"빈 파일은 PNG 일러스트로 등록할 수 없습니다: {resolved_path}")
+        raise InvalidMenuIllustrationException(
+            f"빈 파일은 PNG 일러스트로 등록할 수 없습니다: {resolved_path}"
+        )
 
     try:
         with Image.open(resolved_path) as image:
-            detected_format = (image.format or "").upper()
-            if detected_format != "PNG":
-                raise ValueError(
-                    f"PNG 형식의 이미지 파일만 등록할 수 있습니다 (감지된 형식: {image.format or 'UNKNOWN'}): {resolved_path}"
+            if (image.format or "").upper() != PNG_FORMAT_NAME:
+                raise InvalidMenuIllustrationException(
+                    f"PNG 형식의 이미지 파일만 등록할 수 있습니다 "
+                    f"(감지된 형식: {image.format or 'UNKNOWN'}): {resolved_path}"
                 )
             image.verify()
 
         _verify_png_chunks(resolved_path.read_bytes(), resolved_path)
-
-        with Image.open(resolved_path) as image:
-            detected_format = (image.format or "").upper()
-            if detected_format != "PNG":
-                raise ValueError(
-                    f"PNG 형식의 이미지 파일만 등록할 수 있습니다 (감지된 형식: {image.format or 'UNKNOWN'}): {resolved_path}"
-                )
-            width, height = image.size
-            if width < 1 or height < 1:
-                raise ValueError(
-                    f"PNG 이미지 크기는 1x1 이상이어야 합니다 ({width}x{height}): {resolved_path}"
-                )
-            mode = image.mode
-            has_alpha = ("A" in image.getbands()) or ("transparency" in image.info)
-            image.load()
-    except ValueError:
+        width, height, mode, has_alpha = _load_validated_png_metadata(resolved_path)
+    except InvalidMenuIllustrationException:
         raise
     except (UnidentifiedImageError, OSError, SyntaxError, Image.DecompressionBombError) as exc:
-        raise ValueError(
+        raise InvalidMenuIllustrationException(
             f"손상되었거나 유효한 PNG 파일이 아닙니다: {resolved_path}"
         ) from exc
 
     return MenuIllustrationAssetCheck(
         path=resolved_path.resolve(),
-        format="PNG",
-        width=int(width),
-        height=int(height),
+        format=PNG_FORMAT_NAME,
+        width=width,
+        height=height,
         mode=mode,
-        has_alpha=bool(has_alpha),
+        has_alpha=has_alpha,
         size_bytes=int(size_bytes),
     )
+
+
+def _require_food_kind_by_key(db: Session, kind_key: str) -> FoodKind:
+    cleaned_key = (kind_key or "").strip()
+    if not cleaned_key:
+        raise InvalidMenuIllustrationException("음식 종류 키(kind_key)는 비어 있을 수 없습니다.")
+    food_kind = db.query(FoodKind).filter(FoodKind.kind_key == cleaned_key).one_or_none()
+    if food_kind is None:
+        raise FoodKindNotFoundException(f"음식 종류를 찾을 수 없습니다: {cleaned_key}")
+    return food_kind
 
 
 def register_food_kind_illustration(
@@ -297,22 +481,25 @@ def register_food_kind_illustration(
     image_url: str,
     static_dir: Path | None = None,
     verify_file_exists: bool = True,
+    verify_http: bool = True,
+    verify_base_url: str | None = None,
     commit: bool = True,
+    _food_kind: FoodKind | None = None,
 ) -> FoodKind:
     """음식 종류 키(kind_key)에 대표 일러스트 정적 경로를 검증·등록한다 (#67/#68 공용)."""
-    cleaned_key = (kind_key or "").strip()
-    if not cleaned_key:
-        raise ValueError("음식 종류 키(kind_key)는 비어 있을 수 없습니다.")
+    food_kind = _require_food_kind_by_key(db, kind_key) if _food_kind is None else _food_kind
 
     validated_url = validate_static_illustration_url(
         image_url,
         static_dir=static_dir,
         verify_file_exists=verify_file_exists,
     )
-
-    food_kind = db.query(FoodKind).filter(FoodKind.kind_key == cleaned_key).one_or_none()
-    if food_kind is None:
-        raise ValueError(f"음식 종류를 찾을 수 없습니다: {cleaned_key}")
+    if verify_http and (verify_file_exists or verify_base_url is not None):
+        verify_static_illustration_http_200(
+            validated_url,
+            static_dir=static_dir,
+            verify_base_url=verify_base_url,
+        )
 
     food_kind.representative_image_url = validated_url
     db.flush()
@@ -321,26 +508,31 @@ def register_food_kind_illustration(
     return food_kind
 
 
-_FORBIDDEN_FILENAME_CHARS = set('/\\:*?"<>|\x00')
-
-
 def _validate_png_filename(filename: str) -> str:
     cleaned = (filename or "").strip()
     if not cleaned:
-        raise ValueError("배포할 PNG 파일명은 비어 있을 수 없습니다.")
-    if any(ch in _FORBIDDEN_FILENAME_CHARS or ord(ch) < 32 for ch in cleaned):
-        raise ValueError(f"허용되지 않는 문자가 포함된 파일명입니다: {filename!r}")
+        raise InvalidMenuIllustrationException("배포할 PNG 파일명은 비어 있을 수 없습니다.")
+    if any(ch in _FORBIDDEN_FILENAME_CHARS or ord(ch) < MIN_PRINTABLE_ASCII for ch in cleaned):
+        raise InvalidMenuIllustrationException(
+            f"허용되지 않는 문자가 포함된 파일명입니다: {filename!r}"
+        )
     if ".." in cleaned or cleaned.startswith("."):
-        raise ValueError(f"상위 경로 탐색 또는 숨김 파일명은 허용되지 않습니다: {filename!r}")
-    if not cleaned.endswith(".png") or len(cleaned) <= len(".png"):
-        raise ValueError(f"배포 파일명은 소문자 '.png' 확장자를 가져야 합니다: {filename!r}")
+        raise InvalidMenuIllustrationException(
+            f"상위 경로 탐색 또는 숨김 파일명은 허용되지 않습니다: {filename!r}"
+        )
+    if not cleaned.endswith(PNG_FILE_EXTENSION) or len(cleaned) <= len(PNG_FILE_EXTENSION):
+        raise InvalidMenuIllustrationException(
+            f"배포 파일명은 소문자 '{PNG_FILE_EXTENSION}' 확장자를 가져야 합니다: {filename!r}"
+        )
     if Path(cleaned).name != cleaned:
-        raise ValueError(f"파일명에는 경로 구분자를 포함할 수 없습니다: {filename!r}")
+        raise InvalidMenuIllustrationException(
+            f"파일명에는 경로 구분자를 포함할 수 없습니다: {filename!r}"
+        )
     return cleaned
 
 
 def _write_bytes_atomically(target_path: Path, payload: bytes) -> None:
-    tmp_path = target_path.parent / f".tmp_{uuid4().hex}.png"
+    tmp_path = target_path.parent / f".tmp_{uuid4().hex}{PNG_FILE_EXTENSION}"
     try:
         with tmp_path.open("wb") as fp:
             fp.write(payload)
@@ -351,9 +543,33 @@ def _write_bytes_atomically(target_path: Path, payload: bytes) -> None:
         try:
             if tmp_path.exists():
                 tmp_path.unlink()
-        except OSError:
-            pass
+        except OSError as cleanup_exc:
+            logger.warning(
+                "임시 PNG 파일 정리에 실패했습니다 (path=%s): %s",
+                tmp_path,
+                cleanup_exc,
+            )
         raise
+
+
+def _rollback_deployed_file(
+    target_path: Path,
+    *,
+    existed_before: bool,
+    previous_bytes: bytes | None,
+) -> None:
+    try:
+        if not existed_before:
+            if target_path.exists():
+                target_path.unlink()
+        elif previous_bytes is not None:
+            _write_bytes_atomically(target_path, previous_bytes)
+    except OSError as restore_exc:
+        logger.warning(
+            "배포 롤백 중 정적 일러스트 파일 정리/복원에 실패했습니다 (path=%s): %s",
+            target_path,
+            restore_exc,
+        )
 
 
 def deploy_and_register_food_kind_png(
@@ -364,33 +580,30 @@ def deploy_and_register_food_kind_png(
     filename: str | None = None,
     static_dir: Path | None = None,
     require_transparency: bool = False,
+    verify_http: bool = True,
+    verify_base_url: str | None = None,
     commit: bool = True,
-) -> dict[str, object]:
-    """디자이너 PNG를 검증해 정적 디렉터리에 원자 배포하고 food_kinds.representative_image_url을 등록한다 (#68)."""
-    cleaned_key = (kind_key or "").strip()
-    if not cleaned_key:
-        raise ValueError("음식 종류 키(kind_key)는 비어 있을 수 없습니다.")
-
-    food_kind = db.query(FoodKind).filter(FoodKind.kind_key == cleaned_key).one_or_none()
-    if food_kind is None:
-        raise ValueError(f"음식 종류를 찾을 수 없습니다: {cleaned_key}")
+) -> IllustrationDeploymentResult:
+    """디자이너 PNG를 검증해 정적 디렉터리에 원자 배포하고 HTTP 200 확인 후 DB에 등록한다 (#68)."""
+    food_kind = _require_food_kind_by_key(db, kind_key)
+    cleaned_key = food_kind.kind_key
     previous_url = food_kind.representative_image_url
 
-    target_filename = f"{cleaned_key}.png" if filename is None else filename
+    target_filename = f"{cleaned_key}{PNG_FILE_EXTENSION}" if filename is None else filename
     safe_filename = _validate_png_filename(target_filename)
 
     asset_check = validate_menu_illustration_png(Path(source_png))
     if require_transparency and not asset_check.has_alpha:
-        raise ValueError(
+        raise InvalidMenuIllustrationException(
             f"배경 투명도(알파 채널)가 없는 PNG 파일은 등록할 수 없습니다: {source_png}"
         )
 
     effective_static_dir = food_kinds.STATIC_DIR if static_dir is None else Path(static_dir)
-    illustrations_dir = (effective_static_dir.resolve() / "menu-illustrations").resolve()
+    illustrations_dir = (effective_static_dir.resolve() / MENU_ILLUSTRATIONS_SUBDIR).resolve()
     illustrations_dir.mkdir(parents=True, exist_ok=True)
     target_path = (illustrations_dir / safe_filename).resolve()
     if target_path.parent != illustrations_dir:
-        raise ValueError(f"허용되지 않는 배포 파일 경로입니다: {safe_filename!r}")
+        raise InvalidMenuIllustrationException(f"허용되지 않는 배포 파일 경로입니다: {safe_filename!r}")
 
     source_resolved = asset_check.path
     image_url = f"{MENU_ILLUSTRATIONS_URL_PREFIX}{safe_filename}"
@@ -402,53 +615,48 @@ def deploy_and_register_food_kind_png(
         _write_bytes_atomically(target_path, source_resolved.read_bytes())
 
     try:
-        validate_static_illustration_url(
-            image_url,
-            static_dir=effective_static_dir,
-            verify_file_exists=True,
-        )
         updated_kind = register_food_kind_illustration(
             db,
             kind_key=cleaned_key,
             image_url=image_url,
             static_dir=effective_static_dir,
             verify_file_exists=True,
+            verify_http=verify_http,
+            verify_base_url=verify_base_url,
             commit=commit,
+            _food_kind=food_kind,
         )
     except Exception:
         if commit:
             db.rollback()
         if need_copy:
-            try:
-                if not existed_before:
-                    if target_path.exists():
-                        target_path.unlink()
-                elif previous_bytes is not None:
-                    _write_bytes_atomically(target_path, previous_bytes)
-            except OSError:
-                pass
+            _rollback_deployed_file(
+                target_path,
+                existed_before=existed_before,
+                previous_bytes=previous_bytes,
+            )
         raise
 
-    return {
-        "kind_key": updated_kind.kind_key,
-        "food_kind_id": int(updated_kind.id),
-        "name": updated_kind.name,
-        "image_url": updated_kind.representative_image_url,
-        "deployed_path": str(target_path),
-        "previous_image_url": previous_url,
-        "width": asset_check.width,
-        "height": asset_check.height,
-        "mode": asset_check.mode,
-        "has_alpha": asset_check.has_alpha,
-        "size_bytes": asset_check.size_bytes,
-    }
+    return IllustrationDeploymentResult(
+        kind_key=updated_kind.kind_key,
+        food_kind_id=int(updated_kind.id),
+        name=updated_kind.name,
+        image_url=str(updated_kind.representative_image_url),
+        deployed_path=str(target_path),
+        previous_image_url=previous_url,
+        width=asset_check.width,
+        height=asset_check.height,
+        mode=asset_check.mode,
+        has_alpha=asset_check.has_alpha,
+        size_bytes=asset_check.size_bytes,
+    )
 
 
 def inspect_food_kind_illustration_status(
     db: Session,
     *,
     static_dir: Path | None = None,
-) -> list[dict[str, object]]:
+) -> list[FoodKindIllustrationStatus]:
     """초기 8종 음식 종류의 원본 대조 상태, DB 등록 경로, 디스크 배포 여부, 실조회 URL을 보고한다 (#68)."""
     effective_static_dir = food_kinds.STATIC_DIR if static_dir is None else Path(static_dir)
     spec_keys = [spec.kind_key for spec in FOOD_KIND_ILLUSTRATION_SPECS]
@@ -457,13 +665,13 @@ def inspect_food_kind_illustration_status(
         for fk in db.query(FoodKind).filter(FoodKind.kind_key.in_(spec_keys)).all()
     }
 
-    statuses: list[dict[str, object]] = []
+    statuses: list[FoodKindIllustrationStatus] = []
     for spec in FOOD_KIND_ILLUSTRATION_SPECS:
         food_kind = kinds_by_key.get(spec.kind_key)
         registered_url = food_kind.representative_image_url if food_kind is not None else None
         target_url_to_check = (registered_url or "").strip() or spec.expected_image_url
         try:
-            _cleaned, candidate = _resolve_static_candidate(
+            _cleaned, candidate = food_kinds.resolve_safe_static_file_path(
                 target_url_to_check,
                 static_dir=effective_static_dir,
             )
@@ -476,17 +684,17 @@ def inspect_food_kind_illustration_status(
             static_dir=effective_static_dir,
         )
         statuses.append(
-            {
-                "kind_key": spec.kind_key,
-                "food_kind_id": int(food_kind.id) if food_kind is not None else None,
-                "name": food_kind.name if food_kind is not None else spec.name,
-                "audit_status": spec.status,
-                "expected_image_url": spec.expected_image_url,
-                "registered_image_url": registered_url,
-                "file_exists_on_disk": file_exists_on_disk,
-                "effective_image_url": effective_url,
-                "using_common_fallback": effective_url == food_kinds.DEFAULT_MENU_ILLUSTRATION_URL,
-            }
+            FoodKindIllustrationStatus(
+                kind_key=spec.kind_key,
+                food_kind_id=int(food_kind.id) if food_kind is not None else None,
+                name=food_kind.name if food_kind is not None else spec.name,
+                audit_status=spec.status,
+                expected_image_url=spec.expected_image_url,
+                registered_image_url=registered_url,
+                file_exists_on_disk=file_exists_on_disk,
+                effective_image_url=effective_url,
+                using_common_fallback=(effective_url == food_kinds.DEFAULT_MENU_ILLUSTRATION_URL),
+            )
         )
     return statuses
 
@@ -511,7 +719,7 @@ def sync_food_kind_representative_illustrations(
     skipped_missing_kind = 0
 
     for spec in FOOD_KIND_ILLUSTRATION_SPECS:
-        _cleaned, candidate = _resolve_static_candidate(
+        _cleaned, candidate = _resolve_static_url_or_raise(
             spec.expected_image_url,
             static_dir=static_dir,
         )

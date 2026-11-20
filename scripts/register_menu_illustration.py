@@ -27,6 +27,9 @@ from app.core.database import SessionLocal
 from app.menus.food_kinds import DEFAULT_MENU_ILLUSTRATION_URL
 from app.menus.illustrations import (
     MISSING_ILLUSTRATION_KIND_KEYS_FOR_ISSUE68,
+    PENDING_VERIFICATION_ILLUSTRATION_KIND_KEYS,
+    IllustrationAuditStatus,
+    MenuIllustrationVerificationError,
     deploy_and_register_food_kind_png,
     inspect_food_kind_illustration_status,
     register_food_kind_illustration,
@@ -86,6 +89,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional static root directory override (defaults to app/static).",
     )
+    parser.add_argument(
+        "--verify-base-url",
+        type=str,
+        default=None,
+        help="Optional running server base URL (e.g. http://127.0.0.1:8000) to verify HTTP 200 reachability before DB update.",
+    )
     return parser
 
 
@@ -105,6 +114,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             parser.error("--source-png and --image-url require --kind-key.")
         if args.filename is not None or args.require_transparency:
             parser.error("--filename and --require-transparency require --kind-key and --source-png.")
+        if args.verify_base_url is not None:
+            parser.error("--verify-base-url requires --kind-key.")
         return
 
     if bool(args.source_png is not None) == bool(args.image_url is not None):
@@ -118,16 +129,18 @@ def execute_command(db: Session, args: argparse.Namespace) -> dict[str, Any]:
     if args.status:
         items = inspect_food_kind_illustration_status(db, static_dir=args.static_dir)
         pending_for_issue68 = [
-            str(item["kind_key"])
+            item.kind_key
             for item in items
-            if item["audit_status"] == "missing_for_#68" and item["using_common_fallback"]
+            if item.audit_status is IllustrationAuditStatus.MISSING_ORIGINAL
+            and item.using_common_fallback
         ]
         return {
             "action": "status",
             "default_illustration_url": DEFAULT_MENU_ILLUSTRATION_URL,
+            "pending_verification": list(PENDING_VERIFICATION_ILLUSTRATION_KIND_KEYS),
             "missing_for_issue68": list(MISSING_ILLUSTRATION_KIND_KEYS_FOR_ISSUE68),
             "pending_for_issue68": pending_for_issue68,
-            "items": items,
+            "items": [item.to_dict() for item in items],
         }
 
     if args.sync_deployed:
@@ -150,11 +163,13 @@ def execute_command(db: Session, args: argparse.Namespace) -> dict[str, Any]:
             filename=args.filename,
             static_dir=args.static_dir,
             require_transparency=args.require_transparency,
+            verify_http=True,
+            verify_base_url=args.verify_base_url,
             commit=True,
         )
         return {
             "action": "deploy_and_register",
-            **result,
+            **result.to_dict(),
         }
 
     food_kind = register_food_kind_illustration(
@@ -163,6 +178,8 @@ def execute_command(db: Session, args: argparse.Namespace) -> dict[str, Any]:
         image_url=args.image_url,
         static_dir=args.static_dir,
         verify_file_exists=True,
+        verify_http=True,
+        verify_base_url=args.verify_base_url,
         commit=True,
     )
     return {
@@ -183,7 +200,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         with SessionLocal() as db:
             payload = execute_command(db, args)
         print(json.dumps(payload, indent=2))
-    except (ValueError, FileNotFoundError, OSError, SQLAlchemyError) as exc:
+    except (ValueError, FileNotFoundError, OSError, SQLAlchemyError, MenuIllustrationVerificationError) as exc:
         raise SystemExit(f"Menu illustration registration failed: {exc}") from None
 
 

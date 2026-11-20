@@ -5,6 +5,41 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-20
 
+### #54 홈 메뉴 일러스트·인기 순위 코드 리뷰 지적 사항 일괄 수정
+
+#### 변경 이유 및 내용
+
+- 이슈 #54(#62–#68) 구현에 대한 코드 리뷰에서 도출된 비차단 기동 복구, 자정 스케줄러 안정성, 읽기 전용 GET 계약, 엔티티 계층 순수성, 일러스트 HTTP 200 검증 및 도메인 모델링 개선 사항을 일괄 반영했다.
+- **비차단 기동 복구 및 자정 스케줄러 안정화 (`app/main.py`, `app/menus/popular_scheduler.py`)**: `lifespan`에서 `yield` 전 동기 실행하던 `recover_missed_popular_menu_ranking(db)`를 제거하고 `popular_ranking_scheduler_loop(run_startup_recovery=True, ...)`로 이관해 워커 스레드(`asyncio.to_thread`)에서 비차단 실행되도록 변경했다. 시작 복구 도중 한국시간 자정을 넘긴 경우(`23:59:59 -> 00:00:01` KST) 새 날짜 집계를 즉시 실행해 누락을 방지하고, 조기 기상(early wake) 시 목표 자정(UTC)까지 재대기하는 가드와 일시 오류 시 `last_completed_kst_date`를 선행 갱신하지 않고 최대 `max_retries_per_day`(기본 3회, `retry_delay_seconds=60.0`) 재시도하는 로직을 추가했다.
+- **읽기 전용 `GET /api/menus/popular` (`app/menus/popular.py`)**: `get_popular_menus()` 내부의 암묵적 쓰기(`ensure_initial_popular_food_kinds`)를 제거해 초기 테이블이 비어 있을 때도 DB 쓰기·커밋 없이 `source="initial"`, `as_of=None`, `items=[]`를 반환하도록 수정했다. `DEFAULT_INITIAL_POPULAR_KIND_KEYS`를 `CANONICAL_FOOD_KINDS`에서 파생하고, `as_utc_naive` 재사용(`app/users/repository.py`, `app/menus/popular.py`), `PopularMenuItemResponse` 매핑 중복 제거, `aggregate_popular_menus_for_kst_date()` 헬퍼 분리를 완료했다.
+- **순수 엔티티 계층 및 `NOT NULL` 제약 보장 (`app/menus/models.py`, `app/menus/food_kinds.py`, `app/menus/__init__.py`)**: `before_flush` 세션 리스너를 `app/menus/models.py`에서 `app/menus/food_kinds.py`로 이동하고 `session.new`만 검사하도록 제한해 이미 저장된 `Menu`(`session.dirty`)의 `food_kind_id = None` 갱신이 DB `NOT NULL` 제약(`IntegrityError`)을 우회하지 않도록 수정했다.
+- **일러스트 HTTP 200 검증, 감사 Enum, 도메인 예외 및 정리 오류 로깅 (`app/menus/illustrations.py`, `app/menus/food_kinds.py`, `scripts/register_menu_illustration.py`)**:
+  - `verify_static_illustration_http_200()`를 추가해 DB 등록 전 실제 정적 라우트(`StaticFiles` + `TestClient`) 또는 운영 서버 `--verify-base-url`(`urllib.request`)에서 HTTP 200과 비어 있지 않은 본문을 검증하고, 실패 시 `MenuIllustrationVerificationError`와 함께 DB 및 배포 파일을 롤백하도록 구현했다.
+  - 매직 문자열(`"reusable_figma"`, `"missing_for_#68"`)을 `IllustrationAuditStatus(str, Enum)`(`CONFIRMED_REUSABLE`, `PENDING_VERIFICATION`[`tteokbokki`], `MISSING_ORIGINAL`[`gukbap`, `jjajangmyeon`])으로 교체하고, 도메인 예외(`FoodKindNotFoundException`, `InvalidMenuIllustrationException`, `MenuIllustrationVerificationError`) 및 타입 데이터클래스(`FoodKindIllustrationStatus`, `IllustrationDeploymentResult`)를 도입했다.
+  - 공용 정적 경로 검증 헬퍼 `resolve_safe_static_file_path()`를 `app/menus/food_kinds.py`로 통합하고, `app/menus/illustrations.py`의 중복 PNG 형식 검사·이중 `FoodKind` 조회·묵음 `except OSError: pass`(`logger.warning` 로깅으로 교체)를 제거했으며 명명된 PNG 상수를 추출했다.
+
+#### 주요 변경 파일
+
+- `app/main.py`, `app/menus/__init__.py`, `app/menus/models.py`, `app/menus/food_kinds.py`, `app/menus/popular.py`, `app/menus/popular_scheduler.py`, `app/menus/illustrations.py`, `app/users/repository.py`, `scripts/register_menu_illustration.py`, `tests/test_ticket62_food_kinds_and_recent_card.py`, `tests/test_ticket64_initial_popular_menus.py`, `tests/test_ticket65_midnight_popular_aggregation.py`, `tests/test_ticket66_popular_retention_and_recovery.py`, `tests/test_ticket67_illustrations_and_exceptions.py`, `tests/test_ticket68_missing_illustration_registration.py`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/menus/popular`: 초기 인기 메뉴 테이블이 미시드 상태일 때 요청 중 DB 쓰기를 수행하지 않고 `{"success": true, "data": {"source": "initial", "as_of": null, "items": []}, "message": null}`을 반환하도록 읽기 전용 동작을 확정했다.
+
+#### DB 변경
+
+- 없음 (기존 스키마 유지, `menus.food_kind_id NOT NULL` 제약이 `session.dirty` 업데이트에서도 온전히 적용됨을 검증).
+
+#### 검증
+
+- SQLite + 격리 MySQL 8.4.13(`MYSQL_TEST_DATABASE_URL`) 통합 검증 (`pytest tests/test_ticket62_*.py ... tests/test_ticket68_*.py -v`): **108 passed, 0 skipped**.
+- 전체 저장소 회귀 검증 (`pytest tests/ --ignore=tests/test_user_meals.py -q`): **387 passed, 24 skipped** (`tests/test_user_meals.py`는 기존 `display.py` 포맷 불일치 선행 베이스라인 2건으로 제외).
+- `app/static/menu-illustrations/`에 `default.svg`만 존재하며 임시/생성 PNG가 포함되지 않음을 확인했고, 테스트용 격리 `mysqld.exe`를 정상 종료했다.
+
+#### 남은 작업 및 주의 사항
+
+- 없음 (디자이너 PNG 수령 후 `python -m scripts.register_menu_illustration --kind-key <key> --source-png <path> --require-transparency [--verify-base-url http://127.0.0.1:8000]`로 배포·검증·등록 진행).
+
 ### #68 빠진 음식 일러스트 추가(디자이너 PNG 검증·배포·등록 도구 및 즉시 반영 검증) 구현
 
 #### 변경 이유 및 내용

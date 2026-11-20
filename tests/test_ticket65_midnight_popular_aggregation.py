@@ -26,6 +26,7 @@ from app.menus.models import (
 )
 from app.menus.popular import (
     aggregate_popular_menus_for_kst_date,
+    ensure_initial_popular_food_kinds,
     get_seoul_tz,
 )
 from app.menus.popular_scheduler import popular_ranking_scheduler_loop
@@ -103,6 +104,7 @@ def test_seoul_tz_resolves_utc_plus_9():
 
 def test_four_users_keeps_initial_list_and_five_users_publishes_aggregated_ranking(popular_api):
     db = popular_api.db
+    ensure_initial_popular_food_kinds(db)
     burger = _build_menu("T65-BG-1", "버거_치즈버거", "버거")
     gukbap = _build_menu("T65-GB-1", "국밥_돼지국밥", "국밥")
     pasta = _build_menu("T65-PS-1", "스파게티_토마토파스타", "스파게티")
@@ -168,11 +170,11 @@ def test_four_users_keeps_initial_list_and_five_users_publishes_aggregated_ranki
     data_5 = body_5["data"]
     assert data_5["source"] == "aggregated"
     assert data_5["as_of"] == "2026-11-20T15:00:00Z"
-    assert [item["name"] for item in data_5["items"]] == ["햄버거", "국밥", "파스타"]
+    assert [item["name"] for item in data_5["items"]] == ["햄버거", "파스타", "국밥"]
     assert [item["food_kind_id"] for item in data_5["items"]] == [
         burger.food_kind_id,
-        gukbap.food_kind_id,
         pasta.food_kind_id,
+        gukbap.food_kind_id,
     ]
 
 
@@ -811,7 +813,7 @@ def test_scheduler_loop_waits_until_asia_seoul_midnight_aggregates_previous_day_
     assert [item["name"] for item in data["items"]] == ["햄버거", "국밥"]
 
 
-def test_scheduler_loop_survives_transient_aggregation_error_and_schedules_next_midnight(
+def test_scheduler_loop_retries_transient_aggregation_error_and_schedules_next_midnight(
     sqlite_engine,
 ):
     current_utc = [datetime(2026, 11, 19, 14, 59, 0, tzinfo=timezone.utc)]
@@ -825,14 +827,14 @@ def test_scheduler_loop_survives_transient_aggregation_error_and_schedules_next_
         return aggregate_popular_menus_for_kst_date(db, target_kst_date)
 
     async def _run():
-        second_run_completed = asyncio.Event()
+        next_day_completed = asyncio.Event()
 
         async def fake_sleep(delay: float) -> None:
             recorded_delays.append(delay)
-            if len(recorded_delays) <= 2:
+            if len(recorded_delays) <= 3:
                 current_utc[0] = current_utc[0] + timedelta(seconds=delay)
                 return
-            second_run_completed.set()
+            next_day_completed.set()
             await asyncio.Future()
 
         task = asyncio.create_task(
@@ -841,23 +843,134 @@ def test_scheduler_loop_survives_transient_aggregation_error_and_schedules_next_
                 sleep_fn=fake_sleep,
                 session_factory=lambda: Session(sqlite_engine),
                 aggregate_fn=flaky_aggregate,
+                retry_delay_seconds=60.0,
+                max_retries_per_day=3,
             )
         )
-        await asyncio.wait_for(second_run_completed.wait(), timeout=5.0)
+        await asyncio.wait_for(next_day_completed.wait(), timeout=5.0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
     asyncio.run(_run())
 
-    assert recorded_delays == [60.0, 86400.0, 86400.0]
-    assert invoked_dates == [date(2026, 11, 20), date(2026, 11, 21)]
+    # 60s to 11-20 midnight -> fail -> 60s retry -> succeed 11-20 -> 86340s to 11-21 midnight -> succeed 11-21 -> 86400s
+    assert recorded_delays == [60.0, 60.0, 86340.0, 86400.0]
+    assert invoked_dates == [date(2026, 11, 20), date(2026, 11, 20), date(2026, 11, 21)]
+
+
+def test_scheduler_loop_exhausts_max_retries_per_day_before_moving_to_next_midnight(
+    sqlite_engine,
+):
+    current_utc = [datetime(2026, 11, 19, 14, 59, 0, tzinfo=timezone.utc)]
+    invoked_dates: list[date] = []
+    recorded_delays: list[float] = []
+
+    def failing_day1_aggregate(db: Session, target_kst_date: date):
+        invoked_dates.append(target_kst_date)
+        if target_kst_date == date(2026, 11, 20):
+            raise RuntimeError("persistent day1 error")
+        return aggregate_popular_menus_for_kst_date(db, target_kst_date)
+
+    async def _run():
+        day2_done = asyncio.Event()
+
+        async def fake_sleep(delay: float) -> None:
+            recorded_delays.append(delay)
+            if len(recorded_delays) <= 4:
+                current_utc[0] = current_utc[0] + timedelta(seconds=delay)
+                return
+            day2_done.set()
+            await asyncio.Future()
+
+        task = asyncio.create_task(
+            popular_ranking_scheduler_loop(
+                now_fn=lambda: current_utc[0],
+                sleep_fn=fake_sleep,
+                session_factory=lambda: Session(sqlite_engine),
+                aggregate_fn=failing_day1_aggregate,
+                retry_delay_seconds=30.0,
+                max_retries_per_day=2,
+            )
+        )
+        await asyncio.wait_for(day2_done.wait(), timeout=5.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+
+    # 60s to 11-20 -> fail #1 -> 30s -> fail #2 -> 30s -> fail #3 (2 retries exhausted) -> 86340s to 11-21 -> succeed -> 86400s
+    assert recorded_delays == [60.0, 30.0, 30.0, 86340.0, 86400.0]
+    assert invoked_dates == [
+        date(2026, 11, 20),
+        date(2026, 11, 20),
+        date(2026, 11, 20),
+        date(2026, 11, 21),
+    ]
+
+
+def test_scheduler_loop_early_wake_guard_resleeps_until_exact_kst_midnight(sqlite_engine):
+    # KST 2026-11-19 23:55:00 (= UTC 14:55:00), target KST 2026-11-20 00:00:00 (= UTC 15:00:00)
+    target_midnight_utc = datetime(2026, 11, 19, 15, 0, 0, tzinfo=timezone.utc)
+    current_utc = [datetime(2026, 11, 19, 14, 55, 0, tzinfo=timezone.utc)]
+    recorded_delays: list[float] = []
+    invoked_at_utc: list[tuple[date, datetime]] = []
+
+    def recording_aggregate(db: Session, target_kst_date: date):
+        invoked_at_utc.append((target_kst_date, current_utc[0]))
+        return aggregate_popular_menus_for_kst_date(db, target_kst_date)
+
+    async def _run():
+        done = asyncio.Event()
+
+        async def early_waking_sleep(delay: float) -> None:
+            recorded_delays.append(delay)
+            call_num = len(recorded_delays)
+            if call_num == 1:
+                # Wake up 2.0 seconds early!
+                current_utc[0] = current_utc[0] + timedelta(seconds=delay - 2.0)
+                return
+            if call_num == 2:
+                # Wake up 0.05 seconds early!
+                current_utc[0] = current_utc[0] + timedelta(seconds=delay - 0.05)
+                return
+            if call_num == 3:
+                # Reach exact target midnight!
+                current_utc[0] = current_utc[0] + timedelta(seconds=delay)
+                return
+            done.set()
+            await asyncio.Future()
+
+        task = asyncio.create_task(
+            popular_ranking_scheduler_loop(
+                now_fn=lambda: current_utc[0],
+                sleep_fn=early_waking_sleep,
+                session_factory=lambda: Session(sqlite_engine),
+                aggregate_fn=recording_aggregate,
+            )
+        )
+        await asyncio.wait_for(done.wait(), timeout=5.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+
+    assert len(recorded_delays) == 4
+    assert recorded_delays[0] == pytest.approx(300.0)
+    assert recorded_delays[1] == pytest.approx(2.0)
+    assert recorded_delays[2] == pytest.approx(0.05)
+    assert recorded_delays[3] == pytest.approx(86400.0)
+    assert invoked_at_utc == [(date(2026, 11, 20), target_midnight_utc)]
 
 
 def test_fastapi_lifespan_starts_and_cancels_popular_ranking_scheduler_task(monkeypatch):
     events: list[str] = []
+    captured_kwargs: dict[str, object] = {}
 
-    async def fake_popular_loop():
+    async def fake_popular_loop(**kwargs):
+        captured_kwargs.update(kwargs)
         events.append("popular_started")
         try:
             await asyncio.Future()
@@ -880,6 +993,7 @@ def test_fastapi_lifespan_starts_and_cancels_popular_ranking_scheduler_task(monk
         assert "popular_started" in events
 
     assert events == ["popular_started", "popular_cancelled"]
+    assert captured_kwargs.get("run_startup_recovery") is True
 
 
 @pytest.fixture
