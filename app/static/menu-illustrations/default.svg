@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="WhatBap default menu illustration">
+  <rect width="128" height="128" rx="24" fill="#fff5e4"/>
+  <ellipse cx="64" cy="78" rx="40" ry="18" fill="#ffffff" stroke="#e79c35" stroke-width="4"/>
+  <path d="M32 74 C34 52, 94 52, 96 74 Z" fill="#ffdca8" stroke="#e79c35" stroke-width="4" stroke-linejoin="round"/>
+  <circle cx="64" cy="48" r="6" fill="#e79c35"/>
+  <path d="M48 36 Q52 28 48 20" fill="none" stroke="#e79c35" stroke-width="3" stroke-linecap="round"/>
+  <path d="M64 34 Q68 26 64 18" fill="none" stroke="#e79c35" stroke-width="3" stroke-linecap="round"/>
+  <path d="M80 36 Q84 28 80 20" fill="none" stroke="#e79c35" stroke-width="3" stroke-linecap="round"/>
+</svg>

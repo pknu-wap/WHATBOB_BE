@@ -296,7 +296,7 @@ def create_order_sheet_recommendation(
     [하이브리드 주문서 추천 파이프라인]
     0. 사용자 알레르기/비선호/섭취불가 메뉴 제외
     1. 우선순위 기반 태그 하드 필터링 (meal_type -> main_ingredient -> has_soup -> cooking_style)
-       - 후보가 top_k 미만으로 줄어드는 후순위 필터는 완화하여 점수제 질문으로 전환
+       - 서로 다른 추천 메뉴 그룹이 top_k 미만으로 줄어드는 필터는 점수제 질문으로 전환
     2. 남은 후보 메뉴에 대해 점수제 질문(완화된 필터 포함) 가중치 합산
     3. 다양성 보정 후 상위 top_k 메뉴 추천, 실제 제출된 질문의 shown_count 갱신 및 스냅샷 저장
     """
@@ -376,8 +376,8 @@ def create_order_sheet_recommendation(
     for q, opt in hard_filter_answers:
         rules = opt.get("rules", [])
         next_filtered = [m for m in filtered_menus if evaluate_option_rules(m, rules)]
-        # 필터 적용 시 최소 추천 개수(top_k) 이상이 유지될 때만 하드 필터 확정
-        if len(next_filtered) >= request.top_k:
+        # 최종 추천은 그룹당 한 메뉴를 고르므로 필터도 같은 단위로 후보를 센다.
+        if len({menu_group(menu) for menu in next_filtered}) >= request.top_k:
             filtered_menus = next_filtered
             applied_hard_filters.append((q, rules))
         else:

@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -9,8 +11,100 @@ from sqlalchemy import (
     Integer,
     JSON,
     String,
+    UniqueConstraint,
 )
+from sqlalchemy.orm import relationship
 from app.core.database import Base
+
+
+class FoodKind(Base):
+    """홈 최근에 먹은 메뉴·요즘 인기 메뉴 공통 분류 단위(음식 종류) 테이블"""
+    __tablename__ = "food_kinds"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    kind_key = Column(String(100), unique=True, index=True, nullable=False)
+    name = Column(String(100), index=True, nullable=False)
+    representative_image_url = Column(String(500), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class InitialPopularFoodKind(Base):
+    """실제 인기 순위가 처음 발행되기 전 홈에 공개하는 초기 인기 메뉴 8종 순서 테이블"""
+    __tablename__ = "initial_popular_food_kinds"
+    __table_args__ = (
+        CheckConstraint(
+            "position >= 1 AND position <= 8",
+            name="ck_initial_popular_food_kinds_position_range",
+        ),
+        UniqueConstraint("position", name="uq_initial_popular_food_kinds_position"),
+        UniqueConstraint("food_kind_id", name="uq_initial_popular_food_kinds_food_kind_id"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    position = Column(Integer, nullable=False)
+    food_kind_id = Column(
+        Integer,
+        ForeignKey("food_kinds.id", name="fk_initial_popular_food_kinds_food_kind"),
+        nullable=False,
+    )
+    food_kind = relationship("FoodKind")
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class PopularMenuRankingState(Base):
+    """마지막 실제 인기 순위 공개 상태 및 최근 성공 집계일 단일 행 테이블"""
+    __tablename__ = "popular_menu_ranking_state"
+    __table_args__ = (
+        CheckConstraint(
+            "id = 1",
+            name="ck_popular_menu_ranking_state_singleton",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, default=1, autoincrement=False)
+    last_succeeded_kst_date = Column(Date, nullable=True)
+    published_as_of = Column(DateTime, nullable=True)
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class PopularMenuRankingItem(Base):
+    """현재 공개 중인 실제 인기 메뉴 순위(최대 8종) 단일 세트 테이블"""
+    __tablename__ = "popular_menu_ranking_items"
+    __table_args__ = (
+        CheckConstraint(
+            "rank_position >= 1 AND rank_position <= 8",
+            name="ck_popular_menu_ranking_items_rank_range",
+        ),
+        CheckConstraint(
+            "user_count >= 1",
+            name="ck_popular_menu_ranking_items_user_count_positive",
+        ),
+        UniqueConstraint(
+            "food_kind_id",
+            name="uq_popular_menu_ranking_items_food_kind_id",
+        ),
+    )
+
+    rank_position = Column(Integer, primary_key=True, autoincrement=False)
+    food_kind_id = Column(
+        Integer,
+        ForeignKey("food_kinds.id", name="fk_popular_ranking_items_food_kind"),
+        nullable=False,
+    )
+    user_count = Column(Integer, nullable=False)
+    last_eaten_at = Column(DateTime, nullable=False)
+    food_kind = relationship("FoodKind")
 
 
 class Menu(Base):
@@ -21,6 +115,13 @@ class Menu(Base):
     food_code = Column(String(50), unique=True, index=True, nullable=False)
     name = Column(String(200), index=True, nullable=False)
     base_name = Column(String(100), index=True, nullable=False)
+    food_kind_id = Column(
+        Integer,
+        ForeignKey("food_kinds.id", name="fk_menus_food_kind"),
+        index=True,
+        nullable=False,
+    )
+    food_kind = relationship("FoodKind")
 
     category_large = Column(String(50), index=True, nullable=False)
     category_medium = Column(String(50), index=True, nullable=True)
@@ -48,6 +149,23 @@ class Menu(Base):
     allergen_tags = Column(JSON, nullable=False, default=list)
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class MenuIllustrationException(Base):
+    """홈 최근 메뉴 카드에서 대표 일러스트 대신 공통 이미지를 표시할 메뉴별 예외 테이블"""
+    __tablename__ = "menu_illustration_exceptions"
+
+    menu_id = Column(
+        Integer,
+        ForeignKey(
+            "menus.id",
+            ondelete="CASCADE",
+            name="fk_menu_illustration_exceptions_menu",
+        ),
+        primary_key=True,
+    )
+    reason = Column(String(200), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
 class UserFoodExclusion(Base):
@@ -218,4 +336,3 @@ class RecommendationItemSnapshot(Base):
     feature_schema_version = Column(Integer, nullable=False, default=1)
     features_json = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
