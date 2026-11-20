@@ -110,16 +110,17 @@ def test_four_users_keeps_initial_list_and_five_users_publishes_aggregated_ranki
     db.flush()
 
     users = _create_users(db, 5)
-    # KST 2026-11-19 12:00:00 = UTC 2026-11-19 03:00:00
-    day_mid_utc = datetime(2026, 11, 19, 3, 0, 0, tzinfo=timezone.utc)
+    # Day 1 (KST 2026-11-19 -> 집계일 2026-11-20): 4명의 유효 사용자만 기록
+    day1_mid_utc = datetime(2026, 11, 19, 3, 0, 0, tzinfo=timezone.utc)
+    # Day 2 (KST 2026-11-20 -> 집계일 2026-11-21): 5명의 유효 사용자 기록
+    day2_mid_utc = datetime(2026, 11, 20, 3, 0, 0, tzinfo=timezone.utc)
 
-    # 4명의 유효 사용자만 기록
     db.add_all(
         [
-            UserMeal(user_id=users[0].id, menu_id=burger.id, menu_name="치즈버거", eaten_at=day_mid_utc),
-            UserMeal(user_id=users[1].id, menu_id=burger.id, menu_name="치즈버거", eaten_at=day_mid_utc),
-            UserMeal(user_id=users[2].id, menu_id=gukbap.id, menu_name="돼지국밥", eaten_at=day_mid_utc),
-            UserMeal(user_id=users[3].id, menu_id=pasta.id, menu_name="토마토파스타", eaten_at=day_mid_utc),
+            UserMeal(user_id=users[0].id, menu_id=burger.id, menu_name="치즈버거", eaten_at=day1_mid_utc),
+            UserMeal(user_id=users[1].id, menu_id=burger.id, menu_name="치즈버거", eaten_at=day1_mid_utc),
+            UserMeal(user_id=users[2].id, menu_id=gukbap.id, menu_name="돼지국밥", eaten_at=day1_mid_utc),
+            UserMeal(user_id=users[3].id, menu_id=pasta.id, menu_name="토마토파스타", eaten_at=day1_mid_utc),
         ]
     )
     db.commit()
@@ -136,21 +137,27 @@ def test_four_users_keeps_initial_list_and_five_users_publishes_aggregated_ranki
     assert data_4["as_of"] is None
     assert len(data_4["items"]) == 8
 
-    # 5번째 사용자 추가 후 집계하면 실제 순위가 발행된다.
-    db.add(
-        UserMeal(
-            user_id=users[4].id,
-            menu_id=burger.id,
-            menu_name="치즈버거",
-            eaten_at=day_mid_utc + timedelta(hours=1),
-        )
+    # 다음 날(KST 2026-11-20) 5명이 기록한 뒤 11-21 자정 집계를 실행하면 실제 순위가 발행된다.
+    db.add_all(
+        [
+            UserMeal(user_id=users[0].id, menu_id=burger.id, menu_name="치즈버거", eaten_at=day2_mid_utc),
+            UserMeal(user_id=users[1].id, menu_id=burger.id, menu_name="치즈버거", eaten_at=day2_mid_utc),
+            UserMeal(user_id=users[2].id, menu_id=gukbap.id, menu_name="돼지국밥", eaten_at=day2_mid_utc),
+            UserMeal(user_id=users[3].id, menu_id=pasta.id, menu_name="토마토파스타", eaten_at=day2_mid_utc),
+            UserMeal(
+                user_id=users[4].id,
+                menu_id=burger.id,
+                menu_name="치즈버거",
+                eaten_at=day2_mid_utc + timedelta(hours=1),
+            ),
+        ]
     )
     db.commit()
 
-    result_5 = aggregate_popular_menus_for_kst_date(db, date(2026, 11, 20))
+    result_5 = aggregate_popular_menus_for_kst_date(db, date(2026, 11, 21))
     assert result_5.published is True
     assert result_5.distinct_user_count == 5
-    assert result_5.published_as_of == datetime(2026, 11, 19, 15, 0, 0, tzinfo=timezone.utc)
+    assert result_5.published_as_of == datetime(2026, 11, 20, 15, 0, 0, tzinfo=timezone.utc)
     assert result_5.item_count == 3
 
     resp_5 = popular_api.client.get(POPULAR_MENUS_URL)
@@ -160,7 +167,7 @@ def test_four_users_keeps_initial_list_and_five_users_publishes_aggregated_ranki
     assert body_5["message"] is None
     data_5 = body_5["data"]
     assert data_5["source"] == "aggregated"
-    assert data_5["as_of"] == "2026-11-19T15:00:00Z"
+    assert data_5["as_of"] == "2026-11-20T15:00:00Z"
     assert [item["name"] for item in data_5["items"]] == ["햄버거", "국밥", "파스타"]
     assert [item["food_kind_id"] for item in data_5["items"]] == [
         burger.food_kind_id,
@@ -186,7 +193,7 @@ def test_kst_midnight_window_boundaries_in_utc_and_delayed_datetime_target(popul
     exact_start_utc = datetime(2026, 11, 18, 15, 0, 0, tzinfo=timezone.utc)     # KST 11-19 00:00:00 (포함)
     mid_day_utc = datetime(2026, 11, 19, 3, 0, 0, tzinfo=timezone.utc)          # KST 11-19 12:00:00 (포함)
     last_second_utc = datetime(2026, 11, 19, 14, 59, 59, tzinfo=timezone.utc)   # KST 11-19 23:59:59 (포함)
-    exact_end_utc = datetime(2026, 11, 19, 15, 0, 0, tzinfo=timezone.utc)       # KST 11-20 00:00:00 (제외)
+    exact_end_utc = datetime(2026, 11, 19, 15, 0, 0, tzinfo=timezone.utc)       # KST 11-20 00:00:00 (11-20 제외, 11-21 포함)
 
     # 범위 밖 2명(before_start, exact_end) + 범위 안 4명 => 총 4명만 유효하므로 초기 목록 유지
     db.add_all(
@@ -206,25 +213,38 @@ def test_kst_midnight_window_boundaries_in_utc_and_delayed_datetime_target(popul
     assert res_under.distinct_user_count == 4
     assert popular_api.client.get(POPULAR_MENUS_URL).json()["data"]["source"] == "initial"
 
-    # 범위 안에 5번째 사용자(국밥, exact_start) 추가 -> 국밥 3명, 햄버거 2명; 마라탕·파스타는 범위 밖이라 제외
-    db.add(
-        UserMeal(user_id=users[6].id, menu_id=gukbap.id, menu_name="순대국밥", eaten_at=exact_start_utc)
+    # 다음 집계일(KST 2026-11-21 자정) 대상 범위 [UTC 2026-11-19 15:00:00, UTC 2026-11-20 15:00:00):
+    # - 11-19 14:59:59(last_second_utc)와 11-20 15:00:00(day2_exact_end_utc)는 제외
+    # - 11-19 15:00:00(exact_end_utc, 이미 users[1] 파스타 기록 존재)은 포함!
+    # - 국밥 3명(users[2,3,4]), 햄버거 2명(users[5,6]), 파스타 1명(users[1]) => 총 6명, 마라탕(범위 밖) 제외
+    day2_mid_utc = datetime(2026, 11, 20, 3, 0, 0, tzinfo=timezone.utc)
+    day2_last_second_utc = datetime(2026, 11, 20, 14, 59, 59, tzinfo=timezone.utc)
+    day2_exact_end_utc = datetime(2026, 11, 20, 15, 0, 0, tzinfo=timezone.utc)
+    db.add_all(
+        [
+            UserMeal(user_id=users[0].id, menu_id=malatang.id, menu_name="마라탕", eaten_at=day2_exact_end_utc),
+            UserMeal(user_id=users[2].id, menu_id=gukbap.id, menu_name="순대국밥", eaten_at=exact_end_utc),
+            UserMeal(user_id=users[3].id, menu_id=gukbap.id, menu_name="순대국밥", eaten_at=day2_mid_utc),
+            UserMeal(user_id=users[4].id, menu_id=gukbap.id, menu_name="순대국밥", eaten_at=day2_last_second_utc),
+            UserMeal(user_id=users[5].id, menu_id=burger.id, menu_name="치즈버거", eaten_at=day2_mid_utc),
+            UserMeal(user_id=users[6].id, menu_id=burger.id, menu_name="치즈버거", eaten_at=day2_mid_utc),
+        ]
     )
     db.commit()
 
-    # 자정보다 7분 늦은 시각(KST 2026-11-20 00:07:30)을 datetime으로 넘겨도 기준 as_of는 정확히 자정(UTC 15:00:00Z)이다.
-    delayed_kst = datetime(2026, 11, 20, 0, 7, 30, tzinfo=get_seoul_tz())
+    # 자정보다 7분 늦은 시각(KST 2026-11-21 00:07:30)을 datetime으로 넘겨도 기준 as_of는 정확히 자정(UTC 15:00:00Z)이다.
+    delayed_kst = datetime(2026, 11, 21, 0, 7, 30, tzinfo=get_seoul_tz())
     res_pub = aggregate_popular_menus_for_kst_date(db, delayed_kst)
     assert res_pub.published is True
-    assert res_pub.target_kst_date == date(2026, 11, 20)
-    assert res_pub.distinct_user_count == 5
-    assert res_pub.window_start_utc == exact_start_utc
-    assert res_pub.window_end_utc == exact_end_utc
+    assert res_pub.target_kst_date == date(2026, 11, 21)
+    assert res_pub.distinct_user_count == 6
+    assert res_pub.window_start_utc == exact_end_utc
+    assert res_pub.window_end_utc == day2_exact_end_utc
 
     data = popular_api.client.get(POPULAR_MENUS_URL).json()["data"]
     assert data["source"] == "aggregated"
-    assert data["as_of"] == "2026-11-19T15:00:00Z"
-    assert [item["name"] for item in data["items"]] == ["국밥", "햄버거"]
+    assert data["as_of"] == "2026-11-20T15:00:00Z"
+    assert [item["name"] for item in data["items"]] == ["국밥", "햄버거", "파스타"]
 
 
 def test_deleted_catalog_menu_excluded_from_both_five_user_threshold_and_ranking_scores(popular_api):
@@ -238,26 +258,36 @@ def test_deleted_catalog_menu_excluded_from_both_five_user_threshold_and_ranking
     db.flush()
 
     users = _create_users(db, 6, start_kakao_id=65201)
-    meal_time = datetime(2026, 11, 19, 3, 0, 0, tzinfo=timezone.utc)
+    day1_time = datetime(2026, 11, 19, 3, 0, 0, tzinfo=timezone.utc)
+    day2_time = datetime(2026, 11, 20, 3, 0, 0, tzinfo=timezone.utc)
 
-    # 1) 5명이 기록했으나 그중 1명(users[4])의 유일한 기록 메뉴(malatang_deleted)가 삭제되어
+    # 1) Day 1: 5명이 기록했으나 그중 1명(users[4])의 유일한 기록 메뉴(malatang_deleted)가 삭제되어
     #    유효 사용자가 4명이 되면 초기 목록을 유지해야 한다.
+    # 2) Day 2: 유효 6명 + 삭제될 메뉴(burger_deleted 3명, malatang_deleted 1명) 기록 추가
     db.add_all(
         [
-            UserMeal(user_id=users[0].id, menu_id=gukbap.id, menu_name="돼지국밥", eaten_at=meal_time),
-            UserMeal(user_id=users[1].id, menu_id=gukbap.id, menu_name="돼지국밥", eaten_at=meal_time),
-            UserMeal(user_id=users[2].id, menu_id=pasta.id, menu_name="토마토파스타", eaten_at=meal_time),
-            UserMeal(user_id=users[3].id, menu_id=burger_active.id, menu_name="불고기버거", eaten_at=meal_time),
+            UserMeal(user_id=users[0].id, menu_id=gukbap.id, menu_name="돼지국밥", eaten_at=day1_time),
+            UserMeal(user_id=users[1].id, menu_id=gukbap.id, menu_name="돼지국밥", eaten_at=day1_time),
+            UserMeal(user_id=users[2].id, menu_id=pasta.id, menu_name="토마토파스타", eaten_at=day1_time),
+            UserMeal(user_id=users[3].id, menu_id=burger_active.id, menu_name="불고기버거", eaten_at=day1_time),
             UserMeal(
                 user_id=users[4].id,
                 menu_id=malatang_deleted.id,
                 menu_name="단종마라탕",
-                eaten_at=meal_time,
+                eaten_at=day1_time,
             ),
-            # users[0..2]가 삭제될 버거 메뉴도 먹음 (삭제 후 점수에 반영되면 안 됨)
-            UserMeal(user_id=users[0].id, menu_id=burger_deleted.id, menu_name="단종치즈버거", eaten_at=meal_time),
-            UserMeal(user_id=users[1].id, menu_id=burger_deleted.id, menu_name="단종치즈버거", eaten_at=meal_time),
-            UserMeal(user_id=users[2].id, menu_id=burger_deleted.id, menu_name="단종치즈버거", eaten_at=meal_time),
+            # Day 2 기록
+            UserMeal(user_id=users[0].id, menu_id=gukbap.id, menu_name="돼지국밥", eaten_at=day2_time),
+            UserMeal(user_id=users[1].id, menu_id=gukbap.id, menu_name="돼지국밥", eaten_at=day2_time),
+            UserMeal(user_id=users[2].id, menu_id=pasta.id, menu_name="토마토파스타", eaten_at=day2_time),
+            UserMeal(user_id=users[3].id, menu_id=burger_active.id, menu_name="불고기버거", eaten_at=day2_time),
+            UserMeal(user_id=users[4].id, menu_id=pasta.id, menu_name="토마토파스타", eaten_at=day2_time),
+            UserMeal(user_id=users[5].id, menu_id=pasta.id, menu_name="토마토파스타", eaten_at=day2_time),
+            # users[0..2]가 삭제될 버거 메뉴도 먹고 users[4]가 삭제될 마라탕도 먹음 (삭제 후 점수에 반영되면 안 됨)
+            UserMeal(user_id=users[0].id, menu_id=burger_deleted.id, menu_name="단종치즈버거", eaten_at=day2_time),
+            UserMeal(user_id=users[1].id, menu_id=burger_deleted.id, menu_name="단종치즈버거", eaten_at=day2_time),
+            UserMeal(user_id=users[2].id, menu_id=burger_deleted.id, menu_name="단종치즈버거", eaten_at=day2_time),
+            UserMeal(user_id=users[4].id, menu_id=malatang_deleted.id, menu_name="단종마라탕", eaten_at=day2_time),
         ]
     )
     db.commit()
@@ -274,24 +304,15 @@ def test_deleted_catalog_menu_excluded_from_both_five_user_threshold_and_ranking
     assert data_before["source"] == "initial"
     assert data_before["as_of"] is None
 
-    # 2) users[4], users[5]가 유효한 파스타 기록을 추가해 유효 6명이 되면 실제 순위 발행:
-    #    파스타 3명(users[2,4,5]) > 국밥 2명(users[0,1]) > 햄버거 1명(users[3])
-    #    삭제된 burger_deleted(3명)와 malatang_deleted(1명)은 점수에서 완전히 제외되어야 한다.
-    db.add_all(
-        [
-            UserMeal(user_id=users[4].id, menu_id=pasta.id, menu_name="토마토파스타", eaten_at=meal_time),
-            UserMeal(user_id=users[5].id, menu_id=pasta.id, menu_name="토마토파스타", eaten_at=meal_time),
-        ]
-    )
-    db.commit()
-
-    res_6_valid = aggregate_popular_menus_for_kst_date(db, date(2026, 11, 20))
+    # Day 2 집계: 파스타 3명(users[2,4,5]) > 국밥 2명(users[0,1]) > 햄버거 1명(users[3])
+    # 삭제된 burger_deleted(3명)와 malatang_deleted(1명)은 점수에서 완전히 제외되어야 한다.
+    res_6_valid = aggregate_popular_menus_for_kst_date(db, date(2026, 11, 21))
     assert res_6_valid.published is True
     assert res_6_valid.distinct_user_count == 6
 
     data_after = popular_api.client.get(POPULAR_MENUS_URL).json()["data"]
     assert data_after["source"] == "aggregated"
-    assert data_after["as_of"] == "2026-11-19T15:00:00Z"
+    assert data_after["as_of"] == "2026-11-20T15:00:00Z"
     assert [item["name"] for item in data_after["items"]] == ["파스타", "국밥", "햄버거"]
 
 

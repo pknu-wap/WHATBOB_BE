@@ -36,6 +36,38 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 - 디자이너에게 `gukbap.png`, `jjajangmyeon.png`(및 Figma 재사용 6종 PNG)를 수령하면 `python -m scripts.register_menu_illustration --kind-key <key> --source-png <path> --require-transparency`로 배포·등록하고 `--status` 및 `/static/menu-illustrations/<file>.png` HTTP 200을 확인한다.
 - 제공된 일러스트를 참조한 AI 이미지 생성은 요청자가 모델을 변경하고 명시적으로 허락하기 전에는 실행하지 않는다.
 
+### #66 마지막 인기 순위 유지와 놓친 자정 집계 복구 구현
+
+#### 변경 이유 및 내용
+
+- 기록 사용자가 5명 미만이거나 서버가 자정 집계를 놓쳐 재시작된 경우에도 방문자가 마지막 실제 인기 순위를 일관되게 조회하고, 재시작 시 가장 최근에 놓친 한국시간 자정 집계 1회만 중복 없이 보충하도록 구현했다.
+- `app/menus/popular.py`의 `PopularAggregationResult`에 `skipped: bool = False` 필드를 추가하고, `aggregate_popular_menus_for_kst_date()`에서 집계 및 순위 교체 전에 `popular_menu_ranking_state` 단일 행(`id = 1`)을 보장(최초 동시 `INSERT` 충돌 시 안전하게 롤백·재조회)한 뒤 InnoDB 쓰기 잠금(`SELECT ... FOR UPDATE` + `.populate_existing()`)을 획득하도록 변경했다.
+- `state.last_succeeded_kst_date`가 이미 `target_kst_date` 이상이면 중복·과거 날짜 실행을 `skipped=True`로 건너뛰어 기존 순위·`published_as_of`·`last_succeeded_kst_date`를 보존한다. 유효 사용자가 5명 미만이면 `last_succeeded_kst_date`만 갱신하고 이전 순위와 `published_as_of`(최초 발행 전에는 초기 8종)를 유지하며, 5명 이상이면 순위 항목 교체와 두 날짜 갱신을 한 트랜잭션으로 확정하고 실패 시 완전 롤백해 동일 날짜 재시도를 보장한다.
+- `app/menus/popular.py`에 `recover_missed_popular_menu_ranking()`을 추가해 현재 시각 기준 가장 최근에 지난 한국시간 자정 날짜(`current_kst.date()`) 한 번만 `aggregate_popular_menus_for_kst_date()`로 보충하도록 구현하고, `app/main.py` FastAPI 수명주기 기동 단계에서 `recover_rooms_after_restart()`·`ensure_initial_popular_food_kinds()` 직후 자동 실행되도록 연동했다(복구 중 일시 오류는 로그 후 앱 기동을 계속 유지).
+- `get_popular_menus()`(`_fetch_published_popular_rows()`)에서 저장된 실제 인기 순위를 조회할 때 `EXISTS (SELECT 1 FROM menus WHERE menus.food_kind_id = popular_menu_ranking_items.food_kind_id)` 조건을 적용해 현재 카탈로그 메뉴가 하나도 남지 않은 음식 종류만 응답에서 숨기고 나머지 카드의 상대 순서와 `as_of`를 유지하도록 했다(모든 순위 음식 종류의 메뉴가 삭제된 경우에도 초기 목록으로 되돌리지 않고 `source="aggregated"`, 기존 `as_of`, `items=[]` 반환).
+- 동일 날짜 재실행 멱등성 도입에 맞춰 `tests/test_ticket65_midnight_popular_aggregation.py`의 4명→5명 전환·자정 경계·삭제 메뉴 제외 테스트 3건을 연속된 집계일(11-20→11-21) 시나리오로 정합화했다.
+
+#### 주요 변경 파일
+
+- `app/menus/popular.py`, `app/main.py`, `tests/test_ticket66_popular_retention_and_recovery.py`, `tests/test_ticket65_midnight_popular_aggregation.py`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/menus/popular` 동작 보강: 저장된 실제 인기 순위(`source="aggregated"`) 응답에서 현재 `menus` 테이블에 메뉴가 0건인 음식 종류만 제외하며 나머지 항목의 상대 순서와 원래 `as_of`를 유지한다. 저장 순위의 모든 음식 종류에서 메뉴가 삭제된 경우에도 `source="aggregated"`, 원래 `as_of`, `items=[]`를 반환한다.
+
+#### DB 변경
+
+- 없음 (기존 #65에서 추가한 `popular_menu_ranking_state` 및 `popular_menu_ranking_items` 스키마와 `menus.food_kind_id` 인덱스를 사용)
+
+#### 검증
+
+- `pytest -v tests/test_ticket66_popular_retention_and_recovery.py tests/test_ticket65_midnight_popular_aggregation.py tests/test_ticket64_initial_popular_menus.py tests/test_ticket63_recent_food_kinds_max6.py tests/test_ticket62_food_kinds_and_recent_card.py` 실행(SQLite 및 격리 MySQL 8.4.13 `MYSQL_TEST_DATABASE_URL`): 76 passed (발행 전·후 5명 미만 유지 및 성공일 갱신, 동일·과거 날짜 멱등 건너뜀, 트랜잭션 중간 실패 완전 롤백 및 동일 날짜 재시도, 다중 누락 자정 중 최신 1회 복구 및 반복 재시작 건너뜀, 최초 기동 복구 및 FastAPI 수명주기 자동 복구·오류 내성, 카탈로그 메뉴 일부·전체 삭제 시 음식 종류 숨김 및 `as_of` 유지, MySQL 8.4.13 최초 3스레드 동시 실행 무데드락 직렬화·`FOR UPDATE` 행 잠금 차단·집계 중 `GET /api/menus/popular` MVCC 일관된 스냅샷 조회 검증).
+- `pytest -q tests/ --ignore=tests/test_user_meals.py` 전체 회귀 검증: 358 passed, 21 skipped (`test_user_meals.py`는 기존 `display.py` 변경으로 인한 선행 베이스라인 실패 2건으로 제외).
+
+#### 남은 작업 및 주의 사항
+
+- 없음
+
 ### #67 기존 일러스트와 공통 이미지 연결 구현
 
 #### 변경 이유 및 내용
