@@ -499,7 +499,7 @@ def get_my_home_card_recently_eaten_foods(
         if not chunk:
             break
 
-        for meal, menu, food_kind in chunk:
+        for meal, menu, food_kind, illustration_exception in chunk:
             food_kind_id = int(menu.food_kind_id)
             if food_kind_id in seen_food_kind_ids:
                 continue
@@ -510,7 +510,10 @@ def get_my_home_card_recently_eaten_foods(
                     food_kind_id=food_kind_id,
                     menu_name=meal.menu_name,
                     eaten_at=_as_utc(meal.eaten_at),
-                    image_url=resolve_menu_illustration_url(rep_url),
+                    image_url=resolve_menu_illustration_url(
+                        rep_url,
+                        use_common_fallback=(illustration_exception is not None),
+                    ),
                 )
             )
             if len(items) >= max_cards:

@@ -56,14 +56,19 @@ def classify_food_kind(
 def resolve_menu_illustration_url(
     representative_image_url: str | None,
     *,
-    static_dir: Path = STATIC_DIR,
+    use_common_fallback: bool = False,
+    static_dir: Path | None = None,
 ) -> str:
     """대표 일러스트 경로가 등록되어 있고 정적 파일이 존재하면 해당 상대 경로를, 아니면 공통 이미지를 반환한다."""
+    if use_common_fallback:
+        return DEFAULT_MENU_ILLUSTRATION_URL
+
     cleaned = (representative_image_url or "").strip()
-    if cleaned.startswith("/static/"):
-        rel_path = cleaned.removeprefix("/static/").lstrip("/")
-        if rel_path:
-            static_root = static_dir.resolve()
+    if cleaned.startswith("/static/") and "\\" not in cleaned:
+        rel_path = cleaned.removeprefix("/static/")
+        if rel_path and not rel_path.startswith("/"):
+            effective_static_dir = STATIC_DIR if static_dir is None else static_dir
+            static_root = effective_static_dir.resolve()
             candidate = (static_root / rel_path).resolve()
             try:
                 candidate.relative_to(static_root)

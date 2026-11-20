@@ -37,6 +37,39 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 - 없음
 
+### #67 기존 일러스트와 공통 이미지 연결 구현
+
+#### 변경 이유 및 내용
+
+- 홈 최근에 먹은 메뉴와 요즘 인기 메뉴가 같은 음식 종류의 대표 일러스트를 공유하되, 대표 그림이 미등록이거나 배포 파일이 없거나 최근 카드의 실제 메뉴가 대표 그림과 크게 다른 경우 공통 이미지(`/static/menu-illustrations/default.svg`)를 반환하도록 연결 구조를 구현했다.
+- `app/menus/models.py`에 확정 B안 설계대로 메뉴별 예외 테이블 `MenuIllustrationException`(`menu_illustration_exceptions`, `menu_id` PK 및 `FK -> menus.id ON DELETE CASCADE`, `reason`, `created_at`)을 추가했다.
+- `app/menus/illustrations.py`에 Figma 원본 대조 결과 매니페스트(`FOOD_KIND_ILLUSTRATION_SPECS`: 재사용 6종 `tteokbokki`/`tonkatsu`/`burger`/`malatang`/`pasta`/`jeyuk_bokkeum`과 #68 전달 대상 누락 2종 `gukbap`/`jjajangmyeon`), 대표 파스타(토마토 스파게티) 일러스트와 크게 다른 비토마토 파스타(크림·까르보나라·투움바·로제·오일·뇨끼) 29종 `food_code` 목록(`DEFAULT_MENU_ILLUSTRATION_EXCEPTION_FOOD_CODES`), 그리고 멱등 DB 도우미(`seed_menu_illustration_exceptions`, `sync_food_kind_representative_illustrations`, `register_food_kind_illustration`)를 구현했다.
+- `app/menus/food_kinds.py`의 `resolve_menu_illustration_url`에 `use_common_fallback` 옵션을 추가하고, `app/users/repository.py`의 `find_valid_user_meals_with_food_kind_chunk`에서 `menu_illustration_exceptions`를 단일 쿼리 `LEFT JOIN`으로 함께 읽어 `app/users/service.py`에서 `food_kind_id`·중복 제거·카드 순서에 영향을 주지 않고 공통 이미지를 적용하도록 수정했다. `GET /api/menus/popular`는 음식 종류 단위 대표 일러스트와 공통 이미지 폴백만 적용한다.
+- `scripts/seed_menus.py`에 멱등 예외 적재와 배포 파일 기반 대표 경로 동기화를 연동하고, 기존 DB 보존 검증과 재적용을 지원하는 전용 마이그레이션 스크립트 `scripts/migrate_issue67_illustrations.py`를 추가했다.
+
+#### 주요 변경 파일
+
+- `app/menus/models.py`, `app/menus/food_kinds.py`, `app/menus/illustrations.py`, `app/users/repository.py`, `app/users/service.py`, `scripts/seed_menus.py`, `scripts/migrate_issue67_illustrations.py`, `tests/test_ticket67_illustrations_and_exceptions.py`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/users/me/home-card-recently-eaten-food-max-6` 동작 보강: 기존 응답 스키마와 `food_kind_id`·중복 제거·정렬 규칙은 유지하면서, 선택된 메뉴가 `menu_illustration_exceptions`에 등록되어 있거나 음식 종류 대표 경로가 미등록/파일 누락 상태이면 `/static/menu-illustrations/default.svg`를 반환하고, 배포된 대표 일러스트가 있으면 해당 상대 경로를 반환한다.
+- `GET /api/menus/popular`: 음식 종류 단위 대표 일러스트 공유 및 미등록/파일 누락 시 공통 이미지 폴백 유지(메뉴별 예외의 영향을 받지 않음).
+
+#### DB 변경
+
+- `menu_illustration_exceptions` 테이블(`menu_id` PRIMARY KEY 및 `FOREIGN KEY (menu_id) REFERENCES menus (id) ON DELETE CASCADE` `fk_menu_illustration_exceptions_menu`, `reason`, `created_at`) 추가 및 전용 마이그레이션 `scripts/migrate_issue67_illustrations.py` 추가.
+
+#### 검증
+
+- `pytest tests/test_ticket67_illustrations_and_exceptions.py tests/test_ticket62_food_kinds_and_recent_card.py tests/test_ticket63_recent_food_kinds_max6.py tests/test_ticket64_initial_popular_menus.py -v` 실행(SQLite 및 격리 MySQL 8.4.13 `MYSQL_TEST_DATABASE_URL`): 64 passed (Figma 매니페스트 및 #68 전달 목록, 29종 비토마토 파스타 `food_code` 카탈로그 CSV 대조, 대표 일러스트 공유 및 정적 파일 HTTP 200, 미등록·파일 누락 시 양쪽 API 공통 이미지 폴백, 크림/토마토 파스타 예외 적용 시 `food_kind_id`·중복 제거·정렬·인기 카드 불변성, PK/FK/`ON DELETE CASCADE` 및 삭제 메뉴의 `GET /api/users/me/meals` 이름 보존, 시드·마이그레이션 CLI 멱등성 검증).
+- `pytest tests/ --ignore=tests/test_user_meals.py -q` 전체 회귀 검증: 348 passed, 19 skipped.
+
+#### 남은 작업 및 주의 사항
+
+- Figma 재사용 원본 6종(`tteokbokki`, `tonkatsu`, `burger`, `malatang`, `pasta`, `jeyuk_bokkeum`)의 내보낸 PNG 수령 후 `app/static/menu-illustrations/` 배포 및 경로 등록이 필요하다.
+- 원본 누락 2종(`gukbap`, `jjajangmyeon`)은 후속 티켓(#68)으로 전달하여 디자이너 PNG 수령 후 배포·등록하며, 등록 전까지는 공통 이미지로 정상 제공된다.
+
 ### #65 자정에 전날 인기 순위 집계 및 공개 구현
 
 #### 변경 이유 및 내용

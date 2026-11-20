@@ -153,6 +153,23 @@ class Menu(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class MenuIllustrationException(Base):
+    """홈 최근 메뉴 카드에서 대표 일러스트 대신 공통 이미지를 표시할 메뉴별 예외 테이블"""
+    __tablename__ = "menu_illustration_exceptions"
+
+    menu_id = Column(
+        Integer,
+        ForeignKey(
+            "menus.id",
+            ondelete="CASCADE",
+            name="fk_menu_illustration_exceptions_menu",
+        ),
+        primary_key=True,
+    )
+    reason = Column(String(200), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class UserFoodExclusion(Base):
     """사용자별 알레르기(ALLERGY), 섭취불가(UNABLE), 비선호(DISLIKE) 음식/재료 테이블"""
     __tablename__ = "user_food_exclusions"

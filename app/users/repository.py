@@ -3,7 +3,13 @@ from datetime import datetime, timezone
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from app.menus.models import FoodKind, Menu, UserFoodExclusion, UserMeal
+from app.menus.models import (
+    FoodKind,
+    Menu,
+    MenuIllustrationException,
+    UserFoodExclusion,
+    UserMeal,
+)
 from app.users.models import User
 
 DISLIKE_EXCLUSION_TYPE = "DISLIKE"
@@ -151,13 +157,17 @@ def find_valid_user_meals_with_food_kind_chunk(
     as_of: datetime,
     limit: int,
     cursor: tuple[datetime, int] | None = None,
-) -> list[tuple[UserMeal, Menu, FoodKind | None]]:
+) -> list[tuple[UserMeal, Menu, FoodKind | None, MenuIllustrationException | None]]:
     """현재 카탈로그 메뉴가 존재하고 조회 시각 이하인 사용자 식사 기록을 복합 커서 기준으로 한 묶음 조회한다."""
     as_of_naive = _as_utc_naive(as_of)
     query = (
-        db.query(UserMeal, Menu, FoodKind)
+        db.query(UserMeal, Menu, FoodKind, MenuIllustrationException)
         .join(Menu, UserMeal.menu_id == Menu.id)
         .outerjoin(FoodKind, Menu.food_kind_id == FoodKind.id)
+        .outerjoin(
+            MenuIllustrationException,
+            Menu.id == MenuIllustrationException.menu_id,
+        )
         .filter(
             UserMeal.user_id == user_id,
             UserMeal.eaten_at <= as_of_naive,
