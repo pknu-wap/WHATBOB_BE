@@ -3,7 +3,80 @@
 WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 최신 작업을 위에 추가하며, 기록 방법은 같은 디렉터리의 `AGENTS.md`를 따른다.
 
+## 2026-11-21
+
+### #57 지도 API 리뷰 후 앱 라우터 병합 및 비객체 응답 처리 보강
+
+#### 변경 이유 및 내용
+
+- 최신 `main`의 메뉴 라우터와 지도 브랜치의 지도 라우터가 `app/main.py`의 같은 구간을 수정하면서 한쪽 등록이 유실될 수 있어, `menus_router`와 `map_router`를 모두 import하고 앱에 등록하도록 병합했다.
+- 카카오 로컬 API가 HTTP 200으로 JSON 배열 또는 `null`을 반환하면 `.get()` 호출에서 `AttributeError`가 발생하던 경로를 막고, JSON 객체가 아닌 응답도 외부 서비스 비정상 응답으로 분류해 `PlaceSearchUnavailableException`으로 변환하도록 보강했다.
+- 별도 FastAPI 테스트 앱만 사용하던 한계를 보완하기 위해 실제 `app.main`을 불러와 메뉴·지도 경로가 함께 등록되는지 검증한다.
+
+#### 주요 변경 파일
+
+- `app/main.py`, `app/map/kakao_local.py`, `tests/test_map_places.py`, `LOG.md`
+
+#### API 변경
+
+- 계약 변경 없음. 카카오 API의 비정상 JSON 배열·`null` 응답이 내부 500 대신 기존 계약의 503으로 반환된다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- `python -m pytest -q tests/test_map_places.py`: **31 passed**. 실제 `app.main` import와 메뉴·지도 라우터 동시 등록, 카카오 JSON 배열·`null` 응답의 외부 서비스 예외 변환을 포함한다.
+- `python -m pytest -q`: **526 passed, 40 skipped, 1 failed**. 유일한 실패는 최신 `origin/main`에도 동일하게 존재하는 기존 계약 불일치로, `TokenResponse`에 추가된 `requires_reauth`를 `tests/test_user_profile.py::test_login_and_me_return_same_profile_and_preserve_login_contract`의 고정 필드 집합이 반영하지 못한 경우다. 지도 변경 및 병합 충돌 해결과 무관하다.
+
+#### 남은 작업 및 주의 사항
+
+- 없음.
+
 ## 2026-11-20
+
+### #57 추천 메뉴 기준 주변 음식점 검색 API 1차 구현
+
+#### 변경 이유 및 내용
+
+- 추천받은 메뉴를 근처 어디서 먹을지 찾는 흐름의 첫 단계로, 메뉴 ID와 사용자 현재 좌표를 받아 카카오 로컬 키워드 검색 API로 주변 음식점을 찾는 기능을 `app/map/` 패키지에 추가했다.
+- 검색어는 메뉴 `base_name`을 기본으로 하되, 카카오 상호·업종명과 어긋나는 식약처 분류명(`닭튀김`→`치킨`, `스파게티`→`파스타` 등)은 별칭 사전으로 바꾸고, `A(B)`·`A/B` 표기는 첫 표기만 사용한다.
+- 카카오 음식점 카테고리(`FD6`)만 요청·재검증하고, 반경 밖·중복·필수 필드 누락 결과를 제거한 뒤 직선거리순 최대 10개를 반환한다. 결과가 없어도 반경을 자동으로 넓히지 않는다.
+- 각 장소에 카카오맵 장소 상세 URL, 목적지 길찾기 URL(`/link/to/{장소ID}`), 도보 길찾기 URL(`/link/by/walk/내 위치,lat,lng/장소명,lat,lng`)을 제공한다. 앱 내부 이동시간 계산은 하지 않는다.
+- 같이 고르기 최종 결과도 같은 API를 사용하며 각 참여자의 현재 위치를 기준으로 한다. 방장 위치 공유는 범위에서 제외했다.
+- 좌표는 검색 요청에만 사용하고 DB 저장·로그 기록을 하지 않는다. 외부 API 오류 로그에는 예외 종류와 HTTP 상태만 남긴다.
+
+#### 주요 변경 파일
+
+- `app/map/__init__.py`, `app/map/router.py`, `app/map/service.py`, `app/map/schemas.py`
+- `app/map/kakao_local.py`, `app/map/search_keywords.py`, `app/map/exceptions.py`
+- `app/main.py`
+- `tests/test_map_places.py`
+
+#### API 변경
+
+- 추가: `GET /api/places/nearby?menu_id={int}&latitude={float}&longitude={float}&radius={1000|3000}` (Bearer 인증 필요, `radius` 기본 1000).
+- 응답 `data`: `menu_id`, `menu_base_name`, `search_keyword`, `radius_m`, `provider="KAKAO"`, `distance_type="STRAIGHT_LINE"`, `total_count`, `places[]`(`kakao_place_id`, `name`, `category_name`, `phone`, `address`, `road_address`, `latitude`, `longitude`, `distance_m`, `place_url`, `directions_url`, `walking_directions_url`).
+- 오류: 잘못된 좌표·반경·메뉴 ID 형식 422(FastAPI 기본 검증), 인증 없음 401, 메뉴 없음 404, 카카오 API 타임아웃·비정상 응답·쿼터 초과 503. 404·503은 공통 `{success:false, data:null, message}` 형식.
+- 기존 API 변경 없음.
+
+#### DB 변경
+
+- 없음. 음식점 검색 결과와 사용자 좌표를 저장하지 않는다.
+
+#### 검증
+
+- `tests/test_map_places.py`: **28 passed** (거리순 정렬, 비음식점·반경 밖·중복·불완전 결과 제외, 최대 10개, 결과 없음 시 자동 확대 없음, 3km 확대, 잘못된 입력 시 외부 호출 없음, 404/503/401, 거리 누락 시 직선거리 계산, 검색어 별칭, 도보 URL 구분자 이스케이프, 카카오 요청 파라미터·헤더, 401/429/비JSON/documents 누락/타임아웃의 503 변환).
+- MySQL 제외 전체 회귀(임시 venv, `requirements.txt` 설치): **409 passed, 5 failed**. 실패 5건(`test_binary_questions`, `test_question_selection`, `test_room_notifications::test_same_record_dispatch_and_poll_share_lock_while_other_room_can_send`, `test_user_meals` 2건)은 변경 전 HEAD 워크트리에서도 동일하게 실패(381 passed, 5 failed)하여 이번 변경과 무관함을 확인했다.
+- 실제 카카오 API 호출은 미실행: 테스트 환경에 운영 REST 키를 사용하지 않았다.
+
+#### 남은 작업 및 주의 사항
+
+- 카카오 개발자 콘솔에서 앱의 카카오맵(로컬 API) 사용 설정이 되어 있는지 실제 키로 확인해야 한다.
+- 도보 길찾기 URL이 모바일 웹·카카오맵 앱 설치/미설치 환경에서 정상 동작하는지 FE와 확인해야 한다.
+- 검색 결과 캐시와 사용자별 호출 제한은 미적용이다. 호출량 확인 후 결정한다.
+- 별칭 사전은 상위 빈도 메뉴 일부만 반영했다. 실제 검색 결과를 보며 보강이 필요하다.
 
 ### 주문서 필터에서 추천 메뉴 그룹 수를 기준으로 후보 유지
 

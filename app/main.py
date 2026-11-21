@@ -15,6 +15,8 @@ from app.auth.revocations import kakao_revocation_loop
 from app.auth.router import router as auth_router
 from app.auth.transition_router import router as transition_auth_router
 from app.core.database import Base, SessionLocal, engine
+from app.map.exceptions import PlaceSearchException
+from app.map.router import router as map_router
 from app.menus.popular import (
     ensure_initial_popular_food_kinds,
     recover_missed_popular_menu_ranking,
@@ -115,6 +117,18 @@ async def handle_recommendation_domain_exception(
     )
 
 
+@app.exception_handler(PlaceSearchException)
+async def handle_place_search_exception(request: Request, exc: PlaceSearchException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "success": False,
+            "data": None,
+            "message": exc.message,
+        },
+    )
+
+
 # 라우터 등록
 app.include_router(auth_router)
 app.include_router(cookie_auth_router)
@@ -124,6 +138,7 @@ app.include_router(rooms_router)
 app.include_router(room_operations_router)
 app.include_router(rooms_websocket_router)
 app.include_router(users_router)
+app.include_router(map_router)
 app.include_router(menus_router)
 app.include_router(profile_uploads_router)
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
