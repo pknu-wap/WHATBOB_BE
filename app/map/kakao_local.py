@@ -65,10 +65,15 @@ class KakaoLocalClient:
             raise PlaceSearchUnavailableException()
 
         try:
-            documents = response.json().get("documents")
+            payload = response.json()
         except ValueError as exc:
             logger.warning("카카오 장소 검색 응답 JSON 파싱 실패")
             raise PlaceSearchUnavailableException() from exc
+        if not isinstance(payload, dict):
+            logger.warning("카카오 장소 검색 응답이 JSON 객체가 아님")
+            raise PlaceSearchUnavailableException()
+
+        documents = payload.get("documents")
         if not isinstance(documents, list):
             logger.warning("카카오 장소 검색 응답에 documents 목록이 없음")
             raise PlaceSearchUnavailableException()

@@ -172,6 +172,7 @@ def test_seed_preserves_old_feedback_and_serves_binary_questions(db):
             assert question["id"] != old.id
             assert len(question["question_text"]) <= 24
             assert len(question["options"]) == 3
+        initial_shown_counts = {q["id"]: q["shown_count"] for q in data["questions"]}
         # 두 취향 답변과 상관없음 모두 추천과 피드백까지 처리할 수 있다.
         for index in (0, 1, 2):
             response = client.post("/api/recommendations/order-sheet", json={
@@ -187,6 +188,15 @@ def test_seed_preserves_old_feedback_and_serves_binary_questions(db):
                 "is_satisfied": index == 0,
             })
             assert feedback.status_code == 200
+
+    submitted_questions = (
+        db.query(OrderSheetQuestion)
+        .filter(OrderSheetQuestion.id.in_(list(initial_shown_counts)))
+        .all()
+    )
+    assert {q.id: q.shown_count for q in submitted_questions} == {
+        question_id: count + 3 for question_id, count in initial_shown_counts.items()
+    }
 
     record_recommendation_feedback(db, record.id, RecommendationFeedbackRequest(
         selected_menu_id=menu.id, is_satisfied=True,

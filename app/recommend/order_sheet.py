@@ -296,7 +296,7 @@ def create_order_sheet_recommendation(
     [하이브리드 주문서 추천 파이프라인]
     0. 사용자 알레르기/비선호/섭취불가 메뉴 제외
     1. 우선순위 기반 태그 하드 필터링 (meal_type -> main_ingredient -> has_soup -> cooking_style)
-       - 후보가 top_k 미만으로 줄어드는 후순위 필터는 완화하여 점수제 질문으로 전환
+       - 서로 다른 추천 메뉴 그룹이 top_k 미만으로 줄어드는 필터는 점수제 질문으로 전환
     2. 남은 후보 메뉴에 대해 점수제 질문(완화된 필터 포함) 가중치 합산
     3. 다양성 보정 후 상위 top_k 메뉴 추천, 실제 제출된 질문의 shown_count 갱신 및 스냅샷 저장
     """
@@ -376,8 +376,8 @@ def create_order_sheet_recommendation(
     for q, opt in hard_filter_answers:
         rules = opt.get("rules", [])
         next_filtered = [m for m in filtered_menus if evaluate_option_rules(m, rules)]
-        # 필터 적용 시 최소 추천 개수(top_k) 이상이 유지될 때만 하드 필터 확정
-        if len(next_filtered) >= request.top_k:
+        # 최종 추천은 그룹당 한 메뉴를 고르므로 필터도 같은 단위로 후보를 센다.
+        if len({menu_group(menu) for menu in next_filtered}) >= request.top_k:
             filtered_menus = next_filtered
             applied_hard_filters.append((q, rules))
         else:
@@ -500,23 +500,29 @@ def create_order_sheet_recommendation(
     )
 
 
-def recalculate_question_weights(db: Session, *, commit: bool = True) -> dict[str, float]:
+def effective_question_feedback(db: Session) -> list[RecommendationFeedbackState | RecommendationFeedback]:
+    state_rows = db.query(RecommendationFeedbackState).all()
+    state_rec_ids = {state.recommendation_id for state in state_rows}
+    legacy_rows = [
+        feedback
+        for feedback in db.query(RecommendationFeedback).all()
+        if feedback.recommendation_id not in state_rec_ids and feedback.answer_match_results
+    ]
+    return [state for state in state_rows if state.answer_match_results] + legacy_rows
+
+
+def recalculate_question_weights(
+    db: Session, *, commit: bool = True, removed_feedback_question_ids: set[int] | None = None,
+) -> dict[str, float]:
     """
     [4·5단계 피드백 누적 데이터 기반 ML 가중치 재학습]
     추천×음식(menu_key) 단위 현재 유효 상태(RecommendationFeedbackState)를 우선 사용하여
     동일 추천·음식의 재전송이나 수정으로 인해 전역 통계가 중복 가산되지 않도록 보장한다.
     """
     questions = db.query(OrderSheetQuestion).all()
-    state_rows = db.query(RecommendationFeedbackState).all()
-    state_rec_ids = {st.recommendation_id for st in state_rows}
-    legacy_rows = [
-        fb
-        for fb in db.query(RecommendationFeedback).all()
-        if fb.recommendation_id not in state_rec_ids and fb.answer_match_results
-    ]
-    effective_votes = [st for st in state_rows if st.answer_match_results] + legacy_rows
+    effective_votes = effective_question_feedback(db)
 
-    if not effective_votes:
+    if not effective_votes and not removed_feedback_question_ids:
         return {q.question_code: round(float(q.importance_weight), 4) for q in questions}
 
     total_fb = len(effective_votes)
@@ -542,6 +548,10 @@ def recalculate_question_weights(db: Session, *, commit: bool = True) -> dict[st
     updated: dict[str, float] = {}
     for q in questions:
         st = stats.get(str(q.id))
+        if removed_feedback_question_ids and q.id in removed_feedback_question_ids:
+            q.positive_count = int(st["match_pos"]) if st else 0
+            if not st:
+                q.importance_weight = q.initial_score
         if not st or (st["match_total"] + st["unmatch_total"]) == 0:
             updated[q.question_code] = round(float(q.importance_weight), 4)
             continue
@@ -601,7 +611,7 @@ def record_recommendation_feedback(
     target_menu_id = request.selected_menu_id
     if target_menu_id is None and rec.recommended_menu_ids:
         target_menu_id = rec.recommended_menu_ids[0]
-    if target_menu_id not in (rec.recommended_menu_ids or []):
+    if target_menu_id is None or target_menu_id not in (rec.recommended_menu_ids or []):
         raise InvalidOrderSheetException("해당 추천 결과에 포함된 메뉴만 평가할 수 있습니다.")
 
     owner_user_id = effective_user_id if effective_user_id is not None else rec.user_id

@@ -1,0 +1,3 @@
+from app.menus.food_kinds import register_new_menu_food_kind_listener
+
+register_new_menu_food_kind_listener()

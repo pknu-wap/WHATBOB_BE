@@ -15,11 +15,17 @@ class TokenResponse(BaseModel):
     expires_in: int = 3600
     user: UserResponse
     is_new_user: bool
+    requires_reauth: bool = False
 
 
 class PreparationResponse(BaseModel):
     next_action: Literal["CREATE_USER", "ISSUE_TOKEN"]
     notice: Literal["PREVIOUS_SESSION_UNAVAILABLE"] | None = None
+
+
+class PreparedKakaoTargetRead(BaseModel):
+    nickname: str | None = None
+    masked_email: str | None = None
 
 
 class TransitionPrepareRequest(BaseModel):
@@ -29,6 +35,7 @@ class TransitionPrepareRequest(BaseModel):
     code: str | None = Field(default=None, description="KAKAO_LINK 시 카카오 인가 코드")
     state: str | None = Field(default=None, description="프론트 OAuth state 값")
     expected_state: str | None = Field(default=None, description="기대하는 OAuth state 값 (전달 시 일치 검증)")
+    redirect_uri: str | None = Field(default=None, description="카카오 인가 요청에 사용한 redirect_uri")
     operation_key: str | None = Field(default=None, description="멱등 전환 작업 키 (UUIDv4)")
     transition_id: str | None = Field(default=None, description="준비 응답 유실 시 기존 PREPARED 작업 재준비 ID")
 
@@ -38,6 +45,10 @@ class TransitionPrepareResponse(BaseModel):
     action: Literal["KAKAO_LINK", "LOGOUT"]
     status: Literal["PREPARED"] = "PREPARED"
     expires_at: datetime
+    target_account: PreparedKakaoTargetRead | None = None
+
+
+KakaoLogoutStatus = Literal["PENDING", "REVOKED", "SKIPPED_NO_CREDENTIALS", "FAILED"]
 
 
 class TransitionCommitResponse(BaseModel):
@@ -49,6 +60,8 @@ class TransitionCommitResponse(BaseModel):
     expires_in: int = 3600
     user: UserResponse
     is_new_user: bool
+    requires_reauth: bool = False
+    kakao_logout_status: KakaoLogoutStatus | None = None
 
 
 class TransitionStatusResponse(BaseModel):
@@ -58,4 +71,6 @@ class TransitionStatusResponse(BaseModel):
     origin_uuid: str
     result_uuid: str | None = None
     expires_at: datetime
+    target_account: PreparedKakaoTargetRead | None = None
+    kakao_logout_status: KakaoLogoutStatus | None = None
 

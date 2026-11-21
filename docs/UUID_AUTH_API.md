@@ -74,16 +74,19 @@
 | `DELETE /api/users/me/profile-image` | 없음 | `200 OK` (`UserResponse`). 기본 이미지(`/static/default-profile.svg`)로 복원하고 미참조 기존 파일 정리 |
 | `GET /uploads/profile-images/{filename}` | 없음 | `200 OK` (`R5A` 공개 URL, `X-Content-Type-Options: nosniff`, `Cache-Control: public, max-age=86400`). 경로 조작이나 비정상 파일명은 `404` |
 
-## 계정 전환(카카오 연결·병합·로그아웃·복구) API — T06, T07, T08
+## 계정 전환(카카오 연결·병합·로그아웃·복구) 및 토큰·웹·앱 연동 API — T06~T08, #50/#52 (T01~T04)
 
-계정 전환은 2단계(`prepare` → `commit`)와 응답 유실 복구(`status` / `recovery`)로 동작하며, 모든 경로에 CSRF 헤더(`Origin`, `X-Whatbob-Request: 1`)가 필요하다.
+계정 전환은 2단계(`prepare` → `commit`), 취소(`cancel`), 응답 유실 복구(`status` / `recovery`)로 동작하며, 모든 변경 경로에 CSRF 검사(웹은 허용 `Origin` + `X-Whatbob-Request: 1`, 모바일 앱은 `X-Whatbob-Client: app` + `X-Whatbob-Request: 1`)가 필요하다.
 
 | 단계 | 메서드·경로 | 요청 및 동작 |
 | --- | --- | --- |
-| 1. 전환 준비 | `POST /api/auth/transitions` | `Authorization: Bearer <JWT>` 필수. 선택 헤더 `Idempotency-Key`, `X-Whatbob-Auth-Context`. 본문 `{"action": "KAKAO_LINK", "code": "<kakao_code>"}` 또는 `{"action": "LOGOUT"}`. 성공 시 `200 OK` (`TransitionPrepareResponse`) 및 전환 준비 쿠키(`__Secure-whatbob_transition`, 5분) 설정 |
-| 2. 전환 확정 | `POST /api/auth/transitions/{transition_id}/commit` | 전환 준비 쿠키 필수. 성공 시 `200 OK` (`TransitionCommitResponse`: 새 `access_token`, `user`, `is_new_user`) 및 정식 인증 쿠키(`__Secure-whatbob_auth`, 30일) 교체 |
-| 3. 상태 조회 | `GET /api/auth/transitions/{transition_id}` | 전환 준비 쿠키 또는 Bearer JWT로 상태(`PREPARED`, `COMMITTED`, `CANCELLED`, `EXPIRED`) 조회 |
-| 4. 확정 결과 복구 | `POST /api/auth/transitions/{transition_id}/recovery` | `COMMITTED` 응답이 네트워크 단절로 유실된 경우 전환 준비 쿠키로 확정 결과와 정식 인증 쿠키를 다시 수신 (`200 OK`) |
+| 0. 카카오 인가 URL | `GET /api/auth/kakao/login/url` | 현재 세션(쿠키, Bearer JWT, 또는 앱 `X-Whatbob-Auth-Secret`) 확인 후 서버가 최신 1회용 `state` 해시를 세션에 기록하고 `login_url`, `state`, `requires_reauth`, `prompt`, `kakao_in_app_browser`, `requires_external_browser`를 반환. 로그아웃 후 재연결(`requires_reauth=true`) 시 `prompt=login` 강제 포함 |
+| 0-앱. 앱 콜백 브릿지 | `GET /api/auth/kakao/app-callback` | 모바일 시스템 인증 창(`openAuthSessionAsync`)에서 카카오가 `https://`로 리다이렉트한 `code`·`state`를 앱 전용 딥링크(`whatbob://auth/kakao/callback?...`)로 즉시 `302 Redirect` |
+| 1. 전환 준비 | `POST /api/auth/transitions` | `Authorization: Bearer <JWT>` 필수. 선택 헤더 `Idempotency-Key`, `X-Whatbob-Auth-Context`. 본문 `{"action": "KAKAO_LINK", "code": "<kakao_code>", "state": "<state>"}` 또는 `{"action": "LOGOUT"}`. `KAKAO_LINK` 시 세션의 최신 서버 `state`를 1회용으로 검증·소진하고 `target_account`(`nickname`, `masked_email`)를 반환(닉네임과 이메일이 둘 다 없으면 `422 KAKAO_TARGET_UNVERIFIABLE`로 중단). 전환 준비 쿠키(`__Secure-whatbob_transition`, 앱은 추가로 `X-Whatbob-Transition-Secret` 헤더) 발급 |
+| 2. 전환 확정 | `POST /api/auth/transitions/{transition_id}/commit` | 전환 준비 쿠키(또는 앱 `X-Whatbob-Transition-Secret` 헤더) 필수. 성공 시 `200 OK` (`TransitionCommitResponse`: 새 `access_token`, `user`, `is_new_user`, `requires_reauth`, `kakao_logout_status`) 및 정식 인증 쿠키(`__Secure-whatbob_auth`, 앱은 추가로 `X-Whatbob-Auth-Secret` 헤더, 30일) 교체 |
+| 2-취소. 전환 취소 | `POST /api/auth/transitions/{transition_id}/cancel` | 확인 화면에서 취소 시 `PREPARED` 전환을 `CANCELLED`로 종료하고 임시 보관된 카카오 토큰 원문 및 준비 쿠키를 즉시 파기 (`200 OK`, 멱등) |
+| 3. 상태 조회 | `GET /api/auth/transitions/{transition_id}` | 전환 준비 쿠키/헤더 또는 Bearer JWT로 상태(`PREPARED`, `COMMITTED`, `CANCELLED`, `EXPIRED`), `target_account`, `kakao_logout_status` 조회 |
+| 4. 확정 결과 복구 | `POST /api/auth/transitions/{transition_id}/recovery` | `COMMITTED` 응답이 네트워크 단절로 유실된 경우 전환 준비 쿠키/헤더로 확정 결과와 정식 인증 쿠키/헤더를 다시 수신 (`200 OK`) |
 
 ### `KAKAO_LINK` 무손실 이관·병합 규칙 (`R3A`)
 

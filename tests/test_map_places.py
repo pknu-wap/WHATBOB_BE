@@ -224,6 +224,14 @@ def test_external_failure_returns_503(db, menu):
     }
 
 
+def test_application_registers_map_and_menu_routers():
+    from app.main import app
+
+    route_paths = {route.path for route in app.routes}
+    assert "/api/places/nearby" in route_paths
+    assert "/api/menus/popular" in route_paths
+
+
 def test_requires_authentication(db, menu):
     fake = FakePlaceSearchClient([])
     response = build_client(db, fake, authenticated=False).get("/api/places/nearby", params=nearby_params(menu.id))
@@ -291,6 +299,8 @@ def test_kakao_client_sends_restaurant_distance_query():
     lambda request: httpx.Response(401, json={"msg": "invalid key"}),
     lambda request: httpx.Response(429, json={"msg": "quota"}),
     lambda request: httpx.Response(200, text="not-json"),
+    lambda request: httpx.Response(200, json=[]),
+    lambda request: httpx.Response(200, json=None),
     lambda request: httpx.Response(200, json={"meta": {}}),
 ])
 def test_kakao_client_maps_bad_responses_to_unavailable(handler):

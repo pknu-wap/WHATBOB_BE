@@ -108,6 +108,27 @@ def test_score_gap_keeps_matching_food_first_and_shortage_does_not_repeat(db):
     assert len(selected) == 3
 
 
+def test_order_sheet_relaxes_filter_when_matching_menus_share_one_group(db):
+    for index in range(5):
+        add_menu(db, f"국밥_{index}", base="국밥", soup=True)
+    other_groups = {"피자", "햄버거", "김밥", "비빔밥"}
+    for name in sorted(other_groups):
+        add_menu(db, name)
+    question = add_question(db)
+
+    result = create_order_sheet_recommendation(
+        db,
+        OrderSheetRecommendRequest(
+            answers=[AnswerItemRequest(question_id=question.id, option_id="soup_yes")],
+            top_k=5,
+        ),
+    )
+
+    assert len(result.recommended_menus) == 5
+    assert {menu.base_name for menu in result.recommended_menus} == other_groups | {"국밥"}
+    assert result.recommended_menus[0].base_name == "국밥"
+
+
 def test_recent_menu_groups_rotate_for_one_user_only(db):
     user = User(kakao_id=100)
     other = User(kakao_id=101)
