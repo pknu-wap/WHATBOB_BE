@@ -46,6 +46,1303 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 - 도보 길찾기 URL이 모바일 웹·카카오맵 앱 설치/미설치 환경에서 정상 동작하는지 FE와 확인해야 한다.
 - 검색 결과 캐시와 사용자별 호출 제한은 미적용이다. 호출량 확인 후 결정한다.
 - 별칭 사전은 상위 빈도 메뉴 일부만 반영했다. 실제 검색 결과를 보며 보강이 필요하다.
+### 주문서 필터에서 추천 메뉴 그룹 수를 기준으로 후보 유지
+
+#### 변경 이유 및 내용
+
+- 주문서 필터가 메뉴 행을 세면 같은 그룹의 메뉴가 여러 개 남을 때 충분한 후보가 있다고 판단할 수 있었다. 최종 추천과 같은 `menu_group()`으로 서로 다른 그룹 수를 세고, 요청 개수보다 적어지면 해당 선호 조건을 점수로 반영하도록 수정했다.
+- 질문 조회 후 탐색 상태 저장과 주문서 제출 후 `shown_count` 증가를 각각 검증한다. 식사 기록 테스트는 현재 파스타 표시명과 메뉴 삭제 전후의 저장 이름 보존을 검증하도록 수정했다.
+
+#### 주요 변경 파일
+
+- `app/recommend/order_sheet.py`, `tests/test_recommend_variety.py`, `tests/test_binary_questions.py`, `tests/test_question_selection.py`, `tests/test_user_meals.py`, `LOG.md`
+
+#### API 변경
+
+- `POST /api/recommendations/order-sheet`에서 선호 필터가 남기는 추천 메뉴 그룹이 `top_k`보다 적으면 해당 조건을 점수로 적용한다. 알레르기·섭취 불가·비선호 제외는 기존 순서로 적용한다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 기존 네 실패를 재현했다. 같은 음식 종류의 메뉴 다섯 행이 필터를 통과했을 때 한 카드만 나오던 회귀 사례를 추가하고, 수정 후 서로 다른 다섯 그룹과 국밥 선호 반영을 확인했다.
+- 관련 테스트 75개 통과. 전체 테스트 486개 통과, 40개 건너뜀, 실패 없음. 이번 실행에서 격리 MySQL을 연결하지 않았다. `git diff --check` 통과.
+
+#### 남은 작업 및 주의 사항
+
+- 없음.
+
+### #54 홈 메뉴 일러스트·인기 순위 코드 리뷰 지적 사항 일괄 수정
+
+#### 변경 이유 및 내용
+
+- 이슈 #54(#62–#68) 구현에 대한 코드 리뷰에서 도출된 비차단 기동 복구, 자정 스케줄러 안정성, 읽기 전용 GET 계약, 엔티티 계층 순수성, 일러스트 HTTP 200 검증 및 도메인 모델링 개선 사항을 일괄 반영했다.
+- **비차단 기동 복구 및 자정 스케줄러 안정화 (`app/main.py`, `app/menus/popular_scheduler.py`)**: `lifespan`에서 `yield` 전 동기 실행하던 `recover_missed_popular_menu_ranking(db)`를 제거하고 `popular_ranking_scheduler_loop(run_startup_recovery=True, ...)`로 이관해 워커 스레드(`asyncio.to_thread`)에서 비차단 실행되도록 변경했다. 시작 복구 도중 한국시간 자정을 넘긴 경우(`23:59:59 -> 00:00:01` KST) 새 날짜 집계를 즉시 실행해 누락을 방지하고, 조기 기상(early wake) 시 목표 자정(UTC)까지 재대기하는 가드와 일시 오류 시 `last_completed_kst_date`를 선행 갱신하지 않고 최대 `max_retries_per_day`(기본 3회, `retry_delay_seconds=60.0`) 재시도하는 로직을 추가했다.
+- **읽기 전용 `GET /api/menus/popular` (`app/menus/popular.py`)**: `get_popular_menus()` 내부의 암묵적 쓰기(`ensure_initial_popular_food_kinds`)를 제거해 초기 테이블이 비어 있을 때도 DB 쓰기·커밋 없이 `source="initial"`, `as_of=None`, `items=[]`를 반환하도록 수정했다. `DEFAULT_INITIAL_POPULAR_KIND_KEYS`를 `CANONICAL_FOOD_KINDS`에서 파생하고, `as_utc_naive` 재사용(`app/users/repository.py`, `app/menus/popular.py`), `PopularMenuItemResponse` 매핑 중복 제거, `aggregate_popular_menus_for_kst_date()` 헬퍼 분리를 완료했다.
+- **순수 엔티티 계층 및 `NOT NULL` 제약 보장 (`app/menus/models.py`, `app/menus/food_kinds.py`, `app/menus/__init__.py`)**: `before_flush` 세션 리스너를 `app/menus/models.py`에서 `app/menus/food_kinds.py`로 이동하고 `session.new`만 검사하도록 제한해 이미 저장된 `Menu`(`session.dirty`)의 `food_kind_id = None` 갱신이 DB `NOT NULL` 제약(`IntegrityError`)을 우회하지 않도록 수정했다.
+- **일러스트 HTTP 200 검증, 감사 Enum, 도메인 예외 및 정리 오류 로깅 (`app/menus/illustrations.py`, `app/menus/food_kinds.py`, `scripts/register_menu_illustration.py`)**:
+  - `verify_static_illustration_http_200()`를 추가해 DB 등록 전 실제 정적 라우트(`StaticFiles` + `TestClient`) 또는 운영 서버 `--verify-base-url`(`urllib.request`)에서 HTTP 200과 비어 있지 않은 본문을 검증하고, 실패 시 `MenuIllustrationVerificationError`와 함께 DB 및 배포 파일을 롤백하도록 구현했다.
+  - 매직 문자열(`"reusable_figma"`, `"missing_for_#68"`)을 `IllustrationAuditStatus(str, Enum)`(`CONFIRMED_REUSABLE`, `PENDING_VERIFICATION`[`tteokbokki`], `MISSING_ORIGINAL`[`gukbap`, `jjajangmyeon`])으로 교체하고, 도메인 예외(`FoodKindNotFoundException`, `InvalidMenuIllustrationException`, `MenuIllustrationVerificationError`) 및 타입 데이터클래스(`FoodKindIllustrationStatus`, `IllustrationDeploymentResult`)를 도입했다.
+  - 공용 정적 경로 검증 헬퍼 `resolve_safe_static_file_path()`를 `app/menus/food_kinds.py`로 통합하고, `app/menus/illustrations.py`의 중복 PNG 형식 검사·이중 `FoodKind` 조회·묵음 `except OSError: pass`(`logger.warning` 로깅으로 교체)를 제거했으며 명명된 PNG 상수를 추출했다.
+
+#### 주요 변경 파일
+
+- `app/main.py`, `app/menus/__init__.py`, `app/menus/models.py`, `app/menus/food_kinds.py`, `app/menus/popular.py`, `app/menus/popular_scheduler.py`, `app/menus/illustrations.py`, `app/users/repository.py`, `scripts/register_menu_illustration.py`, `tests/test_ticket62_food_kinds_and_recent_card.py`, `tests/test_ticket64_initial_popular_menus.py`, `tests/test_ticket65_midnight_popular_aggregation.py`, `tests/test_ticket66_popular_retention_and_recovery.py`, `tests/test_ticket67_illustrations_and_exceptions.py`, `tests/test_ticket68_missing_illustration_registration.py`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/menus/popular`: 초기 인기 메뉴 테이블이 미시드 상태일 때 요청 중 DB 쓰기를 수행하지 않고 `{"success": true, "data": {"source": "initial", "as_of": null, "items": []}, "message": null}`을 반환하도록 읽기 전용 동작을 확정했다.
+
+#### DB 변경
+
+- 없음 (기존 스키마 유지, `menus.food_kind_id NOT NULL` 제약이 `session.dirty` 업데이트에서도 온전히 적용됨을 검증).
+
+#### 검증
+
+- SQLite + 격리 MySQL 8.4.13(`MYSQL_TEST_DATABASE_URL`) 통합 검증 (`pytest tests/test_ticket62_*.py ... tests/test_ticket68_*.py -v`): **108 passed, 0 skipped**.
+- 전체 저장소 회귀 검증 (`pytest tests/ --ignore=tests/test_user_meals.py -q`): **387 passed, 24 skipped** (`tests/test_user_meals.py`는 기존 `display.py` 포맷 불일치 선행 베이스라인 2건으로 제외).
+- `app/static/menu-illustrations/`에 `default.svg`만 존재하며 임시/생성 PNG가 포함되지 않음을 확인했고, 테스트용 격리 `mysqld.exe`를 정상 종료했다.
+
+#### 남은 작업 및 주의 사항
+
+- 없음 (디자이너 PNG 수령 후 `python -m scripts.register_menu_illustration --kind-key <key> --source-png <path> --require-transparency [--verify-base-url http://127.0.0.1:8000]`로 배포·검증·등록 진행).
+
+### #68 빠진 음식 일러스트 추가(디자이너 PNG 검증·배포·등록 도구 및 즉시 반영 검증) 구현
+
+#### 변경 이유 및 내용
+
+- Figma 원본 대조에서 누락된 국밥(`gukbap`)·짜장면(`jjajangmyeon`)을 포함한 신규 디자이너 PNG를 수령했을 때 안전하게 검증·정적 배포·DB 등록할 수 있는 서비스 함수와 운영 CLI를 구현하고, 미등록/파일 누락 시 공통 이미지 폴백과 PNG 등록 후 자정 집계와 무관한 즉시 반영 및 메뉴별 예외 유지를 통합 검증했다.
+- `app/menus/illustrations.py`에 Pillow(`PIL.Image`) 및 PNG 청크/CRC32 무결성 검사를 결합한 `validate_menu_illustration_png()`(`MenuIllustrationAssetCheck` 반환: 형식 `PNG`, 해상도 `>= 1x1`, `mode`, 알파/투명도 `has_alpha`, `size_bytes` 검증 및 JPEG·SVG·빈 파일·손상 PNG 거절), `food_kinds` 선행 존재 확인·안전 파일명 검증·원자적 파일 배치(`os.replace`)·DB 실패 시 디스크 정리/복원을 보장하는 `deploy_and_register_food_kind_png()`, 초기 8종 음식 종류의 원본 대조 상태(`reusable_figma` / `missing_for_#68`)·DB 등록 경로·디스크 파일 존재 여부·실조회 URL(`effective_image_url`)을 보고하는 `inspect_food_kind_illustration_status()`를 추가했다.
+- `scripts/register_menu_illustration.py` 운영 CLI를 추가해 `--status`(초기 8종 상태 및 `#68` 미등록 대상 JSON 요약), `--kind-key <key> --source-png <path> [--filename <name>.png] [--require-transparency]`(검증·원자 배포·DB 등록), `--kind-key <key> --image-url </static/menu-illustrations/...>`(기배포 파일 검증 후 DB 등록), `--sync-deployed`(배포 파일 일괄 동기화) 모드를 지원하도록 구현했다.
+- 설계 및 명세 제약에 따라 AI 생성 또는 임시 PNG를 `app/static/menu-illustrations/`에 커밋하지 않고 기존 `default.svg`만 유지했다.
+
+#### 주요 변경 파일
+
+- `app/menus/illustrations.py`, `scripts/register_menu_illustration.py`, `tests/test_ticket68_missing_illustration_registration.py`, `LOG.md`
+
+#### API 변경
+
+- 없음 (기존 `GET /api/users/me/home-card-recently-eaten-food-max-6` 및 `GET /api/menus/popular`의 `source="initial"`·`source="aggregated"` 양쪽 모드에서 미등록·파일 누락 시 `/static/menu-illustrations/default.svg` HTTP 200 폴백, 신규 PNG 배포·등록 시 자정 집계 재실행 없이 `as_of`·카드 순서를 유지한 즉시 반영 및 `menu_illustration_exceptions` 예외 유지 동작을 통합 테스트로 검증).
+
+#### DB 변경
+
+- 없음 (기존 `food_kinds.representative_image_url` 및 `menu_illustration_exceptions` 스키마 사용).
+
+#### 검증
+
+- `pytest tests/test_ticket68_missing_illustration_registration.py tests/test_ticket67_illustrations_and_exceptions.py tests/test_ticket65_midnight_popular_aggregation.py tests/test_ticket64_initial_popular_menus.py tests/test_ticket63_recent_food_kinds_max6.py tests/test_ticket62_food_kinds_and_recent_card.py -v` 실행(SQLite 및 격리 MySQL 8.4.13 `MYSQL_TEST_DATABASE_URL`): 87 passed (PNG RGBA/RGB/팔레트 투명도 및 비PNG·손상 PNG·경로 조작 거절, 원자 배포 및 DB 실패 시 디스크 정리/복원, 8종 상태 점검, CLI `--status`/`--source-png`/`--image-url`/`--sync-deployed`, 미등록 시 최근·초기 인기·집계 인기 공통 이미지 폴백, 임시 디자이너 PNG 배포·등록 후 집계 재실행 없는 즉시 반영과 `image/png` HTTP 200 응답, 크림/토마토 파스타 예외 유지, 디스크 파일 삭제 시 그레이스풀 폴백, 실제 MySQL 8.4.13 CLI 등록 및 홈 API 반영 검증).
+- `pytest tests/ --ignore=tests/test_user_meals.py -q` 전체 회귀 검증: 369 passed, 21 skipped (`tests/test_user_meals.py`는 기존 `display.py` 포맷 불일치 선행 베이스라인 2건으로 제외).
+
+#### 남은 작업 및 주의 사항
+
+- 디자이너에게 `gukbap.png`, `jjajangmyeon.png`(및 Figma 재사용 6종 PNG)를 수령하면 `python -m scripts.register_menu_illustration --kind-key <key> --source-png <path> --require-transparency`로 배포·등록하고 `--status` 및 `/static/menu-illustrations/<file>.png` HTTP 200을 확인한다.
+- 제공된 일러스트를 참조한 AI 이미지 생성은 요청자가 모델을 변경하고 명시적으로 허락하기 전에는 실행하지 않는다.
+
+### #66 마지막 인기 순위 유지와 놓친 자정 집계 복구 구현
+
+#### 변경 이유 및 내용
+
+- 기록 사용자가 5명 미만이거나 서버가 자정 집계를 놓쳐 재시작된 경우에도 방문자가 마지막 실제 인기 순위를 일관되게 조회하고, 재시작 시 가장 최근에 놓친 한국시간 자정 집계 1회만 중복 없이 보충하도록 구현했다.
+- `app/menus/popular.py`의 `PopularAggregationResult`에 `skipped: bool = False` 필드를 추가하고, `aggregate_popular_menus_for_kst_date()`에서 집계 및 순위 교체 전에 `popular_menu_ranking_state` 단일 행(`id = 1`)을 보장(최초 동시 `INSERT` 충돌 시 안전하게 롤백·재조회)한 뒤 InnoDB 쓰기 잠금(`SELECT ... FOR UPDATE` + `.populate_existing()`)을 획득하도록 변경했다.
+- `state.last_succeeded_kst_date`가 이미 `target_kst_date` 이상이면 중복·과거 날짜 실행을 `skipped=True`로 건너뛰어 기존 순위·`published_as_of`·`last_succeeded_kst_date`를 보존한다. 유효 사용자가 5명 미만이면 `last_succeeded_kst_date`만 갱신하고 이전 순위와 `published_as_of`(최초 발행 전에는 초기 8종)를 유지하며, 5명 이상이면 순위 항목 교체와 두 날짜 갱신을 한 트랜잭션으로 확정하고 실패 시 완전 롤백해 동일 날짜 재시도를 보장한다.
+- `app/menus/popular.py`에 `recover_missed_popular_menu_ranking()`을 추가해 현재 시각 기준 가장 최근에 지난 한국시간 자정 날짜(`current_kst.date()`) 한 번만 `aggregate_popular_menus_for_kst_date()`로 보충하도록 구현하고, `app/main.py` FastAPI 수명주기 기동 단계에서 `recover_rooms_after_restart()`·`ensure_initial_popular_food_kinds()` 직후 자동 실행되도록 연동했다(복구 중 일시 오류는 로그 후 앱 기동을 계속 유지).
+- `get_popular_menus()`(`_fetch_published_popular_rows()`)에서 저장된 실제 인기 순위를 조회할 때 `EXISTS (SELECT 1 FROM menus WHERE menus.food_kind_id = popular_menu_ranking_items.food_kind_id)` 조건을 적용해 현재 카탈로그 메뉴가 하나도 남지 않은 음식 종류만 응답에서 숨기고 나머지 카드의 상대 순서와 `as_of`를 유지하도록 했다(모든 순위 음식 종류의 메뉴가 삭제된 경우에도 초기 목록으로 되돌리지 않고 `source="aggregated"`, 기존 `as_of`, `items=[]` 반환).
+- 동일 날짜 재실행 멱등성 도입에 맞춰 `tests/test_ticket65_midnight_popular_aggregation.py`의 4명→5명 전환·자정 경계·삭제 메뉴 제외 테스트 3건을 연속된 집계일(11-20→11-21) 시나리오로 정합화했다.
+
+#### 주요 변경 파일
+
+- `app/menus/popular.py`, `app/main.py`, `tests/test_ticket66_popular_retention_and_recovery.py`, `tests/test_ticket65_midnight_popular_aggregation.py`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/menus/popular` 동작 보강: 저장된 실제 인기 순위(`source="aggregated"`) 응답에서 현재 `menus` 테이블에 메뉴가 0건인 음식 종류만 제외하며 나머지 항목의 상대 순서와 원래 `as_of`를 유지한다. 저장 순위의 모든 음식 종류에서 메뉴가 삭제된 경우에도 `source="aggregated"`, 원래 `as_of`, `items=[]`를 반환한다.
+
+#### DB 변경
+
+- 없음 (기존 #65에서 추가한 `popular_menu_ranking_state` 및 `popular_menu_ranking_items` 스키마와 `menus.food_kind_id` 인덱스를 사용)
+
+#### 검증
+
+- `pytest -v tests/test_ticket66_popular_retention_and_recovery.py tests/test_ticket65_midnight_popular_aggregation.py tests/test_ticket64_initial_popular_menus.py tests/test_ticket63_recent_food_kinds_max6.py tests/test_ticket62_food_kinds_and_recent_card.py` 실행(SQLite 및 격리 MySQL 8.4.13 `MYSQL_TEST_DATABASE_URL`): 76 passed (발행 전·후 5명 미만 유지 및 성공일 갱신, 동일·과거 날짜 멱등 건너뜀, 트랜잭션 중간 실패 완전 롤백 및 동일 날짜 재시도, 다중 누락 자정 중 최신 1회 복구 및 반복 재시작 건너뜀, 최초 기동 복구 및 FastAPI 수명주기 자동 복구·오류 내성, 카탈로그 메뉴 일부·전체 삭제 시 음식 종류 숨김 및 `as_of` 유지, MySQL 8.4.13 최초 3스레드 동시 실행 무데드락 직렬화·`FOR UPDATE` 행 잠금 차단·집계 중 `GET /api/menus/popular` MVCC 일관된 스냅샷 조회 검증).
+- `pytest -q tests/ --ignore=tests/test_user_meals.py` 전체 회귀 검증: 358 passed, 21 skipped (`test_user_meals.py`는 기존 `display.py` 변경으로 인한 선행 베이스라인 실패 2건으로 제외).
+
+#### 남은 작업 및 주의 사항
+
+- 없음
+
+### #67 기존 일러스트와 공통 이미지 연결 구현
+
+#### 변경 이유 및 내용
+
+- 홈 최근에 먹은 메뉴와 요즘 인기 메뉴가 같은 음식 종류의 대표 일러스트를 공유하되, 대표 그림이 미등록이거나 배포 파일이 없거나 최근 카드의 실제 메뉴가 대표 그림과 크게 다른 경우 공통 이미지(`/static/menu-illustrations/default.svg`)를 반환하도록 연결 구조를 구현했다.
+- `app/menus/models.py`에 확정 B안 설계대로 메뉴별 예외 테이블 `MenuIllustrationException`(`menu_illustration_exceptions`, `menu_id` PK 및 `FK -> menus.id ON DELETE CASCADE`, `reason`, `created_at`)을 추가했다.
+- `app/menus/illustrations.py`에 Figma 원본 대조 결과 매니페스트(`FOOD_KIND_ILLUSTRATION_SPECS`: 재사용 6종 `tteokbokki`/`tonkatsu`/`burger`/`malatang`/`pasta`/`jeyuk_bokkeum`과 #68 전달 대상 누락 2종 `gukbap`/`jjajangmyeon`), 대표 파스타(토마토 스파게티) 일러스트와 크게 다른 비토마토 파스타(크림·까르보나라·투움바·로제·오일·뇨끼) 29종 `food_code` 목록(`DEFAULT_MENU_ILLUSTRATION_EXCEPTION_FOOD_CODES`), 그리고 멱등 DB 도우미(`seed_menu_illustration_exceptions`, `sync_food_kind_representative_illustrations`, `register_food_kind_illustration`)를 구현했다.
+- `app/menus/food_kinds.py`의 `resolve_menu_illustration_url`에 `use_common_fallback` 옵션을 추가하고, `app/users/repository.py`의 `find_valid_user_meals_with_food_kind_chunk`에서 `menu_illustration_exceptions`를 단일 쿼리 `LEFT JOIN`으로 함께 읽어 `app/users/service.py`에서 `food_kind_id`·중복 제거·카드 순서에 영향을 주지 않고 공통 이미지를 적용하도록 수정했다. `GET /api/menus/popular`는 음식 종류 단위 대표 일러스트와 공통 이미지 폴백만 적용한다.
+- `scripts/seed_menus.py`에 멱등 예외 적재와 배포 파일 기반 대표 경로 동기화를 연동하고, 기존 DB 보존 검증과 재적용을 지원하는 전용 마이그레이션 스크립트 `scripts/migrate_issue67_illustrations.py`를 추가했다.
+
+#### 주요 변경 파일
+
+- `app/menus/models.py`, `app/menus/food_kinds.py`, `app/menus/illustrations.py`, `app/users/repository.py`, `app/users/service.py`, `scripts/seed_menus.py`, `scripts/migrate_issue67_illustrations.py`, `tests/test_ticket67_illustrations_and_exceptions.py`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/users/me/home-card-recently-eaten-food-max-6` 동작 보강: 기존 응답 스키마와 `food_kind_id`·중복 제거·정렬 규칙은 유지하면서, 선택된 메뉴가 `menu_illustration_exceptions`에 등록되어 있거나 음식 종류 대표 경로가 미등록/파일 누락 상태이면 `/static/menu-illustrations/default.svg`를 반환하고, 배포된 대표 일러스트가 있으면 해당 상대 경로를 반환한다.
+- `GET /api/menus/popular`: 음식 종류 단위 대표 일러스트 공유 및 미등록/파일 누락 시 공통 이미지 폴백 유지(메뉴별 예외의 영향을 받지 않음).
+
+#### DB 변경
+
+- `menu_illustration_exceptions` 테이블(`menu_id` PRIMARY KEY 및 `FOREIGN KEY (menu_id) REFERENCES menus (id) ON DELETE CASCADE` `fk_menu_illustration_exceptions_menu`, `reason`, `created_at`) 추가 및 전용 마이그레이션 `scripts/migrate_issue67_illustrations.py` 추가.
+
+#### 검증
+
+- `pytest tests/test_ticket67_illustrations_and_exceptions.py tests/test_ticket62_food_kinds_and_recent_card.py tests/test_ticket63_recent_food_kinds_max6.py tests/test_ticket64_initial_popular_menus.py -v` 실행(SQLite 및 격리 MySQL 8.4.13 `MYSQL_TEST_DATABASE_URL`): 64 passed (Figma 매니페스트 및 #68 전달 목록, 29종 비토마토 파스타 `food_code` 카탈로그 CSV 대조, 대표 일러스트 공유 및 정적 파일 HTTP 200, 미등록·파일 누락 시 양쪽 API 공통 이미지 폴백, 크림/토마토 파스타 예외 적용 시 `food_kind_id`·중복 제거·정렬·인기 카드 불변성, PK/FK/`ON DELETE CASCADE` 및 삭제 메뉴의 `GET /api/users/me/meals` 이름 보존, 시드·마이그레이션 CLI 멱등성 검증).
+- `pytest tests/ --ignore=tests/test_user_meals.py -q` 전체 회귀 검증: 348 passed, 19 skipped.
+
+#### 남은 작업 및 주의 사항
+
+- Figma 재사용 원본 6종(`tteokbokki`, `tonkatsu`, `burger`, `malatang`, `pasta`, `jeyuk_bokkeum`)의 내보낸 PNG 수령 후 `app/static/menu-illustrations/` 배포 및 경로 등록이 필요하다.
+- 원본 누락 2종(`gukbap`, `jjajangmyeon`)은 후속 티켓(#68)으로 전달하여 디자이너 PNG 수령 후 배포·등록하며, 등록 전까지는 공통 이미지로 정상 제공된다.
+
+### #65 자정에 전날 인기 순위 집계 및 공개 구현
+
+#### 변경 이유 및 내용
+
+- 매일 `Asia/Seoul` 자정에 전날 하루치 식사 기록(`[전날 00:00 KST, 집계일 00:00 KST)`을 UTC로 변환해 비교)을 집계하고, 유효한 식사를 기록한 서로 다른 사용자가 5명 이상이면 실제 인기 순위 최대 8종을 DB에 저장해 홈 공개 API(`GET /api/menus/popular`)로 제공하도록 구현했다.
+- `app/menus/models.py`에 확정 설계(A안, #66과 호환되는 단일 세트 스키마)에 따라 단일 상태 행 테이블 `PopularMenuRankingState`(`popular_menu_ranking_state`)와 현재 공개 순위 항목 테이블 `PopularMenuRankingItem`(`popular_menu_ranking_items`)을 추가했다.
+- `app/menus/popular.py`에 `get_seoul_tz()`(`ZoneInfo("Asia/Seoul")` 우선, `tzdata` 미설치 Windows 환경에서는 고정 `UTC+9` 폴백), `get_kst_previous_day_window_utc()`, `aggregate_popular_menus_for_kst_date()`를 구현했다. `UserMeal`과 `Menu`를 내부 조인해 삭제된 카탈로그 메뉴를 5명 전환 기준과 음식 종류 점수 양쪽에서 모두 제외하고, 음식 종류별 고유 사용자 수 내림차순·최근 식사 시각 내림차순·음식 종류 ID 오름차순으로 최대 8종을 단일 트랜잭션(savepoint)으로 교체한다. 5명 미만이면 기존 순위와 `published_as_of`를 유지하고 `last_succeeded_kst_date`만 갱신한다.
+- `get_popular_menus()`가 저장된 `PopularMenuRankingState`와 `PopularMenuRankingItem`을 우선 조회해 발행된 순위가 있으면 `source="aggregated"`와 UTC ISO 8601 `as_of`를 반환하고, 발행 전에는 기존 #64의 `source="initial"`, `as_of=null` 초기 8종을 반환하도록 확장했다.
+- `app/menus/popular_scheduler.py`에 제어 가능한 시계·대기 주입(`now_fn`, `sleep_fn`, `session_factory`)과 `asyncio.to_thread` 기반 동기 DB 집계 실행을 갖춘 `popular_ranking_scheduler_loop()`를 구현하고, `app/main.py` FastAPI 수명주기에서 기존 `room_cleanup_loop()`와 함께 시작·종료 시 정리되도록 연동했다.
+
+#### 주요 변경 파일
+
+- `app/menus/models.py`, `app/menus/popular.py`, `app/menus/popular_scheduler.py`, `app/main.py`, `tests/test_ticket65_midnight_popular_aggregation.py`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/menus/popular` 동작 확장: 실제 인기 순위가 발행된 경우 DB 저장 결과를 읽어 `source: "aggregated"`, `as_of: "<UTC ISO 8601>"`(예: `"2026-11-19T15:00:00Z"`), `items[]`(`food_kind_id`, `name`, 상대 `image_url`)를 인증 없이 반환하며 사용자 이름·개별 식사 기록·내부 집계 수치를 노출하지 않는다. 발행 전에는 기존 `source: "initial"`, `as_of: null` 계약을 유지한다.
+
+#### DB 변경
+
+- `popular_menu_ranking_state` 테이블(`id` PK + `id = 1` CHECK, `last_succeeded_kst_date` DATE NULL, `published_as_of` DATETIME NULL, `updated_at` DATETIME NOT NULL) 추가.
+- `popular_menu_ranking_items` 테이블(`rank_position` PK + `1..8` CHECK, `food_kind_id` UNIQUE + FK `fk_popular_ranking_items_food_kind -> food_kinds.id` NOT NULL, `user_count` `>= 1` CHECK NOT NULL, `last_eaten_at` DATETIME NOT NULL) 추가.
+
+#### 검증
+
+- `pytest -v tests/test_ticket65_midnight_popular_aggregation.py tests/test_ticket64_initial_popular_menus.py tests/test_ticket63_recent_food_kinds_max6.py tests/test_ticket62_food_kinds_and_recent_card.py` 실행(SQLite 및 격리 MySQL 8.4.13 `MYSQL_TEST_DATABASE_URL`): 63 passed (KST 자정 UTC 경계 및 지연 시각 정규화, 4명 초기 유지·5명 발행 전환, 삭제 메뉴의 5명 기준 및 점수 양쪽 제외, 동일 사용자 반복 식사 1회 집계 및 `버거`/`햄버거`·`자장면`/`짜장면`·`제육볶음`/`돼지고기볶음(제육볶음)` 별칭 합산, 동률 정렬 및 8종 상한, 이후 5명 미만 일자 이전 순위 유지, 비인증 공개 API 개인정보 비노출 및 이미지 조회, DB 제약 및 쓰기 실패 롤백, 제어 시계 자정 스케줄러 루프·일시 오류 복구·FastAPI 수명주기 취소, MySQL 8.4.13 통합 검증).
+- `pytest -q tests/ --ignore=tests/test_user_meals.py` 전체 회귀 검증: 348 passed, 18 skipped (`test_user_meals.py`는 기존 `display.py` 변경으로 인한 선행 베이스라인 실패 2건으로 제외).
+
+#### 남은 작업 및 주의 사항
+
+- 후속 티켓(#66)에서 서버 재시작 시 가장 최근 놓친 자정 집계 복구, 상태 행 쓰기 잠금(`FOR UPDATE`) 및 동일 날짜 중복 실행 방지, 저장 순위에서 카탈로그 메뉴가 모두 삭제된 음식 종류 숨김 처리를 확장한다.
+
+### #64 초기 인기 메뉴 8종 공개 구현
+
+#### 변경 이유 및 내용
+
+- 실제 인기 순위가 처음 발행되기 전에도 로그인하지 않은 방문자가 홈에서 합의한 초기 인기 메뉴 8종(떡볶이 → 돈까스 → 햄버거 → 마라탕 → 파스타 → 국밥 → 짜장면 → 제육볶음)을 정해진 순서대로 조회할 수 있도록 `InitialPopularFoodKind`(`initial_popular_food_kinds`) 모델과 공개 조회 API `GET /api/menus/popular`를 구현했다.
+- 향후 #65/#66에서 추가할 실제 집계 인기 순위 테이블과 분리된 `initial_popular_food_kinds` 테이블에 위치(`position` 1~8 `CHECK` 및 `UNIQUE`)와 `food_kind_id`(`UNIQUE`, `FK -> food_kinds.id`, `NOT NULL`) 제약을 적용했다.
+- `app/menus/popular.py`에서 초기 8종 키 목록 검증·원자적 위치 교체 및 롤백(`seed_initial_popular_food_kinds`), 멱등 보장(`ensure_initial_popular_food_kinds`), 위치순 조인 조회 및 일러스트 경로 해석(`get_popular_menus`)을 구현하고 `scripts/seed_menus.py`, `scripts/migrate_issue62_food_kinds.py`, `app/main.py` 앱 수명주기에 연동했다.
+
+#### 주요 변경 파일
+
+- `app/menus/models.py`, `app/menus/popular.py`, `app/menus/schemas.py`, `app/menus/router.py`, `app/main.py`, `scripts/seed_menus.py`, `scripts/migrate_issue62_food_kinds.py`, `tests/test_ticket64_initial_popular_menus.py`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/menus/popular` 추가: 인증 없이 공개 조회 가능, 기존 `ApiResponse` 형식으로 `source: "initial"`, `as_of: null`, `items[]`(`food_kind_id`, `name`, 실제 조회 가능한 상대 `image_url`) 반환. 사용자 이름이나 개별 식사 기록을 포함하지 않으며 최근 메뉴 API와 독립적으로 동작한다.
+
+#### DB 변경
+
+- `initial_popular_food_kinds` 테이블(`id`, `position` 1..8 CHECK + UNIQUE, `food_kind_id` UNIQUE + FK `fk_initial_popular_food_kinds_food_kind -> food_kinds.id`, `created_at`, `updated_at`) 추가 및 `scripts/migrate_issue62_food_kinds.py`·`scripts/seed_menus.py` 초기 8종 멱등 적재 반영.
+
+#### 검증
+
+- `pytest tests/test_ticket64_initial_popular_menus.py tests/test_ticket62_food_kinds_and_recent_card.py` 실행(SQLite 및 격리 MySQL 8.4.13 `MYSQL_TEST_DATABASE_URL`): 40개 테스트 모두 통과(비인증 공개 조회, ID 순서가 섞인 `food_kinds` 환경에서의 합의 8종 순서 보장, 정적 일러스트 HTTP 200 및 누락 시 공통 이미지 폴백, 사용자/식사 기록 비노출 및 최근 메뉴 API 독립성, `CHECK`/`UNIQUE`/`FK`/`NOT NULL` DB 제약, 원자적 8종 순서 교체 및 오류·중간 실패 롤백, 시드·마이그레이션 멱등성 및 커스텀 순서 보존 검증).
+- `pytest tests/ --ignore=tests/test_user_meals.py` 회귀 검증: 327 passed, 16 skipped (`test_user_meals.py`는 기존 `display.py` 변경으로 인한 선행 베이스라인 실패 2건으로 제외).
+
+#### 남은 작업 및 주의 사항
+
+- 후속 티켓(#65, #66)에서 자정 집계 실제 인기 순위를 별도 테이블에 저장하고 발행된 실제 순위가 있을 때 `GET /api/menus/popular`가 `source="aggregated"`와 `as_of`를 반환하도록 확장한다.
+
+### #63 최근에 먹은 메뉴를 종류별 최대 6개로 표시 구현
+
+#### 변경 이유 및 내용
+
+- `GET /api/users/me/home-card-recently-eaten-food-max-6`가 최신 1건만 반환하던 동작을 확장해, 음식 종류(`food_kind_id`)별 최신 식사 기록을 최신순(`eaten_at DESC, id DESC`)으로 최대 6개까지 반환하도록 구현했다.
+- 설계 문서(`docs/plans/54-menu-photo-design.md`)의 확정 조회 방식에 따라 요청당 단일 UTC 기준 시각(`get_utc_now`)을 고정하고, 현재 카탈로그 메뉴가 존재하며 `eaten_at <= as_of`인 본인 식사 기록을 복합 커서 `(eaten_at, id)`로 청크 단위(`RECENT_FOOD_SCAN_CHUNK_SIZE=32`, 전체 스캔 상한 없음)로 읽어 처음 등장한 `food_kind_id`를 최대 6개까지 수집하도록 변경했다.
+- 미래 시각 식사 기록과 삭제된 카탈로그 메뉴를 음식 종류 중복 제거 전에 먼저 제외하므로, 미래 기록이나 삭제된 메뉴가 같은 음식 종류의 유효한 과거 기록을 가리지 않으며 삭제된 메뉴의 저장된 `menu_name`은 기존 `GET /api/users/me/meals`에서 계속 조회된다.
+
+#### 주요 변경 파일
+
+- `app/users/repository.py`, `app/users/service.py`, `app/users/router.py`, `tests/test_ticket63_recent_food_kinds_max6.py`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/users/me/home-card-recently-eaten-food-max-6` 동작 확장: 기존 Bearer 인증, `ApiResponse` 형식, `Cache-Control: no-store`, 항목 스키마(`food_kind_id`, `menu_name`, UTC ISO 8601 `eaten_at`, 상대 `image_url`)는 유지하고 `data.items`를 음식 종류별 최신 기록 최대 6개로 반환하도록 변경.
+
+#### DB 변경
+
+- 없음
+
+#### 검증
+
+- `pytest -v tests/test_ticket63_recent_food_kinds_max6.py tests/test_ticket62_food_kinds_and_recent_card.py` 실행(SQLite 및 격리 MySQL 8.4.13 `MYSQL_TEST_DATABASE_URL`): 40 passed (6개 상한, 6개 미만·빈 목록, 같은 음식 종류 세부 메뉴 중복 제거, 100건 연속 동일 종류 및 동시각·역전 ID 청크 경계 돌파, 동시각 `id DESC` 동률 정렬, 미래 시각 직전·정확 경계 및 비차폐, 삭제 메뉴 제외·비차폐 및 `/api/users/me/meals` 보존, 카카오·UUID 계정 격리, `Cache-Control: no-store`, MySQL 8.4.13 통합 검증).
+- 전체 저장소 `pytest -q` 실행: 366 passed, 16 skipped, 2 failed(`tests/test_user_meals.py`의 기존 베이스라인 `display.py` 포맷 불일치 2건만 실패, 신규 회귀 없음).
+
+#### 남은 작업 및 주의 사항
+
+- 후속 티켓(#67)에서 메뉴별 공통 일러스트 예외(`menu_illustration_exceptions`)와 대표 일러스트 파일 연결을 반영한다.
+
+### #62 음식 종류 연결과 최근 메뉴 첫 카드 구현
+
+#### 변경 이유 및 내용
+
+- 홈 최근에 먹은 메뉴와 요즘 인기 메뉴가 공유할 음식 종류(`FoodKind`) 모델과 `Menu.food_kind_id` 외래 키를 추가하고, 합의한 별칭(`버거`/`햄버거`, `돈가스`/`돈까스`, `스파게티`/`파스타`, `자장면`/`짜장면`, `제육볶음`/`돼지고기볶음(제육볶음)` 등) 및 `base_name` 기반 공용 분류 규칙(`app/menus/food_kinds.py`)을 구현했다.
+- `scripts/seed_menus.py`와 MySQL 멱등 마이그레이션(`scripts/migrate_issue62_food_kinds.py`)에서 기존 메뉴와 식사 기록, 수동 `food_kind_id` 분류를 보존하면서 `food_code` 기준으로 백필하고, 미연결·오연결 행이 없음을 검증한 뒤 `NOT NULL` 및 외래 키 제약을 적용하도록 구현했다.
+- 공통 기본 메뉴 일러스트(`app/static/menu-illustrations/default.svg`)를 배포하고, 기존 Bearer 인증(카카오·UUID 계정)으로 본인의 유효한 최근 식사 첫 카드를 반환하는 `GET /api/users/me/home-card-recently-eaten-food-max-6`를 구현했다.
+
+#### 주요 변경 파일
+
+- `app/menus/food_kinds.py`, `app/menus/models.py`, `app/static/menu-illustrations/default.svg`, `app/users/repository.py`, `app/users/router.py`, `app/users/schemas.py`, `app/users/service.py`, `scripts/migrate_issue62_food_kinds.py`, `scripts/seed_menus.py`, `tests/test_ticket62_food_kinds_and_recent_card.py`, `LOG.md`
+
+#### API 변경
+
+- `GET /api/users/me/home-card-recently-eaten-food-max-6` 추가: Bearer 인증 필수, `Cache-Control: no-store`, `ApiResponse` 형식으로 현재 카탈로그에 존재하고 조회 시각 이하인 본인 식사 기록 중 최신 1건(`food_kind_id`, `menu_name`, UTC ISO 8601 `eaten_at`, 상대 `image_url`) 또는 빈 배열(`items: []`) 반환.
+
+#### DB 변경
+
+- `food_kinds` 테이블(`id`, `kind_key` UNIQUE, `name`, `representative_image_url`, `created_at`) 및 `menus.food_kind_id`(`NOT NULL`, `fk_menus_food_kind -> food_kinds.id`) 추가, `scripts/migrate_issue62_food_kinds.py` 마이그레이션 스크립트 추가.
+
+#### 검증
+
+- `pytest tests/test_ticket62_food_kinds_and_recent_card.py` 실행(SQLite 및 격리 MySQL 8.4.13 `MYSQL_TEST_DATABASE_URL`): 별칭 분류, 7,503개 식사용 카탈로그 백필(`burger` 385건 합산, 미연결 0건), MySQL 마이그레이션·시드 재실행 시 수동 분류·식사 기록 보존 및 `NOT NULL`·FK 제약 강제, 정적 공통 일러스트 HTTP 200 조회, 최근 메뉴 첫 카드 API 인증·격리·삭제 메뉴 및 미래 식사 제외·동시각 `id DESC` 정렬 포함 30개 테스트 모두 통과.
+
+#### 남은 작업 및 주의 사항
+
+- 후속 티켓(#63)에서 최근에 먹은 메뉴를 음식 종류별 최신 기록 최대 6개로 확장한다.
+
+### #68 디자이너 PNG를 받은 뒤 대표 그림 경로를 등록하도록 변경
+
+#### 변경 이유 및 내용
+
+- 새 PNG는 받는 대로 백엔드 정적 파일로 배포하고, 파일이 열리는 것을 확인한 뒤 음식 종류별 대표 경로를 등록하도록 정리했다.
+- 대표 경로가 비어 있거나 배포 파일이 없는 음식은 두 홈 API에서 공통 그림을 사용한다. 첫 배포의 공통 그림 제공과 경로 등록 이후의 화면 표시를 명세에 명시했다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `docs/specs/54-home-menu-illustrations-and-rankings.md`, `LOG.md`
+
+#### API 변경
+
+- 없음. 문서에 두 홈 API의 공통 이미지 적용과 새 경로 반영 조건을 명시했다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 대표 그림 미등록·파일 누락·PNG 등록 시의 흐름을 두 문서에서 대조했다. 문서 공백 검사 통과. 앱 테스트 미실행. 문서만 수정했다.
+
+#### 남은 작업 및 주의 사항
+
+- 구현 후 공통 파일이 첫 배포부터 열리는지와 PNG 등록 전후의 홈 카드 표시를 확인한다.
+
+### #68 Figma 원본 대조와 누락 메뉴 일러스트 제작 설계
+
+#### 변경 이유 및 내용
+
+- Figma 목록에 이름이 있는 돈까스·햄버거·마라탕·스파게티·제육볶음을 재사용 대상으로 기록했다. 떡볶이는 이름이 없는 묶음에서 그림 형태로 후보를 확인했다.
+- 목록 이름과 확대해 본 그림에서 대응 원본을 찾지 못한 국밥·짜장면을 제작 후보로 기록했다. 한 장으로 먼저 기준을 맞추는 방식과 두 후보를 함께 검수하는 방식을 비교했다.
+- 모델 변경과 허락, 홈 카드 크기에서의 검수, 정적 파일 배포, DB 경로 연결의 순서를 정리했다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- GitHub #68 인수 조건을 대조했다. Figma `음식일러스트` 페이지의 이름이 붙은 목록과 일부 무명 그림 묶음을 직접 확인했다. 문서 공백 검사 통과. 앱 테스트 미실행. 문서만 수정했다.
+
+#### 남은 작업 및 주의 사항
+
+- 기존 파일 내보내기와 제작 대상을 확정한다. 새 파일 생성 직전에 요청자의 모델 변경과 명시적 허락을 받는다.
+
+### #67 공통 이미지 예외를 별도 테이블로 관리하기로 확정
+
+#### 변경 이유 및 내용
+
+- B안으로 확정했다. 공통 그림이 필요한 메뉴의 ID를 `menu_illustration_exceptions`에 등록하고, 최근 메뉴를 읽을 때 예외도 함께 조회한다.
+- 메뉴당 한 행을 허용하며 메뉴를 삭제할 때 예외 행도 함께 삭제하도록 설계했다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `docs/specs/54-home-menu-illustrations-and-rankings.md`, `LOG.md`
+
+#### API 변경
+
+- 없음. 최근 카드에서 `image_url`을 고르는 설계를 구체화했다.
+
+#### DB 변경
+
+- 없음. 예외 테이블과 `menu_id` 제약을 설계 문서에 기록했다.
+
+#### 검증
+
+- 메모리 SQLite 예제에서 두 파스타 메뉴의 예외 여부 조회, 음식 종류 유지, 중복·고아 예외 거부, 메뉴 삭제 시 예외 정리와 식사 기록명 보존을 확인했다. 공백 검사 통과. 앱·MySQL 테스트 미실행. 문서만 수정했다.
+
+#### 남은 작업 및 주의 사항
+
+- #67 구현에서 마이그레이션과 두 홈 API의 실제 응답을 검증한다. Figma 개별 원본을 대조해 #68 제작 목록을 확정한다.
+
+### #67 기존 메뉴 일러스트와 공통 이미지 연결 설계 초안
+
+#### 변경 이유 및 내용
+
+- 음식 종류별로 기존 그림을 내보내고 정적 파일로 배포하는 절차와 두 홈 API의 이미지 선택 규칙을 정리했다.
+- 최근 카드의 세부 메뉴에만 적용하는 공통 이미지 예외를 메뉴 행에 기록하는 방식과 별도 표로 관리하는 방식을 비교했다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `LOG.md`
+
+#### API 변경
+
+- 없음. 두 홈 API의 기존 설계상 `image_url` 선택 순서를 구체화했다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- GitHub #67 인수 조건을 확인하고 Figma의 `음식일러스트` 페이지에서 그림 묶음과 이름이 붙은 목록 프레임을 확인했다.
+- 메모리 SQLite 예제에서 두 방식의 공통 이미지 선택 결과, 음식 종류 ID와 순서 보존을 확인했다. 별도 FastAPI 테스트 앱에서 기존 프로필 정적 파일이 HTTP 200으로 제공되는 것을 확인했다. 실제 홈 API와 MySQL 테스트 미실행. 문서만 수정했다.
+
+#### 남은 작업 및 주의 사항
+
+- 예외 저장 방식을 확정한다. 마라탕·국밥·짜장면·제육볶음의 원본 레이어 이름과 파일을 확인한 뒤 재사용 여부와 #68 제작 목록을 확정한다.
+
+### #66 현재 공개 인기 순위 한 벌을 교체하는 방식으로 변경
+
+#### 변경 이유 및 내용
+
+- 순위 저장을 A안으로 변경했다. 새 순위가 나오면 기존 항목을 교체하고 순위 기준 시각과 마지막 성공 집계 날짜를 한 트랜잭션에서 갱신한다.
+- 식사 기록을 남긴 사용자가 4명 이하면 마지막 성공 집계 날짜만 갱신한다. 재시작 시 가장 최근에 놓친 집계 한 번을 보충한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `docs/specs/54-home-menu-illustrations-and-rankings.md`, `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음. 설계 문서에 저장 방식 변경을 반영했다.
+
+#### 검증
+
+- 설계와 명세에서 순위 교체, 저장 실패 시 보존, 재시작 시 집계 대상 조건을 대조했다. 문서 공백 검사 통과. 앱·MySQL 테스트 미실행. 문서만 수정했다.
+
+#### 남은 작업 및 주의 사항
+
+- 구현 후 순위 교체 중 실패와 동시 실행을 MySQL에서 검증한다.
+
+### #66 새 인기 순위에 번호를 붙여 공개하는 방식 확정
+
+#### 변경 이유 및 내용
+
+- B안으로 확정했다. MySQL에서 새 순위 항목 저장, 공개 번호와 기준 시각 전환, 성공 날짜 갱신, 이전 순위 정리를 한 트랜잭션으로 묶는다.
+- 재시작 시 가장 최근에 놓친 집계만 보충한다. 해당 날짜의 기록 사용자가 4명 이하면 마지막으로 공개한 순위를 유지하고 성공 날짜만 갱신한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `docs/specs/54-home-menu-illustrations-and-rankings.md`, `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음. 저장 방식을 설계에 확정했다.
+
+#### 검증
+
+- 설계와 명세에서 5명 기준과 순위 교체·실패 처리 조건을 대조했다. 문서 공백 검사 통과. 앱·MySQL 테스트 미실행. 문서만 수정했다.
+
+#### 남은 작업 및 주의 사항
+
+- 구현 후 MySQL에서 동시 실행, 저장 도중 실패, 재시작 복구와 공개 API의 순위 조회를 검증한다.
+
+### #66 마지막 인기 순위 유지와 재시작 복구 설계 초안
+
+#### 변경 이유 및 내용
+
+- 가장 최근에 놓친 한국시간 자정을 복구하는 순서와 마지막 성공 집계일·공개 순위 기준 시각의 역할을 정리했다.
+- 상태 행 잠금과 트랜잭션을 공통으로 두고, 현재 순위를 교체하는 방식과 번호를 붙인 새 순위로 전환하는 방식을 비교했다. 카탈로그에서 메뉴가 모두 삭제된 음식 종류는 공개 조회 시 숨긴다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `LOG.md`
+
+#### API 변경
+
+- 없음. 공개 인기 API의 복구 전후 응답을 설계에 정리했다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- GitHub #66의 인수 조건과 설계 초안을 대조했다. 메모리 SQLite 예제로 두 저장 방식의 실패 롤백, 5명 미만, 성공 날짜 중복 및 이전 날짜 건너뛰기, 삭제 메뉴 필터링과 순위 교체를 확인했다.
+- 앱·MySQL 테스트 미실행. MySQL 행 잠금과 동시 실행은 구현 시 검증한다.
+
+#### 남은 작업 및 주의 사항
+
+- 순위 저장 방식 A·B 중 하나를 확정한다.
+
+### #65 FastAPI 내부에서 매일 자정 인기 집계를 예약하기로 확정
+
+#### 변경 이유 및 내용
+
+- FastAPI 시작 시 인기 메뉴 예약 작업을 시작하는 A안으로 확정했다. 작업은 한국시간 자정마다 전날 집계를 시작하고, 동기 MySQL 작업은 API 이벤트 루프 밖에서 실행한다.
+- 자정에 서버가 꺼져 있었으면 재시작 시 #66의 복구 절차로 가장 최근에 놓친 집계 한 번을 실행한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `docs/specs/54-home-menu-illustrations-and-rankings.md`, `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 기존 방 정리 작업의 FastAPI 수명주기와 두 문서의 자정 실행·복구 조건을 대조했다. 문서 변경의 공백 검사를 통과했다. 앱·MySQL 테스트 미실행. 설계 문서를 수정했다.
+
+#### 남은 작업 및 주의 사항
+
+- #65에서 예약 작업을 구현하고 #66에서 재시작 복구를 연결한다. 구현 후 한국시간 자정 호출과 공개 인기 API의 응답을 확인한다.
+
+### 홈 최근 메뉴 API 경로에 카드 용도와 최대 개수 명시
+
+#### 변경 이유 및 내용
+
+- 홈 카드에 사용하는 조회이며 최대 여섯 개를 반환한다는 점을 경로와 설계상 함수명에 반영했다.
+
+#### 주요 변경 파일
+
+- `docs/specs/54-home-menu-illustrations-and-rankings.md`, `docs/plans/54-menu-photo-design.md`, `LOG.md`
+
+#### API 변경
+
+- 로컬 설계 경로를 `GET /api/users/me/home-card-recently-eaten-food-max-6`으로 확정했다. 실행 API 변경 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 로컬 명세와 설계 문서의 경로와 조회 상한을 대조했다. 앱 테스트 미실행. 문서만 수정했다.
+
+#### 남은 작업 및 주의 사항
+
+- 홈 조회 구현과 연동에 새 경로를 사용한다. 게시된 명세와 티켓의 경로에도 반영이 필요하다.
+
+### 홈의 최근 메뉴 API 이름에 음식 종류를 명시
+
+#### 변경 이유 및 내용
+
+- 홈은 음식 종류별로 최신 식사 한 건을 사용하고, 개인 식사 기록은 개별 식사를 반환한다. 경로에서도 이 차이가 드러나도록 홈 API 이름을 구체화했다.
+
+#### 주요 변경 파일
+
+- `docs/specs/54-home-menu-illustrations-and-rankings.md`, `docs/plans/54-menu-photo-design.md`, `LOG.md`
+
+#### API 변경
+
+- 로컬 설계에서 `GET /api/users/me/recent-menus`를 `GET /api/users/me/recently-eaten-food-kinds`로 변경했다. 실행 API 변경 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 기존 식사 기록 라우트와 로컬 명세·설계의 새 경로를 대조했다. 앱 테스트 미실행. 문서만 수정했다.
+
+#### 남은 작업 및 주의 사항
+
+- 홈 조회 구현과 연동에서 새 경로를 사용한다. 게시된 명세와 티켓의 경로도 반영이 필요하다.
+
+### #65 자정 인기 집계 방식 설계 초안
+
+#### 변경 이유 및 내용
+
+- 한국시간 자정을 기준으로 전날의 유효 기록을 고르고, 사용자 5명 기준과 음식 종류별 순위를 적용해 결과를 공개하는 순서를 정리했다.
+- FastAPI의 예약 작업과 호스트의 별도 예약 실행기를 비교하고, 어느 쪽이든 집계 대상 날짜를 명시해 같은 집계 로직을 호출하도록 정리했다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 메모리 SQLite로 4명·5명 경계, 자정 포함·제외, 반복 식사와 별칭 합산, 삭제 메뉴, 동률 처리와 여덟 종 상한을 확인했다. 로컬에 IANA 시간대 데이터가 없어 날짜 예제는 서울의 UTC+9 오프셋을 사용했다.
+- 앱·MySQL 테스트 미실행. 설계 초안을 작성했다.
+
+#### 남은 작업 및 주의 사항
+
+- 자정 실행 방식을 결정한다. 구현 후 실행 환경의 `Asia/Seoul` 지원과 MySQL 집계 영향을 확인한다.
+
+### #64 초기 인기 메뉴 순서를 DB에 저장하기로 확정
+
+#### 변경 이유 및 내용
+
+- 초기 목록은 MySQL에 위치 1~8과 숫자 음식 종류 ID를 저장하고, 공개 API는 위치순으로 읽는다.
+- 초기 목록과 실제 인기 순위는 각각 보관한다. #65의 자정 집계가 실제 순위를 발행해도 초기 목록은 보존한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `LOG.md`
+
+#### API 변경
+
+- 없음. 공개 인기 메뉴 API의 초기 목록 조회 출처를 설계 문서에 기록했다.
+
+#### DB 변경
+
+- 없음. 저장 방식만 확정했다.
+
+#### 검증
+
+- 기존 명세의 8종 순서, 공개 조회, 최초 실제 순위로 전환하는 기준과 갱신한 설계를 대조했다. 앱·MySQL 테스트 미실행.
+
+#### 남은 작업 및 주의 사항
+
+- 구현 후 초기 목록 등록, 위치·음식 종류 제약과 공개 API의 카드 순서를 검증한다.
+
+### #64 초기 인기 메뉴 8종 공개 설계 초안
+
+#### 변경 이유 및 내용
+
+- 토큰 없이 초기 인기 메뉴 API를 조회하고 홈이 합의한 순서대로 여덟 장을 렌더링하는 흐름을 정리했다.
+- 순서 있는 문자열 키 목록을 저장소에 두는 방식과 DB에 음식 종류별 위치를 저장하는 방식의 비용을 비교했다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 메모리 SQLite 예제에서 두 방식이 음식 종류 ID와 등록 순서에 관계없이 명세의 여덟 종류 순서를 반환하는지 확인했다. 중복 위치·음식 종류 및 등록되지 않은 종류가 있는 사례를 확인했다.
+- 앱·MySQL 테스트 미실행. 설계 초안을 작성했다.
+
+#### 남은 작업 및 주의 사항
+
+- 초기 목록의 저장 방식을 결정한다. 구현 후 공개 API 응답과 로그인하지 않은 홈의 카드 순서를 검증한다.
+
+### #63 백엔드가 식사 기록을 나눠 읽는 방식 확정
+
+#### 변경 이유 및 내용
+
+- 홈 API 요청 한 건 안에서 백엔드가 식사 기록을 최신순으로 나눠 읽고 처음 나온 음식 종류만 담는다.
+- 다음 묶음은 직전에 읽은 식사 기록의 시각과 ID를 기준으로 조회한다. 여섯 종류를 채우거나 이력이 끝나면 결과를 한 번 반환한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `LOG.md`
+
+#### API 변경
+
+- 없음. 기존 최근 메뉴 API 명세의 최대 여섯 건을 만드는 방식을 확정했다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 합의한 조회 순서와 명세의 종류 중복 제거·동시각 정렬 기준을 대조했다. 앱·MySQL 테스트 미실행. 설계 문서를 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- 구현 후 격리 MySQL에서 묶음 경계의 동시각 처리, 긴 중복 구간, DB 조회 수와 처리 시간을 확인한다.
+
+### #63 최근에 먹은 메뉴 조회 방식 설계 초안
+
+#### 변경 이유 및 내용
+
+- 본인의 유효한 식사 기록을 먼저 고르고, 음식 종류별 최신 기록을 선정한 뒤 최대 여섯 장을 보여주는 순서를 정리했다.
+- MySQL에서 종류별 번호를 붙여 고르는 방식과 앱에서 최신순으로 조금씩 읽어 고르는 방식의 비용을 비교했다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 메모리 SQLite 예제에서 두 방식의 결과를 비교했다. 삭제·미래 기록, 동시각, 사용자 격리, 여섯 종류 상한, 빈 목록과 같은 종류의 기록 100건이 이어지는 사례를 확인했다.
+- 실제 앱·MySQL 테스트 미실행. 설계 초안을 작성했다.
+
+#### 남은 작업 및 주의 사항
+
+- 조회 방식을 선택하고 구현 후 운영과 비슷한 MySQL 데이터로 실행 계획과 조회 성능을 확인한다.
+
+### #62 음식 종류 ID와 별칭 관리 방식 확정
+
+#### 변경 이유 및 내용
+
+- 음식 종류에는 숫자 ID와 고유 문자열 키를 함께 둔다. 메뉴와 두 홈 API는 숫자 ID를 사용하고, 시드와 초기 인기 목록은 문자열 키로 종류를 찾는다.
+- 별칭은 저장소의 공용 규칙 파일에서 관리한다. 백필과 메뉴 시드가 같은 규칙을 사용하며 기존에 연결된 메뉴의 분류를 보존한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `LOG.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. 두 홈 API의 `food_kind_id`를 JSON 숫자로 제공하도록 설계 문서에 기록했다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 식별자, 별칭, 운영 DB 점검 전환 결정과 설계 문서의 DB·API 설명을 대조했다. 앱·DB 테스트 미실행. 설계 문서를 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- 격리 MySQL에서 메뉴 종류 백필, 재실행 시 수동 분류 보존과 점검 전환을 검증한다.
+
+### #62 운영 DB 점검 전환 방식 확정
+
+#### 변경 이유 및 내용
+
+- 한 번의 점검 시간에 관련 쓰기를 멈추고 구조 추가, 백필, 검증, 제약 적용과 새 저장 경로 검증을 마친 뒤 쓰기를 재개하도록 기록했다.
+- 음식 종류 식별자와 별칭 저장 위치는 각각의 선택지에서 실제로 어떤 값이 쓰이고 어떤 운영 작업이 필요한지 보강했다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 기존 백필 순서와 운영 전환 결정을 대조했다. 앱·DB 테스트 미실행. 설계 문서를 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- 음식 종류 식별자 형식과 별칭 저장 위치를 결정한다. 격리 DB에서 전환을 검증하고 점검 시간과 잠금 범위를 확인한다.
+
+### #62 음식 종류 연결과 최근 메뉴 첫 카드 아키텍처 초안
+
+#### 변경 이유 및 내용
+
+- 메뉴의 종류 연결, 운영 DB 백필과 제약 적용, 토큰 확인부터 홈 첫 카드 표시까지의 순서를 설계 문서에 정리했다.
+- 식별자 형식, 별칭 관리 위치, 운영 전환 방식의 선택지와 비용을 비교했다. Shopify의 상품 분류와 Stripe·GitHub의 운영 마이그레이션 자료를 대조했다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 현재 메뉴 모델·시드·식사 기록 조회와 명세를 대조했다. 로컬 식사용 CSV의 고유 메뉴 코드 7,503개와 버거·햄버거 385개를 확인했다.
+- 앱·DB 테스트 미실행. 아키텍처 초안과 선택지 비교를 기록했다.
+
+#### 남은 작업 및 주의 사항
+
+- 식별자 형식·별칭 저장 위치·운영 전환 방식은 선택 전이다. 실제 운영 데이터와 변경 시 잠금 시간을 확인한다.
+
+### #61 홈 메뉴 구현 티켓 7개 게시
+
+#### 변경 이유 및 내용
+
+- 최근 메뉴와 인기 메뉴 명세를 사용자가 확인할 수 있는 구현 단위로 나누고, 승인받은 7개 티켓을 [#61](https://github.com/pknu-wap/WHATBOB_BE/issues/61)의 하위 이슈로 게시했다.
+- GitHub 선행 관계를 연결했다. #62는 바로 시작할 수 있고, #63·#64는 #62, #65·#67은 #64, #66은 #65, #68은 #67 완료 후 진행한다.
+
+#### 주요 변경 파일
+
+- `LOG.md`. 구현 티켓은 [GitHub #62~#68](https://github.com/pknu-wap/WHATBOB_BE/issues/61)에 게시했다.
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- GitHub에서 7개 티켓의 제목, 본문, 공개 상태, `ready-for-agent` 라벨, 상위 이슈 #61 연결과 각 선행 이슈 번호를 확인했다.
+- 앱·DB 테스트 미실행. 명세 분할과 이슈 게시를 진행했다.
+
+#### 남은 작업 및 주의 사항
+
+- [#62](https://github.com/pknu-wap/WHATBOB_BE/issues/62)부터 구현한다. [#68](https://github.com/pknu-wap/WHATBOB_BE/issues/68)에서 제공된 그림을 참조해 새 이미지를 생성하기 직전에 요청자에게 연락하고, 모델 변경과 명시적 허락을 기다린다.
+
+### #61 요즘 인기 메뉴 집계 범위를 전날 하루로 변경
+
+#### 변경 이유 및 내용
+
+- 요즘 인기 메뉴는 매일 한국시간 자정에 전날 하루의 식사 기록을 집계하도록 명세를 수정했다. 전날 자정 기록을 포함하고 집계일 자정 기록은 다음 집계에 포함한다.
+- 서버가 자정을 놓치면 가장 최근에 놓친 집계일의 전날 기록을 사용한다. 사용자 5명 기준도 해당 집계일의 전날을 대상으로 적용한다.
+- [GitHub 명세 #61](https://github.com/pknu-wap/WHATBOB_BE/issues/61)에 같은 내용을 반영했다.
+
+#### 주요 변경 파일
+
+- `docs/specs/54-home-menu-illustrations-and-rankings.md`, `docs/plans/54-menu-photo-design.md`, `docs/adr/0004-persist-last-popular-menu-ranking.md`, `GLOSSARY.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. `GET /api/menus/popular`에 제공할 실제 순위의 집계 범위를 명세에서 수정했다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 한국시간 전날 자정과 당일 자정의 UTC 비교, 문서 간 집계 범위 일치 및 `git diff --check` 통과. GitHub #61의 본문과 `ready-for-agent` 라벨을 확인했다.
+- 앱·DB 테스트 미실행. 집계 범위의 설계와 명세를 수정했다.
+
+#### 남은 작업 및 주의 사항
+
+- 실제 집계 구현 시 한국시간 자정 경계와 사용자 5명 기준을 하루 범위에서 검증한다.
+
+### #54 홈 메뉴와 일러스트 명세 #61 게시
+
+#### 변경 이유 및 내용
+
+- 합의한 홈 최근 메뉴 조회, 자정 인기 집계, 음식 종류 연결, 일러스트 보관과 재사용 조건을 구현 명세로 정리했다.
+- 두 홈 API 응답과 자정 집계 결과를 검증 범위로 확인했다. 제공된 일러스트를 기반으로 새 음식 이미지를 생성할 때 모델 변경과 요청자의 명시적 허락을 기다리는 조건을 기록했다.
+- [명세 이슈 #61](https://github.com/pknu-wap/WHATBOB_BE/issues/61)을 #54의 하위 이슈로 게시하고 `ready-for-agent` 라벨을 적용했다.
+
+#### 주요 변경 파일
+
+- `docs/specs/54-home-menu-illustrations-and-rankings.md`, `docs/plans/54-menu-photo-design.md`
+
+#### API 변경
+
+- 없음. 두 홈 API의 구현 계약을 명세에 기록했다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 명세의 7개 섹션, 사용자 스토리 27개, 핵심 정책, 이미지 생성 승인 문구와 공백을 확인했다. GitHub의 본문 일치, 라벨, 상위 이슈 #54 연결을 확인했다.
+- 앱·DB 테스트 미실행. 명세 작성과 게시만 진행했다.
+
+#### 남은 작업 및 주의 사항
+
+- 명세에 따라 홈 API와 DB 전환을 구현한다. 참조 그림을 기반으로 새 이미지를 생성하는 작업은 요청자의 허락을 받은 뒤 진행한다.
+
+### #54 최근 메뉴의 식사 시각 조건 확정
+
+#### 변경 이유 및 내용
+
+- 홈의 최근 메뉴에는 조회 시각까지 먹은 것으로 기록된 식사만 사용한다. 음식 종류별 최신 기록을 고르기 전에 조건을 적용해 나중 시각이 같은 종류의 이전 식사를 가리지 않게 한다.
+- 미래 시각 직전과 정확히 그 시각에 조회하는 검증 사례를 추가하고, Figma 원본·운영 DB 대조·프론트엔드 연동은 출시 전 확인 항목으로 정리했다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`
+
+#### API 변경
+
+- 없음. 홈 최근 메뉴 조회의 설계 조건을 확정했다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 문서의 필터 순서, 경계 시각 예시, 이슈의 초기 메뉴 순서, 로컬 링크 및 `git diff --check` 통과.
+- 앱·DB 테스트 미실행. 설계 문서만 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- 홈 API와 마이그레이션을 구현하고 실제 일러스트 파일을 확인한 뒤 설계 문서의 검증 시나리오를 실행한다.
+
+### #54 삭제된 인기 카드와 일러스트 추가 제작 기준 확정
+
+#### 변경 이유 및 내용
+
+- 마지막 실제 인기 순위를 유지하는 중 한 음식 종류의 메뉴가 모두 삭제되면 해당 카드만 뺀다. 다른 카드의 순서와 마지막 집계 시각은 유지한다.
+- 마라탕, 국밥, 짜장면, 제육볶음은 Figma 원본과 먼저 대조하고, 사용할 원본이 없는 음식부터 일러스트를 추가로 제작한다.
+- 기존 식사 등록 요청이 미래 식사 시각을 받아 UTC로 변환하는 동작을 확인했다. 홈 최근 메뉴에서의 표시 시점은 협의 중이다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 미래 시각 `2099-11-21T12:00:00+09:00`이 `UserMealCreateRequest`를 통과해 `2099-11-21T03:00:00+00:00`으로 변환되는 것을 확인했다.
+- 확정 문구, 로컬 문서 링크 및 `git diff --check` 통과. API 통합·DB 테스트 미실행. 홈 기능의 설계 문서만 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- 미래 시각 식사 기록의 홈 표시 규칙을 확정하고 Figma 원본 레이어명과 개별 파일을 확인한다.
+
+### #54 한국시간 자정 집계와 홈 API 조회 권한 확정
+
+#### 변경 이유 및 내용
+
+- 매일 한국시간 자정을 기준으로 직전 7일의 식사 기록을 집계한다. 서버가 자정을 놓치면 가장 최근에 놓친 집계 한 번만 당시 기준 시각으로 보충한다.
+- 본인 최근 메뉴 조회에는 기존 Bearer 인증을 사용한다. 인기 메뉴 조회는 개인 식사 기록 없이 공개한다.
+- API 응답 필드, 집계 날짜와 표시 순위 기준 시각의 분리, 경계 시각과 재시작 검증 시나리오를 설계 초안에 적었다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `docs/adr/0004-persist-last-popular-menu-ranking.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. 두 홈 조회의 인증과 응답 필드를 설계 문서에 기록했다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 공개·인증 조회, 한국시간 자정의 UTC 변환과 7일 창 예시, 로컬 문서 링크 및 `git diff --check` 통과.
+- 앱·DB 테스트 미실행. 설계 문서만 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- 이전 순위의 메뉴 삭제, 미래 식사 기록의 최근 메뉴 표시, Figma 원본과 추가 제작 범위를 확인한다.
+
+### #54 일일 인기 집계와 음식 종류 연결·홈 API 분리 확정
+
+#### 변경 이유 및 내용
+
+- 요즘 인기 메뉴 순위를 하루 한 번 집계하고, 식사 시각은 그날의 집계 기준으로 최근 7일을 적용한다. 인기 메뉴 조회는 저장된 집계 결과를 읽는다.
+- 메뉴는 DB에 등록한 음식 종류 하나에 연결한다. 초기 데이터에서 합칠 별칭을 명시하고, 최근 메뉴와 인기 메뉴는 서로 다른 API로 제공한다.
+- 설계 초안에 DB 전환 순서, 시드에서 사용하는 종류 연결, 두 홈 API의 경로와 응답 필드 후보를 기록했다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `docs/adr/0004-persist-last-popular-menu-ranking.md`
+
+#### API 변경
+
+- 실행 API 변경 없음. 경로 `GET /api/users/me/recent-menus`, `GET /api/menus/popular`와 응답은 설계 초안이다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 확정 정책 문구, 두 API 경로 초안, 로컬 문서 링크 및 `git diff --check` 통과.
+- 앱·DB 테스트 미실행. 설계 문서만 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- 일일 집계 시각, 놓친 집계의 복구, 인기 메뉴의 조회 권한을 정한다. 초기 음식 종류 및 일러스트 연결은 실제 운영 데이터와 개별 원본 파일을 기준으로 확인한다.
+
+### #54 일러스트와 실제 인기 순위의 보관 방식 확정
+
+#### 변경 이유 및 내용
+
+- 메뉴 일러스트는 백엔드 정적 파일로 배포하고 DB에는 파일 경로를 저장한다.
+- 서버 재시작 뒤에도 같은 순위를 보여주기 위해 마지막 실제 인기 순위 한 벌을 MySQL에 보관한다. 사용자 수가 기준에 미달하면 저장된 순위를 교체하지 않는다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `docs/adr/0004-persist-last-popular-menu-ranking.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 보관 방식 문구, 설계 문서와 ADR의 로컬 링크 및 `git diff --check` 통과.
+- 앱·DB 테스트 미실행. 설계 문서만 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- 실제 순위 갱신 주기, 음식 종류 분류 방식, 홈 조회 API를 확정한다.
+
+### #54 마지막 실제 인기 순위 유지와 최근 메뉴 제외 기준 확정
+
+#### 변경 이유 및 내용
+
+- 기록 사용자가 5명 미만으로 줄면 마지막으로 표시한 실제 인기 순위를 유지한다. 실제 순위를 표시한 적이 없으면 초기 8종을 보여준다.
+- 삭제된 메뉴는 홈의 최근 메뉴 카드에서도 제외한다. 개인 식사 기록에는 저장된 메뉴명으로 남는다.
+- 백엔드 정적 파일과 MySQL `BLOB` 보관의 차이를 배포와 복구 관점에서 설명했다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `GLOSSARY.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 결정 문구, 보관 방식 비교, 로컬 문서 링크 및 `git diff --check` 통과.
+- 앱·DB 테스트 미실행. 설계 문서와 용어집만 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- 일러스트와 마지막 실제 인기 순위의 보관 방식을 확정한다.
+
+### #54 인기 순위 유지와 삭제된 메뉴 제외 정책 정리
+
+#### 변경 이유 및 내용
+
+- 실제 순위를 보여준 뒤 최근 7일의 기록 사용자가 5명 미만이면 이전에 보여준 순위를 계속 표시한다. 어떤 시점의 순위를 보관할지는 추가 확인 중이다.
+- 사용자 수가 같으면 더 최근에 먹은 음식 종류를 먼저 표시한다. 삭제된 메뉴의 식사 기록은 이름으로 집계하던 앞선 결정을 바꿔 인기 순위와 전환 기준에서 제외한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 이전 순위 유지, 동률 처리와 삭제된 메뉴 제외 문구 및 `git diff --check` 통과.
+- 앱·DB 테스트 미실행. 설계 문서만 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- 이전 순위의 기준 시점과 보관 방식, 삭제된 메뉴의 최근 카드 표시, 일러스트 저장 위치를 확정한다.
+
+### #54 실제 인기 순위 전환 기준과 카드 수 확정
+
+#### 변경 이유 및 내용
+
+- 초기에는 이슈 #54 댓글의 순서대로 음식 8종을 표시한다. 최근 7일간 식사를 기록한 사용자가 5명 이상이면 실제 순위에서 최대 8종을 표시한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 전환 기준, 초기 순서, 최대 카드 수와 `git diff --check` 통과.
+- 앱·DB 테스트 미실행. 설계 문서만 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- 5명 미만으로 줄었을 때의 동작, 동률 순서, 삭제된 메뉴명이 같은 음식 종류인지 판단하는 방식을 확정한다.
+
+### #54 초기 인기 목록과 사용자 수 기준 집계 확정
+
+#### 변경 이유 및 내용
+
+- 음식 종류별 인기 순위는 해당 종류를 먹은 사용자 수로 정한다. 같은 사용자의 반복 식사는 한 번만 센다.
+- 초기에는 이슈 #54 댓글의 음식 8종을 표시하고, 식사 데이터가 쌓이면 실제 집계 결과를 표시한다.
+- 연결된 메뉴가 삭제된 식사 기록도 저장된 메뉴명으로 최근 목록과 인기 집계에 포함한다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `GLOSSARY.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 확정 문구, 이슈 댓글의 메뉴 순서, 로컬 문서 링크 및 `git diff --check` 통과.
+- 앱·DB 테스트 미실행. 설계 문서와 용어집만 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- 실제 순위 전환 기준과 카드 수, 저장된 메뉴명을 음식 종류로 연결하는 기준을 확정한다.
+
+### #54 홈 메뉴의 음식 종류 기준과 최근 7일 집계 확정
+
+#### 변경 이유 및 내용
+
+- 최근에 먹은 메뉴는 음식 종류별 최신 기록을 한 건씩 골라 최대 6개 표시한다. 요즘 인기 메뉴는 조회 시각 기준 최근 7일의 식사 기록을 음식 종류별로 묶는다.
+- 두 홈 목록에 같은 음식 종류 분류를 쓰고, 공통 이미지가 필요한 메뉴도 원래 음식 종류에 포함하도록 기록했다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `GLOSSARY.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 확정 정책 문구, 이슈의 메뉴 순서, 로컬 문서 링크 및 `git diff --check` 통과.
+- 앱·DB 테스트 미실행. 설계 문서와 용어집만 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- 인기 점수와 카드 개수, 삭제된 메뉴 기록의 처리, 음식 종류 매핑과 일러스트 보관 방식을 확정한다.
+
+### #54 최근 메뉴 6개와 인기 집계·대표 일러스트 정책 확정
+
+#### 변경 이유 및 내용
+
+- 최근에 먹은 메뉴는 같은 메뉴의 가장 최근 식사 기록을 사용해 서로 다른 메뉴를 최대 6개 표시한다.
+- 요즘 인기 메뉴는 여러 사용자의 최근 식사 기록으로 집계한다. 같은 음식 종류는 대표 일러스트를 공유하고 실제 메뉴와 그림이 크게 다르거나 그림이 없으면 공통 이미지를 쓴다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `GLOSSARY.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 확정 정책 문구, 이슈의 메뉴 순서, 로컬 문서 링크 및 `git diff --check` 통과.
+- 앱·DB 테스트 미실행. 설계 문서와 용어집만 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- 최근 메뉴의 중복 기준과 인기 집계 단위·기간·순위를 확정한다. 대표 일러스트의 메뉴 매핑과 파일 보관 방식도 정한다.
+
+### #54 홈 메뉴 일러스트 적용 범위와 재사용 후보 정리
+
+#### 변경 이유 및 내용
+
+- 홈의 최근에 먹은 메뉴와 요즘 인기 메뉴를 첫 적용 범위로 기록했다. 이슈의 음식 8종을 공개 메뉴 CSV와 첨부 일러스트에 대조하고, 재사용 후보와 원본 이름을 확인할 대상을 정리했다.
+- 홈 카드 자리와 기존 식사 기록 API를 확인했다. 인기 집계 방식과 일러스트 연결 기준은 협의 중이다.
+
+#### 주요 변경 파일
+
+- `docs/plans/54-menu-photo-design.md`, `GLOSSARY.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 이슈 댓글의 메뉴 순서, 두 홈 섹션 이름, 로컬 문서 링크 및 `git diff --check` 통과.
+- 앱·DB 테스트 미실행. 설계 문서와 용어집만 갱신했다.
+
+#### 남은 작업 및 주의 사항
+
+- Figma의 개별 일러스트 이름과 원본 파일을 확인한 뒤 부족한 메뉴의 제작 범위를 정한다. 인기 메뉴 선정 및 일러스트 연결 기준은 후속 설계에서 정한다.
+
+## 2026-11-19
+
+### #59 추가 반찬과 단독 양념·소스 삭제 목록 갱신
+
+#### 변경 이유 및 내용
+
+- 장류·양념류와 합의한 반찬·사이드·국의 원본 식품코드 213개를 삭제 목록에 추가했다. 정제 CSV와 공유 CSV·JSON에서 운영 DB의 추가 삭제 대상과 일치하는 106개를 제거했다.
+- 이전 CSV 적재에서도 추가 삭제 코드를 제외한다. 제육볶음, 감자탕, 과일샐러드와 같은 식사 메뉴는 유지했다.
+
+#### 주요 변경 파일
+
+- `data/`, `GLOSSARY.md`, `docs/specs/59-remove-additional-side-menus.md`, `tests/test_menu_cleanup.py`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 스키마 변경 없음. 배포 후 기존 `scripts/remove_side_dishes_and_desserts.py`를 실행해 대상 메뉴와 연결 기록을 정리하고 관련 질문 점수를 다시 계산한다.
+
+#### 검증
+
+- 메뉴 정리, 추천, 주문서 계약 테스트 21개 통과.
+- 삭제 목록의 식품코드 3,159개와 원본·공유 메뉴 파일의 중복 0개를 확인했다. 공유 메뉴 6,968개와 나머지 행의 내용·순서를 확인했다.
+- 운영 DB 사전 조회에서 메뉴 106건과 연결된 추천 피드백 11건을 확인했다.
+
+#### 남은 작업 및 주의 사항
+
+- PR 리뷰와 병합 후 운영 서버에 반영한다. DB 백업·정리와 서버 재시작 후 남은 대상 및 API 응답을 확인한다.
+
+### #50 · #52 T02~T04 카카오 재인증(`prompt=login`)·대상 확인/취소·웹 프록시 및 Expo 앱 이중 전달 계약 구현
+
+#### 변경 이유 및 내용
+
+- `T02` (`docs/plans/50-tickets-and-architecture.md`):
+  - `LOGOUT` 확정 시 새로 발급되는 UUID `AuthSession`에 `requires_reauth=True`를 기록하고 `TokenResponse` 및 `TransitionCommitResponse`에 노출했다.
+  - `T02-D01`: `GET /api/auth/kakao/login/url`이 현재 `AuthSession`(쿠키·Bearer JWT·모바일 앱 시크릿 헤더)을 확인해 서버 발급 1회용 `state`의 SHA-256 해시(`oauth_state_hash`)와 만료 시각(`oauth_state_expires_at`)을 세션 행에 덮어써 기록하고, `requires_reauth=True`이면 `prompt=login`을 강제 부착하도록 구현했다. `KAKAO_LINK` 준비 시 세션의 최신 `state`와 대조·1회용 소진하여 이전 탭이나 재사용된 콜백을 `400 INVALID_OAUTH_STATE`로 차단한다.
+  - `KAKAO_LINK` 준비 시 카카오 프로필의 `표시 닉네임`과 서버 마스킹 이메일(`masked_email`)을 `target_account`로 반환하며, 두 필드가 모두 없으면 `422 KAKAO_TARGET_UNVERIFIABLE`로 즉시 중단하고 임시 자격 증명을 남기지 않는다.
+  - 확인 단계 취소 API(`POST /api/auth/transitions/{transition_id}/cancel`)를 추가해 `PREPARED` 전환을 `CANCELLED`로 종료하고 임시 암호화 토큰 원문을 즉시 `NULL`로 파기한다.
+- `T03` (`docs/plans/52-t01-web-auth-design.md`):
+  - 웹 콜백 화면 착륙 후 동일 출처 프록시를 통한 `POST /api/auth/transitions`(`prepare`) → 대상 확인 → `commit`/`cancel` 흐름과, 카카오톡 인앱 브라우저(`User-Agent: ...KAKAOTALK...`) 감지 시 `kakao_in_app_browser=True` 및 `requires_external_browser=True` 사전 안내 플래그 반환을 구현했다.
+- `T04`:
+  - `T04-D01`: 모바일 앱 전용 이중 전달 계약(`X-Whatbob-Client: app` + `X-Whatbob-Request: 1`)을 구현해 앱 요청 시 응답 헤더(`X-Whatbob-Auth-Secret`, `X-Whatbob-Transition-Secret`)로 비밀열쇠를 내려주고 요청 헤더로 세션 복원·계정 전환을 수행할 수 있게 했다(웹 요청에는 비밀열쇠 헤더 미노출).
+  - 모바일 시스템 인증 창(`openAuthSessionAsync`) 복귀를 위해 카카오 `https://` 콜백을 앱 스킴(`whatbob://auth/kakao/callback?...`)으로 즉시 `302 Redirect`하는 `GET /api/auth/kakao/app-callback` 브릿지 엔드포인트를 추가했다.
+
+#### 주요 변경 파일
+
+- `app/core/config.py`, `app/main.py`
+- `app/auth/models.py`, `app/auth/schemas.py`, `app/auth/sessions.py`, `app/auth/cookie_router.py`, `app/auth/router.py`, `app/auth/transitions.py`, `app/auth/transition_router.py`, `app/auth/kakao.py`
+- `docs/UUID_AUTH_API.md`, `docs/plans/50-tickets-and-architecture.md`, `docs/plans/52-t01-web-auth-design.md`
+- `tests/test_t02_t03_t04_reauth_web_app.py`
+
+#### API 변경
+
+- `GET /api/auth/kakao/login/url`: 세션 기반 1회용 `state` 발급·저장, `requires_reauth` 시 `prompt=login` 포함, `kakao_in_app_browser`·`requires_external_browser` 반환, 앱 플랫폼 요청 시 `KAKAO_APP_REDIRECT_URI` 기본 적용.
+- `GET /api/auth/kakao/app-callback`: 카카오 인가 쿼리 파라미터를 `whatbob://auth/kakao/callback`으로 `302 Redirect`(`Cache-Control: no-store`).
+- `POST /api/auth/transitions`: `TransitionPrepareResponse`에 `target_account`(`nickname`, `masked_email`) 추가, 표시 정보 모두 누락 시 `422 KAKAO_TARGET_UNVERIFIABLE` 반환.
+- `POST /api/auth/transitions/{transition_id}/cancel`: 준비된 전환 취소 및 임시 토큰 원문 파기.
+- `POST /api/auth/preparations`, `POST /api/auth/anonymous-users`, `POST /api/auth/tokens`, `/api/auth/transitions/*`: `TokenResponse`·`TransitionCommitResponse`에 `requires_reauth` 추가, `X-Whatbob-Client: app` 요청에 대해 `X-Whatbob-Auth-Secret` / `X-Whatbob-Transition-Secret` 헤더 입출력 지원.
+
+#### DB 변경
+
+- `auth_sessions` 테이블(`AuthSession`): `requires_reauth` (`BOOLEAN NOT NULL DEFAULT FALSE`), `oauth_state_hash` (`BINARY(32) NULL`), `oauth_state_expires_at` (`DATETIME(6) NULL`) 컬럼 추가.
+
+#### 검증
+
+- `pytest tests/test_t02_t03_t04_reauth_web_app.py tests/test_t01_kakao_token_lifecycle.py tests/test_t06_t07_t08_transitions.py tests/test_uuid_auth.py tests/test_auth.py`: 통합 검증 통과.
+
+#### 남은 작업 및 주의 사항
+
+- 실제 프론트엔드 저장소(`WHATBOB_FE`)의 웹 콜백/프록시 및 Expo 앱 `SecureStore` 화면 연동과 실제 브라우저/모바일 기기 검증은 프론트엔드 배포 단계에서 수행한다.
+
+### #50 T01 카카오 토큰 암호화 저장·자동 갱신·폐기와 안전한 왓밥 로그아웃 구현
+
+#### 변경 이유 및 내용
+
+- `T01-D01` (`docs/plans/50-tickets-and-architecture.md`): 카카오 인가 코드 교환(`exchange_kakao_authorization_code`)에서 `access_token`, `refresh_token`, `expires_in`, `refresh_token_expires_in`을 수집하고, 전용 테이블 `kakao_session_credentials`(`KakaoSessionCredential`)에 대칭키(Fernet, `KAKAO_TOKEN_ENCRYPTION_KEY` 또는 `JWT_SECRET` SHA-256 파생)로 암호화해 저장하도록 구현했다. `KAKAO_LINK` 준비 단계에서는 `transition_id`에 `PREPARED` 상태로 결합하고 확정(`commit`) 시 `new_auth_session.id`에 `ACTIVE` 상태로 결합하며, 만료·대체된 준비 내역 및 만료 정리된 세션의 암호화 토큰 원문은 즉시 `NULL`로 파기한다.
+- `T01-D02`: `LOGOUT` 확정(`commit_account_transition`) 시 단일 로컬 DB 트랜잭션 안에서 요청한 `AuthSession`만 폐기(`revoked_at`)하고 새 `UUID 사용자`·새 `AuthSession`을 발급하며, 자격 증명이 존재하는 세션은 `PENDING_REVOCATION`(`kakao_logout_status="PENDING"`), 레거시/자격 증명 부재 세션은 `SKIPPED_NO_CREDENTIALS`로 기록한다. DB 잠금 밖의 백그라운드 디스패처(`KakaoRevocationDispatcher`)가 자격 증명별 직렬화 잠금 아래 만료(또는 401 응답) 시 `grant_type=refresh_token`으로 갱신(새 리프레시 토큰·만료 정보 반환 시 교체, 생략 시 기존 유지)한 뒤 카카오 `POST /v1/user/logout`을 호출해 해당 기기 세션의 토큰 쌍만 폐기한다.
+- `T01-D03`: 카카오 일시 장애(네트워크 타임아웃·연결 오류·429·5xx)는 `1·3·5·10·30초` 간격(첫 실패 후 최대 60초 기한)으로 재시도하고, 영구 오류(400/403, 리프레시 만료, 갱신 후 401)는 즉시 실패 처리한다. `REVOKED`, `FAILED`, `SKIPPED_NO_CREDENTIALS` 도달 즉시 `encrypted_access_token`과 `encrypted_refresh_token`을 `NULL`로 영구 파기하고 상태 메타데이터만 남기며, `TransitionCommitResponse`와 `TransitionStatusResponse`의 `kakao_logout_status`로 결과를 노출한다.
+
+#### 주요 변경 파일
+
+- `app/core/config.py`, `app/main.py`
+- `app/auth/models.py`, `app/auth/schemas.py`, `app/auth/credentials.py`, `app/auth/kakao.py`, `app/auth/revocations.py`, `app/auth/transitions.py`, `app/auth/transition_router.py`, `app/auth/sessions.py`
+- `tests/test_t01_kakao_token_lifecycle.py`
+
+#### API 변경
+
+- `POST /api/auth/transitions/{transition_id}/commit`, `POST /api/auth/transitions/{transition_id}/recovery` (`TransitionCommitResponse`) 및 `GET /api/auth/transitions/{transition_id}` (`TransitionStatusResponse`): `LOGOUT` 전환에 대해 `kakao_logout_status` (`"PENDING" | "REVOKED" | "SKIPPED_NO_CREDENTIALS" | "FAILED" | null`) 필드 추가.
+
+#### DB 변경
+
+- `kakao_session_credentials` 테이블(`KakaoSessionCredential`) 추가: `id`, `transition_id`, `auth_session_id`, `logout_transition_id`, `kakao_id`, `encrypted_access_token`, `encrypted_refresh_token`, `access_token_expires_at`, `refresh_token_expires_at`, `status`, `started_at`, `first_failed_at`, `deadline_at`, `next_attempt_at`, `attempt_count`, `terminal_reason`, `finished_at`, `created_at`, `updated_at`.
+
+#### 검증
+
+- `pytest tests/test_t01_kakao_token_lifecycle.py tests/test_t06_t07_t08_transitions.py tests/test_uuid_auth.py tests/test_auth.py tests/test_user_profile.py`: **99 passed**.
+- `pytest tests/test_t02_personal_data.py tests/test_t03_rooms.py tests/test_t04_t05_profile.py tests/test_room_notifications.py tests/test_group_rounds.py`: **48 passed**.
+
+#### 남은 작업 및 주의 사항
+
+- 후속 티켓 `T02`에서 로그아웃 후 `requires_reauth`(`prompt=login`), 서버 세션 기반 OAuth `state` 검증, 연결 대상 확인(`nickname`, `masked_email`) 및 전환 취소 API를 구현한다.
 
 ## 2026-11-17
 

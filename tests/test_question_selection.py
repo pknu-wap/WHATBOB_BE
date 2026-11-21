@@ -120,14 +120,14 @@ def test_session_rotates_topics_without_submitting_and_persists_in_database(db):
     recent = set()
     seen = set()
     initial_count = sum(q.shown_count for q in db.query(OrderSheetQuestion))
-    for index in range(8):
+    for _ in range(8):
         result = select_order_sheet_questions(db, random_seed=1, scope_key="guest:one")
         topics = {q.cluster_key for q in result.questions if q.is_exploration}
         assert len(topics) == 2 and topics.isdisjoint(recent)
         seen.update(topics)
         recent = topics
-        # 요청마다 답변 제출 없이 노출 횟수를 누적한다.
-        assert sum(q.shown_count for q in db.query(OrderSheetQuestion)) == initial_count + 9 * (index + 1)
+        # 질문 조회는 탐색 순환 상태를 저장하고, 노출 횟수는 주문서 제출 시에 집계한다.
+        assert sum(q.shown_count for q in db.query(OrderSheetQuestion)) == initial_count
         db.expire_all()
     assert len(seen) == 5
     state = db.get(QuestionSelectionState, "guest:one")

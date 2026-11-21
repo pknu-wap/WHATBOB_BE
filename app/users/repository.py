@@ -1,8 +1,16 @@
 from datetime import datetime
 
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from app.menus.models import Menu, UserFoodExclusion, UserMeal
+from app.auth.sessions import as_utc_naive
+from app.menus.models import (
+    FoodKind,
+    Menu,
+    MenuIllustrationException,
+    UserFoodExclusion,
+    UserMeal,
+)
 from app.users.models import User
 
 DISLIKE_EXCLUSION_TYPE = "DISLIKE"
@@ -132,6 +140,48 @@ def find_user_meals_with_menu(
         .filter(UserMeal.user_id == user_id)
         .order_by(UserMeal.eaten_at.desc(), UserMeal.id.desc())
         .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+
+def find_valid_user_meals_with_food_kind_chunk(
+    db: Session,
+    user_id: int,
+    *,
+    as_of: datetime,
+    limit: int,
+    cursor: tuple[datetime, int] | None = None,
+) -> list[tuple[UserMeal, Menu, FoodKind | None, MenuIllustrationException | None]]:
+    """현재 카탈로그 메뉴가 존재하고 조회 시각 이하인 사용자 식사 기록을 복합 커서 기준으로 한 묶음 조회한다."""
+    as_of_naive = as_utc_naive(as_of)
+    query = (
+        db.query(UserMeal, Menu, FoodKind, MenuIllustrationException)
+        .join(Menu, UserMeal.menu_id == Menu.id)
+        .outerjoin(FoodKind, Menu.food_kind_id == FoodKind.id)
+        .outerjoin(
+            MenuIllustrationException,
+            Menu.id == MenuIllustrationException.menu_id,
+        )
+        .filter(
+            UserMeal.user_id == user_id,
+            UserMeal.eaten_at <= as_of_naive,
+        )
+    )
+    if cursor is not None:
+        last_eaten_at, last_id = cursor
+        last_eaten_at_naive = as_utc_naive(last_eaten_at)
+        query = query.filter(
+            or_(
+                UserMeal.eaten_at < last_eaten_at_naive,
+                and_(
+                    UserMeal.eaten_at == last_eaten_at_naive,
+                    UserMeal.id < last_id,
+                ),
+            )
+        )
+    return (
+        query.order_by(UserMeal.eaten_at.desc(), UserMeal.id.desc())
         .limit(limit)
         .all()
     )

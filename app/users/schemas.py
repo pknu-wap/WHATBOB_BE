@@ -149,3 +149,14 @@ class UserMealItemResponse(BaseModel):
 class UserMealsResponse(BaseModel):
     items: list[UserMealItemResponse]
     total_count: int
+
+
+class HomeRecentFoodCardItemResponse(BaseModel):
+    food_kind_id: int
+    menu_name: str
+    eaten_at: datetime
+    image_url: str
+
+
+class HomeRecentFoodCardsResponse(BaseModel):
+    items: list[HomeRecentFoodCardItemResponse]
