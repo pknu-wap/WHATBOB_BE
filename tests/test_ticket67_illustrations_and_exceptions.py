@@ -24,6 +24,7 @@ from app.menus.food_kinds import (
     CANONICAL_FOOD_KINDS,
     DEFAULT_MENU_ILLUSTRATION_URL,
     STATIC_DIR,
+    classify_food_kind,
     resolve_menu_illustration_url,
 )
 from app.menus.illustrations import (
@@ -36,12 +37,17 @@ from app.menus.illustrations import (
     FoodKindNotFoundException,
     IllustrationAuditStatus,
     InvalidMenuIllustrationException,
+    load_food_kind_illustration_urls,
     register_food_kind_illustration,
     seed_menu_illustration_exceptions,
     sync_food_kind_representative_illustrations,
 )
 from app.menus.models import FoodKind, Menu, MenuIllustrationException, UserMeal
-from app.menus.popular import ensure_initial_popular_food_kinds
+from app.menus.popular import (
+    aggregate_popular_menus_for_kst_date,
+    ensure_initial_popular_food_kinds,
+    get_seoul_tz,
+)
 from app.users.models import User
 from app.users.router import get_utc_now
 from scripts import migrate_issue67_illustrations
@@ -324,7 +330,13 @@ def test_sync_and_register_food_kind_illustrations_verify_files_and_preserve_cus
     # Sync registers only files that exist on disk; never points DB at missing files
     summary = sync_food_kind_representative_illustrations(sqlite_db, static_dir=tmp_path)
     assert summary["updated"] == 2
-    assert summary["skipped_missing_file"] == 6
+    deployed_urls = {
+        "/static/menu-illustrations/burger.png",
+        "/static/menu-illustrations/pasta.png",
+    }
+    assert summary["skipped_missing_file"] == sum(
+        url not in deployed_urls for url in load_food_kind_illustration_urls().values()
+    )
     sqlite_db.expire_all()
     assert sqlite_db.get(FoodKind, burger.id).representative_image_url == "/static/menu-illustrations/burger.png"
     assert sqlite_db.get(FoodKind, pasta.id).representative_image_url == "/static/menu-illustrations/pasta.png"
@@ -735,6 +747,73 @@ def test_menu_illustration_exception_uses_common_image_on_recent_card_without_af
         ).json()["data"]["items"]
         assert meals_after_delete[0]["menu_id"] is None
         assert meals_after_delete[0]["menu_name"] == "베이컨 크림 파스타"
+
+
+def test_catalog_illustration_sync_registers_all_136_images_and_preserves_food_kinds(home_api):
+    db = home_api.db
+    catalog = Path(__file__).resolve().parent.parent / "data" / "menus_meals_only.csv"
+    with catalog.open(encoding="utf-8-sig", newline="") as source:
+        catalog_kinds = dict(
+            classify_food_kind(base_name=row["base_name"], name=row["name"])
+            for row in csv.DictReader(source)
+        )
+
+    examples = {
+        "김치우동": "udon.png",
+        "백우동": "udon.png",
+        "볶음 우동": "yaki_udon.png",
+        "치킨까스": "tonkatsu.png",
+        "치킨가스": "tonkatsu.png",
+        "생선까스": "fish_cutlet.png",
+    }
+    catalog_kinds.update({key: key for key in examples.keys() - catalog_kinds.keys()})
+    db.add_all(FoodKind(kind_key=key, name=name) for key, name in catalog_kinds.items())
+    db.commit()
+    original_kinds = {
+        kind.kind_key: (kind.id, kind.name) for kind in db.query(FoodKind).all()
+    }
+
+    first = sync_food_kind_representative_illustrations(db)
+    assert first["updated"] == len(catalog_kinds)
+    assert first["skipped_missing_file"] == 0
+    assert first["skipped_missing_kind"] == 0
+    kinds = {kind.kind_key: kind for kind in db.query(FoodKind).all()}
+    assert {key: (kind.id, kind.name) for key, kind in kinds.items()} == original_kinds
+    expected_urls = {
+        f"/static/menu-illustrations/{file.name}"
+        for file in (STATIC_DIR / "menu-illustrations").glob("*.png")
+    }
+    assert len(expected_urls) == 136
+    assert {kind.representative_image_url for kind in kinds.values()} == expected_urls
+    for key, filename in examples.items():
+        assert kinds[key].representative_image_url == f"/static/menu-illustrations/{filename}"
+
+    second = sync_food_kind_representative_illustrations(db)
+    assert second["updated"] == 0
+    assert second["already_registered"] == len(catalog_kinds)
+
+    udon = _make_menu(food_code="T72-UDON", name="김치우동", base_name="김치우동")
+    users = [User(nickname=f"우동 사용자 {number}") for number in range(5)]
+    db.add_all([udon, *users])
+    db.flush()
+    eaten_at = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+    db.add_all(
+        UserMeal(user_id=user.id, menu_id=udon.id, menu_name=udon.name, eaten_at=eaten_at)
+        for user in users
+    )
+    db.commit()
+    aggregation_date = home_api.now.astimezone(get_seoul_tz()).date()
+    assert aggregate_popular_menus_for_kst_date(db, aggregation_date).published
+    token = session_token(db, users[0])
+    recent = home_api.client.get(RECENT_HOME_CARD_URL, headers={"Authorization": f"Bearer {token}"})
+    popular = home_api.client.get(POPULAR_MENUS_URL)
+    assert recent.status_code == popular.status_code == 200
+    assert popular.json()["data"]["source"] == "aggregated"
+    for response in (recent, popular):
+        item = response.json()["data"]["items"][0]
+        assert item["food_kind_id"] == udon.food_kind_id
+        assert item["image_url"] == "/static/menu-illustrations/udon.png"
+    assert home_api.client.get("/static/menu-illustrations/udon.png").status_code == 200
 
 
 def test_default_exception_food_codes_all_exist_under_spaghetti_in_meals_catalog_csv():

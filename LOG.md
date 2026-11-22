@@ -5,6 +5,35 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-22
 
+### #72 대표 메뉴 일러스트 136종 DB 경로 연결
+
+#### 변경 이유 및 내용
+
+- 현재 카탈로그의 메뉴 6,968건에서 사용하는 음식 종류 키 808개를 배포된 대표 일러스트 136종에 연결했다. 김치우동·백우동·치킨까스는 별도 음식 종류로 존재할 때도 해당 대표 그림을 사용한다.
+- 기존 `--sync-deployed`와 같은 동기화 함수를 사용하는 시드·마이그레이션에서, 파일이 있는 매핑을 기존 음식 종류에 등록한다. 수동 등록 경로는 기본 동작에서 보존한다.
+
+#### 주요 변경 파일
+
+- `data/menu_illustration_mappings.csv`, `app/menus/illustrations.py`, `scripts/register_menu_illustration.py`
+- `tests/test_ticket67_illustrations_and_exceptions.py`
+
+#### API 변경
+
+- 최근에 먹은 메뉴와 요즘 인기 메뉴의 `image_url`이 등록된 음식 종류의 그림을 반환한다. 응답 스키마와 공통 이미지 예외 규칙은 그대로 적용된다.
+
+#### DB 변경
+
+- `food_kinds.representative_image_url`의 데이터만 채운다. 기존 음식 종류 ID, 메뉴 연결 및 DB 스키마는 유지한다.
+
+#### 검증
+
+- 메뉴·홈 API 관련 테스트 98개 통과, 11개 건너뜀. 최근 메뉴와 실제 집계 인기 메뉴의 김치우동이 모두 `udon.png`를 반환했다.
+- 카탈로그 키를 넣은 격리 SQLite에서 `--sync-deployed` 첫 실행으로 808개 키를 등록했고, 대표 PNG 136종 모두 사용되었다. 재실행 시 갱신 0건을 확인했다.
+
+#### 남은 작업 및 주의 사항
+
+- 병합·배포 후 서버의 백엔드 루트에서 `python -m scripts.register_menu_illustration --sync-deployed`를 실행한다. 실행 결과의 집계 단위는 음식 종류 키다.
+
 ### #72 대표 메뉴 일러스트 PNG 정적 배포
 
 #### 변경 이유 및 내용

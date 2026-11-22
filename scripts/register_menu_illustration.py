@@ -1,4 +1,4 @@
-"""Operational CLI for inspecting, deploying, and registering food-kind menu illustrations (#68).
+"""Inspect, deploy, and register food-kind menu illustrations.
 
 Supports:
   --status
@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sync-deployed",
         action="store_true",
-        help="Sync food_kinds.representative_image_url for canonical illustration files currently deployed on disk.",
+        help="Sync food_kinds.representative_image_url for mapped illustration files currently deployed on disk.",
     )
     parser.add_argument(
         "--overwrite-existing",
