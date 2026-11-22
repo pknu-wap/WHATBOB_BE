@@ -3,6 +3,35 @@
 WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 최신 작업을 위에 추가하며, 기록 방법은 같은 디렉터리의 `AGENTS.md`를 따른다.
 
+## 2026-11-22
+
+### #72 대표 메뉴 일러스트 PNG 정적 배포
+
+#### 변경 이유 및 내용
+
+- 대표 메뉴 일러스트 136종을 50×45px 투명 PNG로 `app/static/menu-illustrations/`에 추가했다. 초기 인기 메뉴 8종의 파일명은 기존 등록 스크립트의 매핑과 일치한다.
+
+#### 주요 변경 파일
+
+- `app/static/menu-illustrations/*.png`
+
+#### API 변경
+
+- 기존 `/static/menu-illustrations/` 경로에서 PNG 136종을 제공한다. 홈 API 계약 변경은 없다.
+
+#### DB 변경
+
+- 스키마 변경 없음. `scripts.register_menu_illustration --sync-deployed`로 기존 `food_kinds.representative_image_url`에 초기 8종의 경로를 등록할 수 있다.
+
+#### 검증
+
+- PNG 136종의 크기, 알파 채널, 파일 무결성, 초기 8종 파일명을 확인했다. 실제 FastAPI 앱에서 136종 모두 HTTP 200과 `image/png`를 반환하고 응답 본문이 파일과 일치하는 것을 확인했다. 공통 SVG도 HTTP 200을 반환했다.
+- `python -m pytest -q tests/test_ticket67_illustrations_and_exceptions.py tests/test_ticket68_missing_illustration_registration.py` 결과 24 passed, 3 skipped. 격리 SQLite에서 초기 8종 경로 등록과 재실행 시 변경 0건을 확인했다.
+
+#### 남은 작업 및 주의 사항
+
+- 서버 배포 후 초기 8종의 대표 경로를 등록한다. 나머지 자산을 홈 API에서 사용하려면 음식 종류별 이미지 경로를 매핑하고 등록해야 한다.
+
 ## 2026-11-21
 
 ### #57 지도 API 리뷰 후 앱 라우터 병합 및 비객체 응답 처리 보강
