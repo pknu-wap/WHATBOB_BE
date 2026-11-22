@@ -1,4 +1,5 @@
 from collections.abc import Mapping, Sequence
+import csv
 from dataclasses import dataclass
 from enum import Enum
 import logging
@@ -23,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 MENU_ILLUSTRATIONS_URL_PREFIX = "/static/menu-illustrations/"
 MENU_ILLUSTRATIONS_SUBDIR = "menu-illustrations"
+MENU_ILLUSTRATION_MAPPINGS_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "menu_illustration_mappings.csv"
+)
 DEFAULT_NON_TOMATO_PASTA_EXCEPTION_REASON = (
     "대표 파스타(토마토 스파게티) 일러스트와 소스·외형이 크게 다른 메뉴"
 )
@@ -699,6 +703,20 @@ def inspect_food_kind_illustration_status(
     return statuses
 
 
+def load_food_kind_illustration_urls() -> dict[str, str]:
+    urls_by_key = {
+        spec.kind_key: spec.expected_image_url for spec in FOOD_KIND_ILLUSTRATION_SPECS
+    }
+    with MENU_ILLUSTRATION_MAPPINGS_PATH.open(encoding="utf-8", newline="") as source:
+        for row in csv.DictReader(source):
+            kind_key = row["kind_key"].strip()
+            if not kind_key or kind_key in urls_by_key:
+                raise ValueError(f"Invalid or duplicate illustration kind_key: {kind_key!r}")
+            filename = _validate_png_filename(row["filename"])
+            urls_by_key[kind_key] = f"{MENU_ILLUSTRATIONS_URL_PREFIX}{filename}"
+    return urls_by_key
+
+
 def sync_food_kind_representative_illustrations(
     db: Session,
     *,
@@ -707,27 +725,28 @@ def sync_food_kind_representative_illustrations(
     commit: bool = True,
 ) -> dict[str, int]:
     """정적 디렉터리에 실제로 배포된 대표 일러스트 파일만 food_kinds.representative_image_url에 반영한다."""
-    spec_keys = [spec.kind_key for spec in FOOD_KIND_ILLUSTRATION_SPECS]
+    urls_by_key = load_food_kind_illustration_urls()
     kinds_by_key = {
         fk.kind_key: fk
-        for fk in db.query(FoodKind).filter(FoodKind.kind_key.in_(spec_keys)).all()
+        for fk in db.query(FoodKind).filter(FoodKind.kind_key.in_(urls_by_key)).all()
     }
+    available_urls = set()
+    for image_url in set(urls_by_key.values()):
+        _, candidate = _resolve_static_url_or_raise(image_url, static_dir=static_dir)
+        if candidate.is_file():
+            available_urls.add(image_url)
 
     updated = 0
     already_registered = 0
     skipped_missing_file = 0
     skipped_missing_kind = 0
 
-    for spec in FOOD_KIND_ILLUSTRATION_SPECS:
-        _cleaned, candidate = _resolve_static_url_or_raise(
-            spec.expected_image_url,
-            static_dir=static_dir,
-        )
-        if not candidate.is_file():
+    for kind_key, image_url in urls_by_key.items():
+        if image_url not in available_urls:
             skipped_missing_file += 1
             continue
 
-        food_kind = kinds_by_key.get(spec.kind_key)
+        food_kind = kinds_by_key.get(kind_key)
         if food_kind is None:
             skipped_missing_kind += 1
             continue
@@ -737,8 +756,8 @@ def sync_food_kind_representative_illustrations(
             already_registered += 1
             continue
 
-        if current_url != spec.expected_image_url:
-            food_kind.representative_image_url = spec.expected_image_url
+        if current_url != image_url:
+            food_kind.representative_image_url = image_url
             updated += 1
         else:
             already_registered += 1
