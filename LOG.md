@@ -3,6 +3,36 @@
 WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 최신 작업을 위에 추가하며, 기록 방법은 같은 디렉터리의 `AGENTS.md`를 따른다.
 
+## 2026-11-23
+
+### #74 대표 메뉴 일러스트 PNG 136종 해상도(150×135px) 수정
+
+#### 변경 이유 및 내용
+
+- 홈의 최근에 먹은 메뉴와 요즘 인기 메뉴 카드에 사용하는 대표 일러스트 PNG 136종을 기존 50×45px에서 150×135px(10:9 비율, 투명 배경 RGBA 유지)로 리사이즈하여 교체했다.
+- `app/menus/illustrations.py`에 대표 일러스트 표준 크기 상수(`REPRESENTATIVE_ILLUSTRATION_WIDTH = 150`, `REPRESENTATIVE_ILLUSTRATION_HEIGHT = 135`)를 정의하고, 배포된 136종 PNG가 모두 150×135px와 알파 채널을 갖는지 검증하는 테스트를 추가했다.
+
+#### 주요 변경 파일
+
+- `app/static/menu-illustrations/*.png`
+- `app/menus/illustrations.py`, `tests/test_ticket67_illustrations_and_exceptions.py`, `LOG.md`
+
+#### API 변경
+
+- 없음. 정적 파일 경로(`/static/menu-illustrations/*.png`)와 홈 API 응답 스키마는 그대로 유지된다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- `python -m pytest -q tests/test_ticket67_illustrations_and_exceptions.py tests/test_ticket68_missing_illustration_registration.py`: 25 passed, 3 skipped. 배포된 대표 일러스트 PNG 136종 모두 `150×135px` 및 `RGBA`(알파 채널 포함)를 통과했다.
+
+#### 남은 작업 및 주의 사항
+
+- 없음.
+
 ## 2026-11-22
 
 ### #72 대표 메뉴 일러스트 136종 DB 경로 연결
