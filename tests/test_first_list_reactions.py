@@ -229,7 +229,7 @@ def test_feedback_retry_deduplicates_with_or_without_idempotency_key_and_allows_
     assert db.query(RecommendationFeedback).filter_by(recommendation_id=rec.id).count() == 1
     assert db.query(RecommendationFeedbackState).filter_by(recommendation_id=rec.id).count() == 1
 
-    # 4) 좋아요 -> 싫어요로 실제 변경하면 상태가 갱신되고 결과 분류도 바뀐다.
+    # 4) 최신 메뉴 평가는 바뀌지만 첫 목록 좋아요는 한 번이라도 눌렀으면 유지된다.
     r5 = record_recommendation_feedback(
         db=db,
         recommendation_id=rec.id,
@@ -243,10 +243,16 @@ def test_feedback_retry_deduplicates_with_or_without_idempotency_key_and_allows_
     assert db.query(RecommendationFeedbackState).filter_by(recommendation_id=rec.id).count() == 1
 
     outcome = classify_recommendation_outcome(db, rec.id)
-    assert outcome.outcome == OUTCOME_INDIVIDUAL_DISLIKED_ONLY
+    assert outcome.outcome == OUTCOME_FIRST_LIST_LIKED
     assert outcome.menu_reaction_count == 1
     assert outcome.liked_menu_count == 0
     assert outcome.disliked_menu_count == 1
+    assert outcome.first_liked_exposure_rank == 1
+    reject_recommendation_list(db=db, recommendation_id=rec.id, user_id=user.id)
+    summary = summarize_first_list_reactions(db, recommendation_ids=[rec.id])
+    assert summary.first_list_liked_count == 1
+    assert summary.list_rejected_count == 1
+    assert summary.explicit_reaction_count == 1
 
     # 5) user_id=None 인 추천에서도 동일 클릭 재전송이 중복 기록되지 않는다.
     anon_rec = Recommendation(

@@ -471,7 +471,7 @@ def _collect_effective_reactions_for_recommendation(
     rec: Recommendation,
     *,
     cutoff_utc: datetime | None = None,
-) -> list[MenuReactionRecord]:
+) -> tuple[list[MenuReactionRecord], list[RecommendationFeedback]]:
     raw_feedbacks = (
         db.query(RecommendationFeedback)
         .filter(RecommendationFeedback.recommendation_id == rec.id)
@@ -507,7 +507,7 @@ def _collect_effective_reactions_for_recommendation(
                     reacted_at=st.updated_at or st.created_at,
                 )
                 for st in states
-            ]
+            ], raw_feedbacks
 
     latest_by_key: dict[str, RecommendationFeedback] = {}
     for fb in raw_feedbacks:
@@ -528,13 +528,14 @@ def _collect_effective_reactions_for_recommendation(
             reacted_at=fb.created_at,
         )
         for key, fb in latest_by_key.items()
-    ]
+    ], raw_feedbacks
 
 
 def _build_outcome_from_loaded(
     rec: Recommendation,
     reactions: list[MenuReactionRecord],
     *,
+    raw_feedbacks: list[RecommendationFeedback],
     cutoff_utc: datetime | None = None,
 ) -> RecommendationReactionOutcome:
     shown_ids = _shown_menu_ids(rec)
@@ -543,6 +544,8 @@ def _build_outcome_from_loaded(
 
     liked = [r for r in effective_reactions if r.is_satisfied]
     disliked = [r for r in effective_reactions if not r.is_satisfied]
+    like_events = [feedback for feedback in raw_feedbacks if feedback.is_satisfied]
+    first_list_liked = not is_zero and bool(liked or like_events)
 
     rejected_at = rec.list_rejected_at
     if rejected_at is not None and cutoff_utc is not None:
@@ -551,7 +554,7 @@ def _build_outcome_from_loaded(
 
     if is_zero:
         outcome = OUTCOME_ZERO_CANDIDATES
-    elif liked:
+    elif first_list_liked:
         outcome = OUTCOME_FIRST_LIST_LIKED
     elif rejected_at is not None:
         outcome = OUTCOME_LIST_REJECTED
@@ -561,21 +564,26 @@ def _build_outcome_from_loaded(
         outcome = OUTCOME_NO_RESPONSE
 
     liked_ranks = [r.exposure_rank for r in liked if r.exposure_rank is not None]
+    liked_ranks.extend(
+        rank
+        for feedback in like_events
+        if (rank := feedback.exposure_rank or _resolve_exposure_rank(rec, feedback.selected_menu_id)) is not None
+    )
     return RecommendationReactionOutcome(
         recommendation_id=rec.id,
         outcome=outcome,
         shown_menu_ids=shown_ids,
         shown_count=len(shown_ids),
         is_zero_candidates=is_zero,
-        is_first_list_liked=(outcome == OUTCOME_FIRST_LIST_LIKED),
-        is_list_rejected=(outcome == OUTCOME_LIST_REJECTED),
+        is_first_list_liked=first_list_liked,
+        is_list_rejected=not is_zero and rejected_at is not None,
         is_closed=(rec.closed_at is not None),
         list_rejected_at=rejected_at,
         closed_at=rec.closed_at,
         menu_reaction_count=len(effective_reactions),
         liked_menu_count=len(liked),
         disliked_menu_count=len(disliked),
-        first_liked_exposure_rank=min(liked_ranks) if liked_ranks else None,
+        first_liked_exposure_rank=min(liked_ranks) if first_list_liked and liked_ranks else None,
         reactions=effective_reactions,
     )
 
@@ -594,12 +602,12 @@ def classify_recommendation_outcome(
     if reaction_window_hours is not None and rec.created_at is not None:
         cutoff_utc = as_utc_naive(rec.created_at) + timedelta(hours=float(reaction_window_hours))
 
-    reactions = (
-        []
+    reactions, raw_feedbacks = (
+        ([], [])
         if _is_zero_candidates_recommendation(rec)
         else _collect_effective_reactions_for_recommendation(db, rec, cutoff_utc=cutoff_utc)
     )
-    return _build_outcome_from_loaded(rec, reactions, cutoff_utc=cutoff_utc)
+    return _build_outcome_from_loaded(rec, reactions, raw_feedbacks=raw_feedbacks, cutoff_utc=cutoff_utc)
 
 
 def summarize_first_list_reactions(
@@ -664,19 +672,13 @@ def summarize_first_list_reactions(
             states_by_rec.setdefault(int(st.recommendation_id), []).append(st)
 
     feedbacks_by_rec: dict[int, list[RecommendationFeedback]] = {}
-    missing_state_rec_ids = (
-        rec_ids
-        if reaction_window_hours is not None
-        else [rid for rid in rec_ids if rid not in states_by_rec]
-    )
-    if missing_state_rec_ids:
-        for fb in (
-            db.query(RecommendationFeedback)
-            .filter(RecommendationFeedback.recommendation_id.in_(missing_state_rec_ids))
-            .order_by(RecommendationFeedback.id.asc())
-            .all()
-        ):
-            feedbacks_by_rec.setdefault(int(fb.recommendation_id), []).append(fb)
+    for fb in (
+        db.query(RecommendationFeedback)
+        .filter(RecommendationFeedback.recommendation_id.in_(rec_ids))
+        .order_by(RecommendationFeedback.id.asc())
+        .all()
+    ):
+        feedbacks_by_rec.setdefault(int(fb.recommendation_id), []).append(fb)
 
     outcomes: list[RecommendationReactionOutcome] = []
     for rec in recs:
@@ -684,6 +686,12 @@ def summarize_first_list_reactions(
         if reaction_window_hours is not None and rec.created_at is not None:
             cutoff_utc = as_utc_naive(rec.created_at) + timedelta(hours=float(reaction_window_hours))
 
+        raw_fbs = feedbacks_by_rec.get(rec.id, [])
+        if cutoff_utc is not None:
+            raw_fbs = [
+                fb for fb in raw_fbs
+                if fb.created_at is not None and as_utc_naive(fb.created_at) <= cutoff_utc
+            ]
         if _is_zero_candidates_recommendation(rec):
             reactions: list[MenuReactionRecord] = []
         elif reaction_window_hours is None and rec.id in states_by_rec:
@@ -703,13 +711,6 @@ def summarize_first_list_reactions(
                 for st in states_by_rec[rec.id]
             ]
         else:
-            raw_fbs = feedbacks_by_rec.get(rec.id, [])
-            if cutoff_utc is not None:
-                cutoff_naive = as_utc_naive(cutoff_utc)
-                raw_fbs = [
-                    fb for fb in raw_fbs
-                    if fb.created_at is not None and as_utc_naive(fb.created_at) <= cutoff_naive
-                ]
             latest_by_key: dict[str, RecommendationFeedback] = {}
             for fb in raw_fbs:
                 key = fb.menu_key or (
@@ -732,11 +733,11 @@ def summarize_first_list_reactions(
                 for key, fb in latest_by_key.items()
             ]
 
-        outcomes.append(_build_outcome_from_loaded(rec, reactions, cutoff_utc=cutoff_utc))
+        outcomes.append(_build_outcome_from_loaded(rec, reactions, raw_feedbacks=raw_fbs, cutoff_utc=cutoff_utc))
 
     zero_cnt = sum(1 for o in outcomes if o.outcome == OUTCOME_ZERO_CANDIDATES)
-    liked_cnt = sum(1 for o in outcomes if o.outcome == OUTCOME_FIRST_LIST_LIKED)
-    rejected_cnt = sum(1 for o in outcomes if o.outcome == OUTCOME_LIST_REJECTED)
+    liked_cnt = sum(o.is_first_list_liked for o in outcomes)
+    rejected_cnt = sum(o.is_list_rejected for o in outcomes)
     disliked_only_cnt = sum(1 for o in outcomes if o.outcome == OUTCOME_INDIVIDUAL_DISLIKED_ONLY)
     no_resp_cnt = sum(1 for o in outcomes if o.outcome == OUTCOME_NO_RESPONSE)
 
@@ -748,7 +749,7 @@ def summarize_first_list_reactions(
         list_rejected_count=rejected_cnt,
         individual_disliked_only_count=disliked_only_cnt,
         no_response_count=no_resp_cnt,
-        explicit_reaction_count=liked_cnt + rejected_cnt,
+        explicit_reaction_count=sum(o.is_first_list_liked or o.is_list_rejected for o in outcomes),
         total_menu_reaction_count=sum(o.menu_reaction_count for o in outcomes),
         total_liked_menu_count=sum(o.liked_menu_count for o in outcomes),
         total_disliked_menu_count=sum(o.disliked_menu_count for o in outcomes),
