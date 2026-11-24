@@ -21,7 +21,12 @@ from sqlalchemy.orm import Session
 
 from app.auth.sessions import as_utc_naive, utc_now
 from app.core.config import settings
-from app.menus.models import OrderSheetReplaySnapshot, Recommendation
+from app.menus.models import (
+    PERSONAL_INITIAL_LIST,
+    OrderSheetIssuance,
+    OrderSheetReplaySnapshot,
+    Recommendation,
+)
 from app.recommend.ranking import OrderSheetEvaluationResult, RankedCandidate
 from app.rooms.models import RoomRoundMember
 
@@ -334,6 +339,7 @@ def verify_and_load_recent_replay_snapshots(
     now: datetime | None = None,
     window_days: int | None = None,
     max_sheets: int | None = None,
+    initial_personal_only: bool = False,
 ) -> ReplayLoadBatchResult:
     """Verify recent first lists and replay them with each score question omitted."""
     effective_window_days = (
@@ -344,6 +350,14 @@ def verify_and_load_recent_replay_snapshots(
     )
     now_naive = as_utc_naive(now) if now is not None else utc_now()
     cutoff = now_naive - timedelta(days=effective_window_days)
+    scope_filter = (
+        initial_personal_list_filter()
+        if initial_personal_only
+        else or_(
+            Recommendation.order_sheet_list_scope.is_(None),
+            Recommendation.order_sheet_list_scope == PERSONAL_INITIAL_LIST,
+        )
+    )
 
     snapshot_refs = (
         db.query(
@@ -358,6 +372,7 @@ def verify_and_load_recent_replay_snapshots(
             OrderSheetReplaySnapshot.completed_at <= now_naive,
             OrderSheetReplaySnapshot.expires_at > now_naive,
             Recommendation.initial_candidate_count >= 2,
+            scope_filter,
         )
         .order_by(
             OrderSheetReplaySnapshot.completed_at.desc(),
@@ -379,6 +394,7 @@ def verify_and_load_recent_replay_snapshots(
             Recommendation.created_at >= cutoff,
             Recommendation.created_at <= now_naive,
             Recommendation.initial_candidate_count >= 2,
+            scope_filter,
             ~has_snapshot,
             ~is_group_recommendation,
         )
@@ -464,6 +480,24 @@ def verify_and_load_recent_replay_snapshots(
         max_sheets=effective_max_sheets,
         verified_sheets=verified_sheets,
         excluded_sheets=excluded_sheets,
+    )
+
+
+def initial_personal_list_filter():
+    """Recognize first personal lists with explicit scope or legacy personal issuance evidence."""
+    completed_issuance = (
+        OrderSheetIssuance.__table__.select()
+        .where(
+            OrderSheetIssuance.recommendation_id == Recommendation.id,
+            OrderSheetIssuance.user_id == Recommendation.user_id,
+            OrderSheetIssuance.status == "COMPLETED",
+            OrderSheetIssuance.completed_at.is_not(None),
+        )
+        .exists()
+    )
+    return or_(
+        Recommendation.order_sheet_list_scope == PERSONAL_INITIAL_LIST,
+        Recommendation.order_sheet_list_scope.is_(None) & completed_issuance,
     )
 
 

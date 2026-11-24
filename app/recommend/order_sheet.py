@@ -20,6 +20,9 @@ from app.core.config import settings
 from app.menus.display import format_menu_name
 from app.menus.food_kinds import classify_food_kind
 from app.menus.models import (
+    GROUP_ORDER_SHEET_LIST,
+    PERSONAL_INITIAL_LIST,
+    PERSONAL_RETRY_LIST,
     Menu,
     OrderSheetIssuance,
     OrderSheetQuestion,
@@ -1032,12 +1035,24 @@ def create_order_sheet_recommendation(
         {"question_id": q.id, "option_id": opt["option_id"]}
         for q, opt in validated_answers
     ]
+    completes_issuance = (
+        issuance is not None
+        and issuance.recommendation_id is None
+        and set(issuance.question_ids_json).issubset(submitted_q_ids)
+    )
+    list_scope = PERSONAL_INITIAL_LIST
+    if fixed_exclusion_keywords is not None:
+        list_scope = GROUP_ORDER_SHEET_LIST
+    elif issuance is not None and not completes_issuance:
+        list_scope = PERSONAL_RETRY_LIST
+
     rec_record = Recommendation(
         user_id=effective_user_id,
         shown_question_ids=submitted_q_ids,
         answers_json=answers_payload,
         recommended_menu_ids=[d.menu.id for d in top_details],
         initial_candidate_count=surviving_kind_count,
+        order_sheet_list_scope=list_scope,
     )
     db.add(rec_record)
     db.flush()
@@ -1050,7 +1065,7 @@ def create_order_sheet_recommendation(
         created_at=now,
     )
 
-    if issuance is not None and issuance.recommendation_id is None:
+    if completes_issuance:
         issuance.recommendation_id = rec_record.id
         issuance.completed_at = now
         issuance.status = "COMPLETED"
@@ -1060,7 +1075,7 @@ def create_order_sheet_recommendation(
         if record_replay_snapshot is not None
         else (fixed_exclusion_keywords is None)
     )
-    if should_record_replay:
+    if should_record_replay and list_scope == PERSONAL_INITIAL_LIST:
         save_replay_snapshot_if_eligible(
             db=db,
             recommendation=rec_record,
