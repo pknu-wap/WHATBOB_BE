@@ -33,6 +33,8 @@ from app.menus.illustrations import (
     FOOD_KIND_ILLUSTRATION_SPECS,
     MISSING_ILLUSTRATION_KIND_KEYS_FOR_ISSUE68,
     PENDING_VERIFICATION_ILLUSTRATION_KIND_KEYS,
+    REPRESENTATIVE_ILLUSTRATION_HEIGHT,
+    REPRESENTATIVE_ILLUSTRATION_WIDTH,
     REUSABLE_ILLUSTRATION_KIND_KEYS,
     FoodKindNotFoundException,
     IllustrationAuditStatus,
@@ -41,6 +43,7 @@ from app.menus.illustrations import (
     register_food_kind_illustration,
     seed_menu_illustration_exceptions,
     sync_food_kind_representative_illustrations,
+    validate_menu_illustration_png,
 )
 from app.menus.models import FoodKind, Menu, MenuIllustrationException, UserMeal
 from app.menus.popular import (
@@ -784,6 +787,13 @@ def test_catalog_illustration_sync_registers_all_136_images_and_preserves_food_k
         for file in (STATIC_DIR / "menu-illustrations").glob("*.png")
     }
     assert len(expected_urls) == 136
+    for png_file in (STATIC_DIR / "menu-illustrations").glob("*.png"):
+        asset = validate_menu_illustration_png(png_file)
+        assert (asset.width, asset.height) == (
+            REPRESENTATIVE_ILLUSTRATION_WIDTH,
+            REPRESENTATIVE_ILLUSTRATION_HEIGHT,
+        )
+        assert asset.has_alpha is True
     assert {kind.representative_image_url for kind in kinds.values()} == expected_urls
     for key, filename in examples.items():
         assert kinds[key].representative_image_url == f"/static/menu-illustrations/{filename}"

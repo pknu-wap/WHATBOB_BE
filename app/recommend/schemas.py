@@ -147,6 +147,27 @@ class OrderSheetRecommendResponse(BaseModel):
     candidate_count: int
 
 
+class SuggestedAnswerChangeDTO(BaseModel):
+    question_id: int = Field(description="변경을 제안하는 질문 ID")
+    replacement_option_id: str = Field(description="대체할 중립 선택지 ID (예: any)")
+    display_text: str = Field(description="사용자에게 보여줄 변경 제안 안내 문구")
+    display_menu_count: int = Field(
+        ge=1,
+        description="해당 답변만 변경했을 때 표시할 수 있는 음식 종류 수 (최대 5)",
+    )
+
+
+class OrderSheetNoResultsResponse(BaseModel):
+    suggested_answer_changes: list[SuggestedAnswerChangeDTO] = Field(
+        default_factory=list,
+        description="실제 후보가 생기는 단일 하드필터 변경 제안 목록 (표시 가능 수 내림차순)",
+    )
+    can_review_my_answers: bool = Field(
+        default=True,
+        description="기존 답변이 채워진 '내 답변 다시 보기' 제공 가능 여부",
+    )
+
+
 class RandomMenuDTO(BaseModel):
     menu_id: int
     food_code: str

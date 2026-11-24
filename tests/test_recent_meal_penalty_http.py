@@ -15,13 +15,8 @@ from app.auth.dependencies import get_current_user
 from app.core.config import settings
 from app.core.database import Base, get_db
 from app.main import handle_recommendation_domain_exception
-from app.menus.models import (
-    Menu,
-    OrderSheetQuestion,
-    RecommendationItemSnapshot,
-    UserMeal,
-)
-from app.menus.popular import get_seoul_tz
+from app.menus.models import Menu, OrderSheetQuestion, UserMeal
+from app.recommend import order_sheet
 from app.recommend.common import RecommendationDomainException
 from app.recommend.question_pool import build_candidate_question_pool
 from app.recommend.router import router
@@ -107,22 +102,28 @@ def _add_menu(
     return menu
 
 
+KST_MIDNIGHT_UTC = datetime(2026, 11, 23, 15, 0)
+
+
+@pytest.fixture(autouse=True)
+def freeze_recommendation_time(monkeypatch):
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            instant = (KST_MIDNIGHT_UTC + timedelta(seconds=1)).replace(tzinfo=timezone.utc)
+            return instant.astimezone(tz) if tz else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr(order_sheet, "datetime", FrozenDateTime)
+
+
 def _kst_days_ago_utc_naive(days_ago: int) -> datetime:
-    """현재 한국 날짜(KST) 기준 정확히 days_ago일 전의 안전한 UTC naive 시각을 반환한다."""
-    kst = get_seoul_tz()
-    now_kst = datetime.now(timezone.utc).astimezone(kst)
-    target_date = now_kst.date() - timedelta(days=days_ago)
-    if days_ago == 0:
-        # 당일 00:00:00 KST는 항상 오늘 날짜이면서 now_kst 이하이다.
-        dt_kst = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=kst)
-    else:
-        dt_kst = datetime(target_date.year, target_date.month, target_date.day, 12, 0, 0, tzinfo=kst)
-    return dt_kst.astimezone(timezone.utc).replace(tzinfo=None)
+    return KST_MIDNIGHT_UTC - timedelta(days=days_ago)
 
 
 def test_http_order_sheet_day_decay_and_cumulative_same_menu_penalty(db: Session):
     user = User(kakao_id=821001, nickname="HTTP감점테스터")
-    db.add(user)
+    other_user = User(kakao_id=821099, nickname="다른사용자")
+    db.add_all([user, other_user])
     q_map = _seed_questions(db)
 
     # 5종 모두 동일한 점수(rule_score=6.0)를 받도록 설정해 최근 식사 감점 차이가 순위를 결정하도록 한다.
@@ -135,7 +136,7 @@ def test_http_order_sheet_day_decay_and_cumulative_same_menu_penalty(db: Session
     db.add_all([
         # 제육덮밥: 오늘(-2.0) + 어제(-1.0) = -3.0
         UserMeal(user_id=user.id, menu_id=m_today_and_yest.id, menu_name="제육덮밥", eaten_at=_kst_days_ago_utc_naive(0)),
-        UserMeal(user_id=user.id, menu_id=m_today_and_yest.id, menu_name="제육덮밥", eaten_at=_kst_days_ago_utc_naive(1)),
+        UserMeal(user_id=user.id, menu_id=m_today_and_yest.id, menu_name="제육덮밥", eaten_at=KST_MIDNIGHT_UTC - timedelta(seconds=1)),
         # 김치볶음밥: 오늘(-2.0)
         UserMeal(user_id=user.id, menu_id=m_today.id, menu_name="김치볶음밥", eaten_at=_kst_days_ago_utc_naive(0)),
         # 오므라이스: 어제(-1.0)
@@ -144,6 +145,8 @@ def test_http_order_sheet_day_decay_and_cumulative_same_menu_penalty(db: Session
         UserMeal(user_id=user.id, menu_id=m_two_days.id, menu_name="카레라이스", eaten_at=_kst_days_ago_utc_naive(2)),
         # 비빔밥: 3일 전(0.0)
         UserMeal(user_id=user.id, menu_id=m_three_days.id, menu_name="비빔밥", eaten_at=_kst_days_ago_utc_naive(3)),
+        UserMeal(user_id=other_user.id, menu_id=m_three_days.id, menu_name="비빔밥", eaten_at=KST_MIDNIGHT_UTC),
+        UserMeal(user_id=user.id, menu_id=m_three_days.id, menu_name="비빔밥", eaten_at=KST_MIDNIGHT_UTC + timedelta(seconds=2)),
     ])
     db.commit()
 
@@ -175,19 +178,47 @@ def test_http_order_sheet_day_decay_and_cumulative_same_menu_penalty(db: Session
             "P01",
         ]
 
-        snaps = (
-            db.query(RecommendationItemSnapshot)
-            .filter(RecommendationItemSnapshot.recommendation_id == data["recommendation_id"])
-            .order_by(RecommendationItemSnapshot.rank_position.asc())
-            .all()
+
+@pytest.mark.parametrize(
+    ("days_ago", "expected_penalty"),
+    [
+        ((0,), 2.0),
+        ((1,), 1.0),
+        ((2,), 0.5),
+        ((0, 0, 1, 2), 5.5),
+    ],
+)
+def test_http_penalty_offsets_the_exact_number_of_answer_points(
+    db: Session,
+    monkeypatch,
+    days_ago: tuple[int, ...],
+    expected_penalty: float,
+):
+    user = User(kakao_id=821003, nickname="점수테스터")
+    db.add(user)
+    questions = _seed_questions(db)
+    recorded = _add_menu(db, food_code="A01", name="김치볶음밥", base_name="김치볶음밥", heaviness="heavy")
+    _add_menu(db, food_code="A02", name="비빔밥", base_name="비빔밥")
+    db.add_all([
+        UserMeal(
+            user_id=user.id,
+            menu_id=recorded.id,
+            menu_name=recorded.name,
+            eaten_at=_kst_days_ago_utc_naive(day),
         )
-        assert [(s.menu_id, s.recent_meal_adjustment, s.final_score) for s in snaps] == [
-            (m_three_days.id, 0.0, 6.0),
-            (m_two_days.id, -0.5, 5.5),
-            (m_yesterday.id, -1.0, 5.0),
-            (m_today.id, -2.0, 4.0),
-            (m_today_and_yest.id, -3.0, 3.0),
-        ]
+        for day in days_ago
+    ])
+    db.commit()
+    answers = [
+        {"question_id": question.id, "option_id": "filling" if cluster == "heaviness" else "any"}
+        for cluster, question in questions.items()
+    ]
+    with _make_client(db, user) as client:
+        for points, expected in [(expected_penalty, ["A01", "A02"]), (expected_penalty - 0.01, ["A02", "A01"])]:
+            monkeypatch.setattr(settings, "ORDER_SHEET_SCORE_WEIGHTS", {"heaviness": points})
+            response = client.post("/api/recommendations/order-sheet", json={"answers": answers})
+            assert response.status_code == 201
+            assert [menu["food_code"] for menu in response.json()["data"]["recommended_menus"]] == expected
 
 
 def test_http_order_sheet_donkatsu_and_fried_rice_scope_plus_preference_priority_and_settings_override(
@@ -205,13 +236,13 @@ def test_http_order_sheet_donkatsu_and_fried_rice_scope_plus_preference_priority
         sodium_mg=200.0, heaviness="light", flavor_intensity="spicy_bold",
         origin_type="home_style", carb_g=10.0, protein_g=20.0,
     )
-    chicken_katsu = _add_menu(
+    _add_menu(
         db, food_code="D02", name="치킨까스", base_name="치킨까스",
         cooking_style="fried_pan", main_ingredient="poultry",
         sodium_mg=200.0, heaviness="light", flavor_intensity="spicy_bold",
         origin_type="home_style", carb_g=10.0, protein_g=20.0,
     )
-    chicken = _add_menu(
+    _add_menu(
         db, food_code="D03", name="치킨", base_name="치킨",
         cooking_style="fried_pan", main_ingredient="poultry",
         sodium_mg=700.0, heaviness="heavy", flavor_intensity="mild_clean",
@@ -235,6 +266,7 @@ def test_http_order_sheet_donkatsu_and_fried_rice_scope_plus_preference_priority
     db.add_all([
         UserMeal(user_id=user.id, menu_id=donkatsu.id, menu_name="돈까스", eaten_at=_kst_days_ago_utc_naive(1)),
         UserMeal(user_id=user.id, menu_id=kimchi_fried_rice.id, menu_name="김치볶음밥", eaten_at=_kst_days_ago_utc_naive(1)),
+        UserMeal(user_id=user.id, menu_id=None, menu_name=shrimp_fried_rice.name, eaten_at=_kst_days_ago_utc_naive(1)),
     ])
     db.commit()
 
@@ -262,18 +294,6 @@ def test_http_order_sheet_donkatsu_and_fried_rice_scope_plus_preference_priority
         assert res_katsu.status_code == 201
         katsu_data = res_katsu.json()["data"]
         assert [m["food_code"] for m in katsu_data["recommended_menus"]] == ["D02", "D01", "D03"]
-        katsu_snaps = {
-            s.menu_id: s.recent_meal_adjustment
-            for s in db.query(RecommendationItemSnapshot)
-            .filter(RecommendationItemSnapshot.recommendation_id == katsu_data["recommendation_id"])
-            .all()
-        }
-        assert katsu_snaps == {
-            chicken_katsu.id: 0.0,
-            donkatsu.id: -1.0,
-            chicken.id: 0.0,
-        }
-
         # 2) 김치볶음밥 어제 식사 후 볶음밥(밥) 요청 -> 새우볶음밥은 감점 0.0으로 대표 선정
         res_rice = client.post(
             "/api/recommendations/order-sheet",
@@ -295,14 +315,6 @@ def test_http_order_sheet_donkatsu_and_fried_rice_scope_plus_preference_priority
         assert res_rice.status_code == 201
         rice_data = res_rice.json()["data"]
         assert [m["food_code"] for m in rice_data["recommended_menus"]] == ["F02"]
-        rice_snap = (
-            db.query(RecommendationItemSnapshot)
-            .filter(RecommendationItemSnapshot.recommendation_id == rice_data["recommendation_id"])
-            .one()
-        )
-        assert rice_snap.menu_id == shrimp_fried_rice.id
-        assert rice_snap.recent_meal_adjustment == 0.0
-
         # 3) 서버 설정으로 next_day 감점을 0.0으로 바꾸면 기존 food_code 순(F01 김치볶음밥)으로 복원된다
         monkeypatch.setattr(settings, "ORDER_SHEET_RECENT_MEAL_PENALTY_NEXT_DAY", 0.0)
         res_rice_no_penalty = client.post(

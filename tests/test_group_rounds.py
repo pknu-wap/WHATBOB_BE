@@ -23,6 +23,7 @@ from app.menus.models import (
     Recommendation,
     RecommendationItemSnapshot,
     UserFoodExclusion,
+    UserMeal,
 )
 from app.recommend.question_pool import build_candidate_question_pool
 from app.rooms.models import (
@@ -316,6 +317,38 @@ def test_t02_fail_fast_when_shared_exclusions_eliminate_all_menus():
     assert detail["status"] == "WAITING"
     assert detail["current_round"]["status"] == "CANCELLED"
     assert detail["current_round"]["cancel_reason"] == "NO_AVAILABLE_MENUS"
+
+
+def test_room_order_sheet_recent_meal_affects_only_the_participant_who_recorded_it():
+    _, db, users, menus, room_id, as_user = build_group_env(member_count=2)
+    host, member = users
+    first, second = menus[:2]
+    db.add(UserMeal(
+        user_id=host.id,
+        menu_id=first.id,
+        menu_name=first.name,
+        eaten_at=utcnow() - timedelta(days=1),
+    ))
+    db.commit()
+    assert as_user(host).post(f"/api/rooms/{room_id}/rounds/start").status_code == 200
+
+    endpoint = f"/api/rooms/{room_id}/rounds/current"
+    for user in users:
+        response = as_user(user).get(f"{endpoint}/questions")
+        assert response.status_code == 200
+        answers = [
+            {"question_id": question["id"], "option_id": "any"}
+            for question in response.json()["questions"]
+        ]
+        submission = as_user(user).post(f"{endpoint}/order-sheet", json={"answers": answers})
+        assert submission.status_code == 200
+
+    round_state = submission.json()["common_state"]["current_round"]
+    assert round_state["status"] == "VOTING"
+    assert {item["menu_id"]: item["proposer_user_ids"] for item in round_state["candidates"]} == {
+        first.id: [member.id],
+        second.id: [host.id],
+    }
 
 
 def test_t03_d20_and_t04_full_journey_with_cumulative_recommendations_and_co_winners():
