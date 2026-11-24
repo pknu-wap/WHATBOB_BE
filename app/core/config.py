@@ -52,6 +52,9 @@ class Settings(BaseSettings):
         "protein_level",
     )
     ORDER_SHEET_QUESTION_ROLE_OVERRIDES: dict[int, str] = Field(default_factory=dict)
+    ORDER_SHEET_DEFAULT_SCORE_WEIGHT: float = Field(default=1.0, ge=0.0)
+    ORDER_SHEET_SCORE_WEIGHTS: dict[str, float] = Field(default_factory=dict)
+    ORDER_SHEET_RANKING_RULE_VERSION: str = "spec77_v1"
     TRANSITION_PREPARE_COOKIE_NAME: str = Field(
         default="__Secure-whatbob_transition",
         pattern=r"^__Secure-[A-Za-z0-9_-]+$",

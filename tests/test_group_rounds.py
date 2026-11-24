@@ -199,10 +199,25 @@ def build_group_env(member_count: int = 3):
 
 
 def build_answers_for_questions(questions: list[dict], prefer_index: int = 0) -> list[dict]:
+    # Spec #77 (#81): 하드필터(Q3 국물·Q8 밥/면/그 외·Q9 고기)는 자동 완화 없이 엄격 적용되므로
+    # 테스트 시드 메뉴(M001 김치찌개 / M002 연어초밥 / M003 소고기쌀국수)와 모순되지 않는 조합을 선택한다.
+    hard_filter_profiles = (
+        {"has_soup": "soup_yes", "cooking_style": "other_style", "main_ingredient": "meat"},
+        {"has_soup": "soup_no", "cooking_style": "rice", "main_ingredient": "non_meat"},
+        {"has_soup": "soup_yes", "cooking_style": "noodle", "main_ingredient": "meat"},
+    )
+    profile = hard_filter_profiles[prefer_index % len(hard_filter_profiles)]
     answers = []
     for q in questions:
         opts = q["options"]
-        chosen = opts[prefer_index % len(opts)]["option_id"]
+        cluster = q.get("cluster_key")
+        preferred_opt_id = profile.get(cluster)
+        if preferred_opt_id and any(opt["option_id"] == preferred_opt_id for opt in opts):
+            chosen = preferred_opt_id
+        else:
+            non_any_opts = [opt for opt in opts if opt["option_id"] != "any"]
+            pool = non_any_opts or opts
+            chosen = pool[prefer_index % len(pool)]["option_id"]
         answers.append({"question_id": q["id"], "option_id": chosen})
     return answers
 
