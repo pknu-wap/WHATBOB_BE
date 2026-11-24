@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Generic, Optional, TypeVar
 from pydantic import BaseModel, ConfigDict, Field
 from app.recommend.question_pool import MAX_QUESTION_TEXT_LENGTH, QUESTION_OPTION_COUNT
@@ -164,6 +165,17 @@ class RecommendationFeedbackResponse(BaseModel):
     recommendation_id: int
     is_satisfied: bool
     updated_weights: dict[str, float]
+    selected_menu_id: Optional[int] = None
+    exposure_rank: Optional[int] = None
+
+
+class RecommendationRejectResponse(BaseModel):
+    recommendation_id: int
+    is_list_rejected: bool = True
+    is_closed: bool = True
+    list_rejected_at: datetime
+    closed_at: datetime
+    outcome: str
 
 
 class WeightAdjustmentItem(BaseModel):
