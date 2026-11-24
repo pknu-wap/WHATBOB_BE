@@ -526,6 +526,7 @@ def select_order_sheet_questions(
     user_id: int | None = None,
     exclusion_keywords: set[str] | list[str] | None = None,
     available_menus: list[Menu] | None = None,
+    fill_question_count: bool = False,
     commit: bool = True,
 ) -> OrderSheetQuestionsResponse:
     """
@@ -535,6 +536,7 @@ def select_order_sheet_questions(
     - exploitation_count 미지정 시 Spec #77 기본 9개 주제(Q1~Q9)를 우선 채우고,
       빈자리는 남은 후보를 잘 구분하는 상위 후보(종류별 1/N 엔트로피·커버리지 순)로 채운다.
     - available_menus를 전달하는 호출자는 동일한 제외 조건을 적용한 메뉴를 재사용한다.
+    - fill_question_count는 유효 주제가 부족한 방 주문서의 빈자리를 적합한 주제로 채운다.
     - commit=False 인 경우 상위 트랜잭션을 조기 커밋하지 않고 flush 만 수행한다.
     """
     target_total = (
@@ -635,7 +637,7 @@ def select_order_sheet_questions(
                 selected_exploit.append(q)
                 used_axes.update(axes)
 
-        if len(selected_exploit) < target_total:
+        if fill_question_count and len(selected_exploit) < target_total:
             # 카탈로그가 작을 때에도 적합하고 주제가 다른 문항을 우선순위대로 채운다.
             initial_order = {
                 cluster: index for index, cluster in enumerate(settings.ORDER_SHEET_INITIAL_CLUSTERS)

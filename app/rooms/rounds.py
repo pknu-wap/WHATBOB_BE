@@ -605,6 +605,7 @@ def start_room_round(
                     scope_key=f"user:{m.user_id}",
                     exclusion_keywords=shared_exclusions_set,
                     available_menus=available_menus,
+                    fill_question_count=True,
                     commit=False,
                 )
             except QuestionPoolEmptyException as exc:
