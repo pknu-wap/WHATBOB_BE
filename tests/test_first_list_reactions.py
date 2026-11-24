@@ -5,6 +5,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.auth.sessions import create_uuid_user, utc_now
+from app.auth.transitions import _merge_uuid_user_into_kakao_target
 from app.core.database import Base
 from app.menus.models import (
     Menu,
@@ -519,9 +521,6 @@ def test_summarize_first_list_reactions_distinguishes_all_five_outcomes_and_reac
 
 
 def test_uuid_to_kakao_transition_preserves_exposure_rank_food_kind_and_list_rejection(db):
-    from app.auth.sessions import create_uuid_user, utc_now
-    from app.auth.transitions import _merge_uuid_user_into_kakao_target
-
     origin_user = create_uuid_user(db)
     db.flush()
 
