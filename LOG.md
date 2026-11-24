@@ -3,6 +3,97 @@
 WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 최신 작업을 위에 추가하며, 기록 방법은 같은 디렉터리의 `AGENTS.md`를 따른다.
 
+## 2026-11-24
+
+### #58 떡볶이·라볶이 국물 분류 및 달콤·순한 떡볶이 맛 분류 정정
+
+#### 변경 이유 및 내용
+
+- 14번째 주문서 실험(`떡볶이`)에서 `국물떡볶이`를 포함한 `떡볶이`·`라볶이` 43건 전체가 `has_soup=False`이고, `달콤짭짤 궁중식`·`로제`·`까르보`·`간장`·`짜장(순한맛)` 등 비매운 변형까지 전부 `spicy_bold`로 묶여 있던 문제를 정정했다.
+- `scripts/seed_menus.py`의 `_derive_has_soup`에서 `떡볶이`·`라볶이`를 국물 있음(`True`)으로 분류하고(43건), `_derive_flavor_intensity`에서 `떡볶이`의 비매운·달콤 변형 키워드(`궁중`, `달콤`, `간장`, `짜장`, `까르보`, `로제`, `순한맛` — 매운/매콤/마라/맵 제외)를 `sweet_savory`로 분류하도록 추가했다(13건 `sweet_savory`, 29건 매콤 변형 `spicy_bold` 유지).
+- 공유 메뉴 데이터 3종(`data/menus_meals_only.csv`, `data/menus_meals_only.json`, `data/menus_cleaned_all.csv`)을 동기화했다. `data/order_sheet_questions_pool.json` 가중치는 #58 실험 연속성을 위해 유지했다.
+
+#### 주요 변경 파일
+
+- `scripts/seed_menus.py`
+- `data/menus_meals_only.csv`, `data/menus_meals_only.json`, `data/menus_cleaned_all.csv`
+- `tests/test_binary_questions.py`
+- `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 스키마 변경 없음. 로컬 공유 데이터만 갱신했으며 운영 DB 반영은 별도 배포 단계에서 진행한다.
+
+#### 검증
+
+- `pytest tests/test_binary_questions.py -k "not test_seed_preserves_old_feedback_and_serves_binary_questions"`: **64 passed** (`TestClient` 1건은 현재 실행 환경 제약으로 미실행).
+- 정정 데이터 기준 오프라인 재실행: `meal-014`(떡볶이) 설정 A·B 모두 1위 `떡볶이_로제비엔나 떡볶이`, 5위 `라볶이`로 변경됨(개선 사례). 기존 `meal-004`(마라탕)는 만점 동률에 `떡볶이`가 추가되며 5위에서 6위로 밀림.
+
+#### 남은 작업 및 주의 사항
+
+- 운영 DB 반영 시 `scripts/seed_menus.py` 재시드 또는 정정 컬럼 동기화 필요.
+
+### #58 국물 면류·물회 국물 분류 및 주재료·해산물 알레르기 부분문자열 오탐 정정
+
+#### 변경 이유 및 내용
+
+- 6~10번째 주문서 실험에서 발견된 데이터 오분류를 점검해 `scripts/seed_menus.py`와 `app/recommend/common.py`, 공유 메뉴 데이터 3종을 정정했다.
+- **국물 분류(`_derive_has_soup`)**: `라멘`(5건)·`탄탄면`(1건)·`물회`(3건)와 국물 면류(`잔치국수`, `김치말이국수`, `메밀국수_온면`, `물밀면`, `콩국수`, `올갱이국수`, `장국국수`, `기스면`, `울면`) 총 19건을 `has_soup=True`로 정정했다. 비빔·볶음·마제소바류는 `False`를 유지한다.
+- **주재료·해산물 알레르기 부분문자열 오탐(`_derive_main_ingredient`, `OFFICIAL_ALLERGEN_RULES["해산물"]`, `strip_non_duck_ori`)**:
+  - 1글자 `"게"`가 `스파게티`·`바게트`·`마르게리타`·`포게더`에, `"회"`가 `육회`·`회오리`·`파강회`에 오탐되어 `seafood` 및 `해산물` 알레르기로 잡히던 문제를 구체 복합어(`꽃게`, `게살`, `게장`, `회덮밥`, `회냉면`, `물회`, `모듬회` 등)로 교체해 해결했다.
+  - `"오리"`가 `오리지널`·`오리진`·`오리엔탈`·`회오리`·`칼로리`에, `"봉"`·`"윙"`이 `잠봉`·`한라봉`·`스노윙`에 오탐되어 `poultry`로 잡히던 문제를 `strip_non_duck_ori`와 치킨 복합어(`치킨윙`, `치킨봉`, `윙봉`)로 수정했다. `unable_code:poultry` 검색 텍스트에도 `strip_non_duck_ori`를 적용했다.
+  - 외래어 표기 누락(`미트`, `비프`, `볼로네제`, `라구` → `beef` / `포크`, `소세지`, `살라미`, `잠봉`, `런천미트`, `돈코츠` → `pork` / `쉬림프`, `감바스`, `감베로니`, `명란`, `랍스타`, `랍스터`, `크랩` → `seafood` 및 `해산물` 알레르기)을 보강했다.
+- 식사 메뉴(`data/menus_meals_only.csv`, `data/menus_meals_only.json`)는 총 `has_soup` 19건, `main_ingredient` 740건, `allergen_tags` 355건이 갱신되었으며, `data/menus_cleaned_all.csv`도 해당 3개 컬럼만 정정(`has_soup` 19건, `main_ingredient` 899건, `해산물` 태그 414건)했다. `data/order_sheet_questions_pool.json` 가중치는 #58 실험 연속성을 위해 변경하지 않았다.
+- 프랜차이즈 버거·피자 등의 `carb_g` 결측(식사 메뉴 6,968건 중 4,827건)은 원본 `foods_nutrition.csv` 자체의 미기재 항목임을 확인해 임의 추정치를 채우지 않았다.
+
+#### 주요 변경 파일
+
+- `app/recommend/common.py`
+- `scripts/seed_menus.py`
+- `data/menus_meals_only.csv`, `data/menus_meals_only.json`, `data/menus_cleaned_all.csv`
+- `tests/test_binary_questions.py`
+- `LOG.md`
+
+#### API 변경
+
+- 없음 (기존 API 경로 및 응답 스키마 유지).
+
+#### DB 변경
+
+- 스키마 변경 없음. 로컬 공유 데이터만 갱신했으며 운영 DB 반영은 별도 시드/배포 단계에서 진행한다.
+
+#### 검증
+
+- `pytest tests/test_binary_questions.py -k "not test_seed_preserves_old_feedback_and_serves_binary_questions" tests/test_recommend.py`: **61 passed** (`test_seed_preserves_old_feedback_and_serves_binary_questions`는 현재 실행 환경의 `TestClient` blocking portal 대기 제약으로 미실행).
+- `pytest tests/test_menu_cleanup.py`: **2 passed**.
+- `git diff --check`: 통과.
+- 정정 데이터 기준 10건 오프라인 재생: `meal-008`(알리오올리오) `라멘`·`탄탄면`·`미트 토마토 파스타` 제거 후 `스파게티_쉬림프 로제 파스타`가 3위→2위로 상승(5위에서 설정 A·B 분기), `meal-009`(돈까스) 2위가 `갈릭쉬림프 피자 오리지널`→`갈릭스테이크 피자 오리지널`로 정정, `meal-010`(샌드위치) 5위 `물회` 제거 확인.
+
+#### 남은 작업 및 주의 사항
+
+- 운영 DB 반영 시 `scripts/seed_menus.py` 재시드 또는 정정 대상 컬럼 일괄 동기화 필요.
+- `test_seed_preserves_old_feedback_and_serves_binary_questions` 포함 `TestClient` 통합 테스트는 일반 로컬/CI 환경에서 추가 확인 필요.
+
+## 2026-11-23
+
+### #58 면 요리 추천에서 만두와 떡국 분류 정정
+
+- 식품 대분류 ‘면 및 만두류’에서 대표 이름으로 만두와 국을 구분하도록 `scripts/seed_menus.py`와 메뉴 CSV 2개, 식사 메뉴 JSON을 수정했다. 식사 메뉴 23건이 해당되며 만두가 고명인 라면은 면으로 분류한다.
+- API 계약과 DB 스키마 변경은 없다. 운영 데이터 반영은 별도 배포 단계에 남아 있다.
+- `tests/test_binary_questions.py` 20건 통과. 짜장면 사례에서 8번을 면으로 선택해 재실행한 두 설정 모두 간자장이 2번째로 표시됐다.
+
+### #58 닭볶음탕·찜닭과 불짬뽕 치킨의 국물 분류 수정
+
+- 변경 이유와 내용. 닭볶음탕·닭도리탕·닭찜의 자작한 국물을 국물 있음으로 분류한다. 닭튀김의 맛 이름에 들어간 짬뽕이 국물로 해석되던 문제를 수정했다. 메뉴별 맛 분류는 기존 값을 사용한다.
+- 주요 파일. `scripts/seed_menus.py`, 메뉴 CSV 2개와 식사 메뉴 JSON, `tests/test_binary_questions.py`.
+- API와 DB. 로컬 시드와 공유 데이터에서 메뉴 9건의 국물 값을 정정했다. API와 DB 스키마 변경은 없다.
+- 검증. 주문서 질문 테스트 15건 통과. 기존 9문항과 가중치를 사용한 세 번째 끼니 재실험에서 512개 조합 중 56개 조합이 목표 메뉴를 상위 5개에 포함했고, 80개 조합은 후보가 없었다.
+- 남은 작업. 운영 DB 반영은 별도 배포 단계에서 진행한다.
+
 ## 2026-11-22
 
 ### #72 대표 메뉴 일러스트 136종 DB 경로 연결

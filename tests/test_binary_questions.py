@@ -13,7 +13,11 @@ from sqlalchemy.pool import StaticPool
 from app.core.database import Base, get_db
 from app.menus.models import Menu, OrderSheetQuestion, Recommendation
 from app.users.models import User
-from app.recommend.common import evaluate_option_rules
+from app.recommend.common import (
+    derive_allergens_from_text,
+    evaluate_option_rules,
+    matches_unable_code,
+)
 from app.recommend.order_sheet import record_recommendation_feedback
 from app.recommend.question_pool import build_candidate_question_pool
 from app.recommend.router import router
@@ -36,6 +40,114 @@ def db():
         session.commit()
         yield session
     engine.dispose()
+
+
+@pytest.mark.parametrize("category,name,expected", [
+    ("조림류", "닭볶음탕", True),
+    ("조림류", "닭도리탕", True),
+    ("찜류", "닭찜_간장", True),
+    ("찜류", "닭찜_매운양념", True),
+    ("튀김류", "닭튀김_불짬뽕 치킨", False),
+    ("면 및 만두류", "짬뽕", True),
+])
+def test_broth_classification_for_chicken_and_jjamppong(category, name, expected):
+    assert seed_menus._derive_has_soup(category, name) is expected
+
+
+@pytest.mark.parametrize("name,style,has_soup", [
+    ("떡만두국_고기만두", "soup_stew", True),
+    ("만두_고기만두", "other", False),
+    ("고기만두", "other", False),
+    ("만두_군만두", "fried_pan", False),
+    ("라면_만두", "noodle", True),
+])
+def test_dumpling_menu_classification(name, style, has_soup):
+    assert seed_menus._derive_cooking_style("면 및 만두류", name) == style
+    assert seed_menus._derive_has_soup("면 및 만두류", name) is has_soup
+
+
+@pytest.mark.parametrize("category,name,expected", [
+    ("면 및 만두류", "라멘_간편조리세트_매운돈코츠라멘", True),
+    ("면 및 만두류", "라멘_돈코츠라멘", True),
+    ("면 및 만두류", "탄탄면_간편조리세트_마라 탄탄면", True),
+    ("생채·무침류", "물회", True),
+    ("생채·무침류", "물회_오징어", True),
+    ("면 및 만두류", "국수_잔치국수", True),
+    ("면 및 만두류", "메밀국수_온면", True),
+    ("면 및 만두류", "밀면_물밀면", True),
+    ("면 및 만두류", "콩국수", True),
+    ("면 및 만두류", "메밀소바_간편조리세트_부타이 마제소바", False),
+    ("면 및 만두류", "국수_비빔국수", False),
+    ("면 및 만두류", "냉면_비빔냉면", False),
+    ("면 및 만두류", "볶음 우동", False),
+])
+def test_broth_classification_for_ramen_tantanmen_mulhoe_and_broth_noodles(category, name, expected):
+    assert seed_menus._derive_has_soup(category, name) is expected
+
+
+@pytest.mark.parametrize("name,expected_ing,expect_seafood_allergen", [
+    ("스파게티_미트 토마토 파스타", "beef", False),
+    ("스파게티_베이컨 크림 파스타", "pork", False),
+    ("스파게티_간편조리세트_알리오올리오파스타", "other", False),
+    ("피자_마르게리타 피자", "other", False),
+    ("샌드위치_불고기치즈 바게트", "beef", False),
+    ("육회", "beef", False),
+    ("육회비빔밥", "beef", False),
+    ("피자_갈릭쉬림프 피자 오리지널 (M)", "seafood", True),
+    ("피자_골드고구마 피자 오리지널 (M)", "veggie_tofu", False),
+    ("버거_NBB 오리지널 버거", "other", False),
+    ("샌드위치_잠봉뵈르 샌드위치", "pork", False),
+    ("피자_쉬림프갈릭스노윙 피자", "seafood", True),
+    ("에이드_한라봉 에이드", "other", False),
+    ("오리백숙", "poultry", False),
+    ("훈제오리", "poultry", False),
+    ("꽃게탕", "seafood", True),
+    ("게살죽", "seafood", True),
+    ("회덮밥", "seafood", True),
+    ("물회_오징어", "seafood", True),
+    ("닭다리튀김_봉 (5조각)", "poultry", False),
+    ("닭튀김_교촌윙 치킨", "poultry", False),
+])
+def test_main_ingredient_and_seafood_allergen_avoid_substring_false_positives(
+    name, expected_ing, expect_seafood_allergen,
+):
+    assert seed_menus._derive_main_ingredient("", "", name) == expected_ing
+    allergens = derive_allergens_from_text(name)
+    assert ("해산물" in allergens) is expect_seafood_allergen
+
+
+@pytest.mark.parametrize("name,expected_soup,expected_flavor", [
+    ("떡볶이", True, "spicy_bold"),
+    ("떡볶이_국물떡볶이", True, "spicy_bold"),
+    ("떡볶이_매콤 떡볶이", True, "spicy_bold"),
+    ("떡볶이_간편조리세트_마라떡볶이", True, "spicy_bold"),
+    ("떡볶이_간편조리세트_달콤짭짤 궁중식 떡볶이", True, "sweet_savory"),
+    ("떡볶이_간편조리세트_로제떡볶이", True, "sweet_savory"),
+    ("떡볶이_까르보떡볶이", True, "sweet_savory"),
+    ("떡볶이_간편조리세트_짜장떡볶이(순한맛)", True, "sweet_savory"),
+    ("떡볶이_간장", True, "sweet_savory"),
+    ("라볶이", True, "mild_clean"),
+])
+def test_tteokbokki_broth_and_flavor_classification(name, expected_soup, expected_flavor):
+    assert seed_menus._derive_has_soup("볶음류", name) is expected_soup
+    assert seed_menus._derive_flavor_intensity("", name, 460.0 if expected_flavor == "sweet_savory" else 300.0, 4.0) == expected_flavor
+
+
+def test_unable_poultry_does_not_exclude_original_or_jambon_menus():
+    original_pizza = Menu(
+        name="피자_갈릭쉬림프 피자 오리지널 (M)",
+        base_name="피자",
+        main_ingredient="seafood",
+        allergen_tags=["밀", "해산물"],
+    )
+    duck_soup = Menu(
+        name="오리백숙",
+        base_name="오리백숙",
+        main_ingredient="poultry",
+        allergen_tags=[],
+    )
+    assert matches_unable_code(original_pizza, "poultry") is False
+    assert matches_unable_code(duck_soup, "poultry") is True
 
 
 def test_binary_options_cover_existing_menu_categories():
