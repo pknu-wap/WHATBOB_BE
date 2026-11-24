@@ -12,7 +12,12 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.menus.models import Menu, OrderSheetQuestion, PersonalOrderSheetQuestionAssignment
+from app.menus.models import (
+    CommonOrderSheetQuestionAssignment,
+    Menu,
+    OrderSheetQuestion,
+    PersonalOrderSheetQuestionAssignment,
+)
 from app.recommend.common import (
     NoAvailableFoodException,
     collect_user_exclusion_keywords,
@@ -224,7 +229,10 @@ def get_personal_order_sheet_no_results_suggestions(
         else None
     )
     questions_snapshot = None
-    if issuance is not None and db.get(PersonalOrderSheetQuestionAssignment, issuance.id) is not None:
+    if issuance is not None and (
+        db.get(PersonalOrderSheetQuestionAssignment, issuance.id) is not None
+        or db.get(CommonOrderSheetQuestionAssignment, issuance.id) is not None
+    ):
         questions_snapshot = issuance.questions_snapshot_json
 
     max_display = min(int(request.top_k), int(settings.ORDER_SHEET_MAX_RECOMMENDATIONS))

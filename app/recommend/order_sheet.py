@@ -23,6 +23,8 @@ from app.menus.models import (
     GROUP_ORDER_SHEET_LIST,
     PERSONAL_INITIAL_LIST,
     PERSONAL_RETRY_LIST,
+    CommonOrderSheetQuestionAssignment,
+    CommonOrderSheetQuestionExperiment,
     Menu,
     OrderSheetIssuance,
     OrderSheetQuestion,
@@ -863,7 +865,12 @@ def issue_order_sheet_questions(
     )
 
     assignment = None
+    common_assignment = None
     if user_id is not None and effective_exploit is None:
+        from app.recommend.common_question_experiments import (
+            load_common_question_overrides,
+            pick_common_question_assignment,
+        )
         from app.recommend.question_experiments import (
             apply_question_overrides,
             load_personal_question_overrides,
@@ -871,16 +878,24 @@ def issue_order_sheet_questions(
         )
 
         slot_keys = tuple(question.cluster_key for question in selection.questions)
-        selection = apply_question_overrides(
-            selection, slot_keys, question_pool, load_personal_question_overrides(db, user_id),
-        )
+        personal_overrides = load_personal_question_overrides(db, user_id)
+        common_overrides = load_common_question_overrides(db)
+        selection = apply_question_overrides(selection, slot_keys, question_pool, personal_overrides)
+        selection = apply_question_overrides(selection, slot_keys, question_pool, {
+            slot: question_id for slot, question_id in common_overrides.items() if slot not in personal_overrides
+        })
         if effective_total == settings.ORDER_SHEET_QUESTION_COUNT:
             assignment = pick_personal_question_assignment(
                 db, user_id, selection, slot_keys, question_pool, effective_total,
             )
             if assignment is not None:
                 selection = assignment.selection
+            elif not personal_overrides:
+                common_assignment = pick_common_question_assignment(db, user_id, question_pool, effective_total)
+                if common_assignment is not None:
+                    selection = common_assignment.selection
 
+    experiment_assignment = assignment or common_assignment
     issuance = OrderSheetIssuance(
         order_sheet_id=f"os_{uuid4().hex}",
         user_id=user_id,
@@ -889,7 +904,7 @@ def issue_order_sheet_questions(
         questions_snapshot_json=[
             q.model_dump(mode="json", by_alias=True) for q in selection.questions
         ],
-        question_roles_json=assignment.question_roles if assignment is not None else {
+        question_roles_json=experiment_assignment.question_roles if experiment_assignment is not None else {
             str(q.id): resolve_question_role(q.id, q.cluster_key)
             for q in selection.questions
         },
@@ -907,6 +922,13 @@ def issue_order_sheet_questions(
                 experiment_id=assignment.experiment_id,
                 pair_number=assignment.pair_number,
                 arm=assignment.arm,
+            ))
+        elif common_assignment is not None:
+            db.flush()
+            db.add(CommonOrderSheetQuestionAssignment(
+                issuance_id=issuance.id,
+                experiment_id=common_assignment.experiment_id,
+                arm=common_assignment.arm,
             ))
         if commit:
             db.commit()
@@ -1051,10 +1073,18 @@ def create_order_sheet_recommendation(
     personal_assignment = issuance is not None and db.get(
         PersonalOrderSheetQuestionAssignment, issuance.id, with_for_update=True,
     ) is not None
+    common_assignment = (
+        db.get(CommonOrderSheetQuestionAssignment, issuance.id) if issuance is not None else None
+    )
+    common_experiment = (
+        db.get(CommonOrderSheetQuestionExperiment, common_assignment.experiment_id)
+        if common_assignment is not None else None
+    )
+    uses_frozen_questions = personal_assignment or common_experiment is not None
     validated_answers = validate_order_sheet_answers(
         db,
         request.answers,
-        questions_snapshot=issuance.questions_snapshot_json if personal_assignment else None,
+        questions_snapshot=issuance.questions_snapshot_json if uses_frozen_questions else None,
     )
 
     all_menus = db.query(Menu).all()
@@ -1099,8 +1129,10 @@ def create_order_sheet_recommendation(
         validated_answers=validated_answers,
         top_k=request.top_k,
         role_overrides=frozen_role_overrides,
+        score_weights=common_experiment.score_weights_json if common_experiment is not None else None,
         long_term_preference_scores=effective_long_term_scores,
         recent_meal_penalties=effective_recent_meal_penalties,
+        ranking_rule_version=common_experiment.ranking_rule_version if common_experiment is not None else None,
     )
     top_details = evaluation.selected_candidates
     surviving_kind_count = len(evaluation.surviving_kind_representatives)
@@ -1120,8 +1152,12 @@ def create_order_sheet_recommendation(
     completes_issuance = (
         issuance is not None
         and issuance.recommendation_id is None
-        and (not personal_assignment or set(submitted_q_ids) == set(issuance.question_ids_json))
+        and (not uses_frozen_questions or set(submitted_q_ids) == set(issuance.question_ids_json))
     )
+    if completes_issuance and common_experiment is not None:
+        # A shared lock orders submissions against cohort selection in the worker.
+        db.query(CommonOrderSheetQuestionExperiment.id).filter_by(id=common_experiment.id).with_for_update().one()
+        now = datetime.now(timezone.utc)
     list_scope = PERSONAL_INITIAL_LIST
     if fixed_exclusion_keywords is not None:
         list_scope = GROUP_ORDER_SHEET_LIST

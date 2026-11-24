@@ -62,9 +62,12 @@ def _fisher_like_p_value(control: ArmMetrics, variant: ArmMetrics) -> Fraction:
     return Fraction(tail_weight, comb(total_shown, arm_size))
 
 
-def decide_common_experiment(control: ArmMetrics, variant: ArmMetrics) -> bool | None:
+def decide_common_experiment(
+    control: ArmMetrics, variant: ArmMetrics, *, submissions_per_arm: int | None = None,
+) -> bool | None:
     """Compare the fixed cohorts once each arm has its required submissions."""
-    if min(control.submitted_count, variant.submitted_count) < settings.ORDER_SHEET_COMMON_SUBMISSIONS_PER_ARM:
+    required = settings.ORDER_SHEET_COMMON_SUBMISSIONS_PER_ARM if submissions_per_arm is None else submissions_per_arm
+    if min(control.submitted_count, variant.submitted_count) < required:
         return None
     if not control.shown_count or not variant.shown_count:
         return False

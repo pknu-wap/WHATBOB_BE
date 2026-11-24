@@ -348,6 +348,53 @@ class PersonalOrderSheetQuestionOverride(Base):
     adopted_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
+class CommonOrderSheetQuestionExperiment(Base):
+    """A shared comparison of two first-order-sheet forms and its final decision."""
+
+    __tablename__ = "common_order_sheet_question_experiments"
+    __table_args__ = (
+        UniqueConstraint("active", name="uq_common_sheet_experiment_active"),
+        UniqueConstraint("slot_key", "variant_question_id", name="uq_common_sheet_experiment_variant"),
+        CheckConstraint("active IS NULL OR active = 1", name="ck_common_sheet_experiment_active"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    slot_key = Column(String(50), nullable=False)
+    control_question_id = Column(Integer, nullable=False)
+    variant_question_id = Column(Integer, nullable=False)
+    control_questions_json = Column(JSON, nullable=False)
+    variant_questions_json = Column(JSON, nullable=False)
+    question_roles_json = Column(JSON, nullable=False)
+    score_weights_json = Column(JSON, nullable=False)
+    ranking_rule_version = Column(String(50), nullable=False)
+    submissions_per_arm = Column(Integer, nullable=False)
+    reaction_window_hours = Column(Integer, nullable=False)
+    active = Column(Boolean, nullable=True, default=True)
+    created_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False)
+    completed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
+    adopted = Column(Boolean, nullable=True)
+    cohorts_json = Column(JSON, nullable=False, default=dict)
+    decision_metrics_json = Column(JSON, nullable=True)
+
+
+class CommonOrderSheetQuestionAssignment(Base):
+    """A randomized assignment attached to the user's first order-sheet issuance."""
+
+    __tablename__ = "common_order_sheet_question_assignments"
+    __table_args__ = (
+        Index("ix_common_sheet_assignment_experiment_arm", "experiment_id", "arm"),
+        CheckConstraint("arm IN ('control', 'variant')", name="ck_common_sheet_assignment_arm"),
+    )
+
+    issuance_id = Column(Integer, ForeignKey("order_sheet_issuances.id", ondelete="CASCADE"), primary_key=True)
+    experiment_id = Column(
+        Integer,
+        ForeignKey("common_order_sheet_question_experiments.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    arm = Column(String(7), nullable=False)
+
+
 class RecommendationFeedback(Base):
     """추천 만족 여부와 질문별 조건 일치 결과를 저장하는 피드백 테이블"""
     __tablename__ = "recommendation_feedbacks"

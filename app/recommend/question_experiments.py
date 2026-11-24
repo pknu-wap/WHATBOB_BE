@@ -7,6 +7,7 @@ import random
 from sqlalchemy.orm import Session
 
 from app.menus.models import (
+    CommonOrderSheetQuestionExperiment,
     OrderSheetQuestion,
     PersonalOrderSheetQuestionAssignment,
     PersonalOrderSheetQuestionExperiment,
@@ -108,7 +109,7 @@ def apply_question_overrides(
     return selection.model_copy(update={"questions": questions})
 
 
-def _distinguishes_available_menus(
+def distinguishes_available_menus(
     question: OrderSheetQuestion,
     question_pool: OrderSheetQuestionPool,
 ) -> bool:
@@ -163,7 +164,7 @@ def _start_experiment(
         for question, axes, _ in ranked_candidates
         if axes.isdisjoint(occupied_axes)
         and resolve_question_role(question.id, question.cluster_key) == "score"
-        and _distinguishes_available_menus(question, question_pool)
+        and distinguishes_available_menus(question, question_pool)
     ]
     for question_id in ranked_question_ids:
         index = positions.get(question_id)
@@ -199,7 +200,7 @@ def _start_experiment(
 
 
 def frozen_experiment_questions_fit(
-    experiment: PersonalOrderSheetQuestionExperiment,
+    experiment: PersonalOrderSheetQuestionExperiment | CommonOrderSheetQuestionExperiment,
     question_pool: OrderSheetQuestionPool,
     target_count: int,
 ) -> bool:
@@ -209,7 +210,7 @@ def frozen_experiment_questions_fit(
     ):
         return False
     candidates = {question.id: (question, axes) for question, axes, _ in question_pool.valid_candidates}
-    if experiment.variant_question_id not in candidates or not _distinguishes_available_menus(
+    if experiment.variant_question_id not in candidates or not distinguishes_available_menus(
         candidates[experiment.variant_question_id][0], question_pool,
     ):
         return False

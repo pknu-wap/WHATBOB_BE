@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from sqlalchemy.orm import Session
 
@@ -621,6 +621,8 @@ def summarize_first_list_reactions(
     user_id: int | None = None,
     recommendation_ids: Iterable[int] | None = None,
     reaction_window_hours: float | None = None,
+    reaction_cutoffs: Mapping[int, datetime] | None = None,
+    for_update: bool = False,
 ) -> FirstListReactionSummary:
     """
     추천 목록 집합에 대해 최초 후보 0건, 첫 목록 좋아요(1건 이상), 명시적 목록 거절,
@@ -648,6 +650,9 @@ def summarize_first_list_reactions(
             )
         query = query.filter(Recommendation.id.in_(id_list))
 
+    if for_update:
+        # Feedback writers lock the recommendation before persisting a reaction.
+        query = query.populate_existing().with_for_update()
     recs = query.order_by(Recommendation.created_at.asc(), Recommendation.id.asc()).all()
     if not recs:
         return FirstListReactionSummary(
@@ -667,7 +672,7 @@ def summarize_first_list_reactions(
 
     rec_ids = [rec.id for rec in recs]
     states_by_rec: dict[int, list[RecommendationFeedbackState]] = {}
-    if reaction_window_hours is None:
+    if reaction_window_hours is None and reaction_cutoffs is None:
         for st in (
             db.query(RecommendationFeedbackState)
             .filter(RecommendationFeedbackState.recommendation_id.in_(rec_ids))
@@ -677,22 +682,26 @@ def summarize_first_list_reactions(
             states_by_rec.setdefault(int(st.recommendation_id), []).append(st)
 
     feedbacks_by_rec: dict[int, list[RecommendationFeedback]] = {}
-    for fb in (
+    feedback_query = (
         db.query(RecommendationFeedback)
         .filter(RecommendationFeedback.recommendation_id.in_(rec_ids))
         .order_by(RecommendationFeedback.id.asc())
-        .all()
-    ):
+    )
+    if for_update:
+        # Read committed reactions even if the worker's original snapshot predates the lock.
+        feedback_query = feedback_query.populate_existing().with_for_update()
+    for fb in feedback_query.all():
         feedbacks_by_rec.setdefault(int(fb.recommendation_id), []).append(fb)
 
     outcomes: list[RecommendationReactionOutcome] = []
     for rec in recs:
-        cutoff_utc = None
-        if reaction_window_hours is not None and rec.created_at is not None:
+        cutoff_utc = reaction_cutoffs.get(rec.id) if reaction_cutoffs is not None else None
+        if cutoff_utc is None and reaction_window_hours is not None and rec.created_at is not None:
             cutoff_utc = as_utc_naive(rec.created_at) + timedelta(hours=float(reaction_window_hours))
 
         raw_fbs = feedbacks_by_rec.get(rec.id, [])
         if cutoff_utc is not None:
+            cutoff_utc = as_utc_naive(cutoff_utc)
             raw_fbs = [
                 fb for fb in raw_fbs
                 if fb.created_at is not None and as_utc_naive(fb.created_at) <= cutoff_utc
