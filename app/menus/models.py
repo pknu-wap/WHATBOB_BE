@@ -260,7 +260,7 @@ class Recommendation(Base):
     order_sheet_list_scope = Column(String(20), nullable=True)
     list_rejected_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True, index=True)
     closed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True, index=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(ORDER_SHEET_TIMESTAMP, default=lambda: datetime.now(timezone.utc))
 
 
 class OrderSheetIssuance(Base):
@@ -423,7 +423,7 @@ class RecommendationFeedback(Base):
 
     # 질문별 조건 일치 여부: {질문 ID 문자열: 1.0(일치) 또는 0.0(불일치)}.
     answer_match_results = Column("feature_match_vector", JSON, nullable=False, default=dict)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(ORDER_SHEET_TIMESTAMP, default=lambda: datetime.now(timezone.utc))
 
 
 class RecommendationFeedbackState(Base):

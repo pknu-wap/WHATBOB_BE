@@ -216,6 +216,8 @@ def test_personal_order_sheet_saves_replay_snapshot_only_when_two_or_more_kinds_
     assert snap.max_display_count == 5
     assert snap.shown_menu_ids_json == [m.menu_id for m in resp_multi.recommended_menus]
     assert len(snap.candidates_json) == 7  # 6종 + 비빔밥 2번째 상품 = 하드필터 통과 전체 후보 7개
+    assert snap.tie_break_inputs_json["candidate_encoding"] == "compact_v1"
+    assert all(isinstance(row, list) and len(row) == 7 for row in snap.candidates_json)
     assert len(snap.score_question_ids_json) == 6
     assert snap.ranking_rule_version == settings.ORDER_SHEET_RANKING_RULE_VERSION
     assert snap.question_answer_version
