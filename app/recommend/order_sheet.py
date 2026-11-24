@@ -1035,11 +1035,7 @@ def create_order_sheet_recommendation(
         {"question_id": q.id, "option_id": opt["option_id"]}
         for q, opt in validated_answers
     ]
-    completes_issuance = (
-        issuance is not None
-        and issuance.recommendation_id is None
-        and set(issuance.question_ids_json).issubset(submitted_q_ids)
-    )
+    completes_issuance = issuance is not None and issuance.recommendation_id is None
     list_scope = PERSONAL_INITIAL_LIST
     if fixed_exclusion_keywords is not None:
         list_scope = GROUP_ORDER_SHEET_LIST
