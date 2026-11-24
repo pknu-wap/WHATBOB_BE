@@ -59,6 +59,7 @@ def merge_personal_question_state(db: Session, origin_id: int, target_id: int) -
         experiment.user_id = target_id
         if active_target is not None:
             experiment.active = None
+            experiment.decision_requested_at = None
 
     target_slots = load_personal_question_overrides(db, target_id)
     origin_overrides = (
