@@ -702,6 +702,9 @@ def _merge_uuid_user_into_kakao_target(
     # 5. 작업 원장(request_operations) 및 주문서 발급 이력(order_sheet_issuances) 소유자 이동
     _merge_request_operations(db, origin_id, target_id)
     _merge_order_sheet_issuances(db, origin_id, target_id)
+    from app.recommend.question_experiments import merge_personal_question_state
+
+    merge_personal_question_state(db, origin_id, target_id)
 
     # 6. 다른 PREPARED 전환 작업의 origin_user_id 참조 해제
     db.query(AccountTransition).filter(AccountTransition.origin_user_id == origin_id).update(

@@ -4,7 +4,7 @@ import math
 import random
 from typing import Any
 from uuid import uuid4
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -26,6 +26,7 @@ from app.menus.models import (
     Menu,
     OrderSheetIssuance,
     OrderSheetQuestion,
+    PersonalOrderSheetQuestionAssignment,
     QuestionSelectionState,
     Recommendation,
     RecommendationFeedback,
@@ -521,34 +522,29 @@ def _rules_signature(options: list[dict[str, Any]]) -> str:
     return repr([(opt.get("option_id"), opt.get("rules", [])) for opt in options])
 
 
-def select_order_sheet_questions(
+QuestionCandidate = tuple[OrderSheetQuestion, frozenset[str], float]
+
+
+@dataclass
+class OrderSheetQuestionPool:
+    available_menus: list[Menu]
+    valid_candidates: list[QuestionCandidate]
+    non_inappropriate_fallback: list[QuestionCandidate]
+
+    def ranked_candidates(self) -> list[QuestionCandidate]:
+        return sorted(
+            self.valid_candidates,
+            key=lambda item: (-item[2], -float(item[0].importance_weight or 0.0), item[0].id),
+        )
+
+
+def load_order_sheet_question_pool(
     db: Session,
-    total_count: int | None = None,
-    exploitation_count: int | None = None,
-    random_seed: int | None = None,
-    scope_key: str | None = None,
     *,
     user_id: int | None = None,
     exclusion_keywords: set[str] | list[str] | None = None,
     available_menus: list[Menu] | None = None,
-    fill_question_count: bool = False,
-    commit: bool = True,
-) -> OrderSheetQuestionsResponse:
-    """
-    Spec #77 주문서 질문 선별:
-    - 기본 문항 수는 settings.ORDER_SHEET_QUESTION_COUNT(9)에서 관리한다.
-    - 사용자 알레르기·제외 조건에 부적절하거나 다른 선택 문항과 의미가 겹치는 질문을 제외한다.
-    - exploitation_count 미지정 시 Spec #77 기본 9개 주제(Q1~Q9)를 우선 채우고,
-      빈자리는 남은 후보를 잘 구분하는 상위 후보(종류별 1/N 엔트로피·커버리지 순)로 채운다.
-    - available_menus를 전달하는 호출자는 동일한 제외 조건을 적용한 메뉴를 재사용한다.
-    - fill_question_count는 유효 주제가 부족한 방 주문서의 빈자리를 적합한 주제로 채운다.
-    - commit=False 인 경우 상위 트랜잭션을 조기 커밋하지 않고 flush 만 수행한다.
-    """
-    target_total = (
-        int(total_count)
-        if total_count is not None
-        else int(settings.ORDER_SHEET_QUESTION_COUNT)
-    )
+) -> OrderSheetQuestionPool:
     active_questions = (
         db.query(OrderSheetQuestion)
         .filter(OrderSheetQuestion.is_active.is_(True))
@@ -576,8 +572,8 @@ def select_order_sheet_questions(
     weighted_menus = _build_menu_kind_weights(available_menus) if len(available_menus) >= 2 else None
 
     metrics_cache: dict[str, QuestionRankingMetrics] = {}
-    valid_candidates: list[tuple[OrderSheetQuestion, frozenset[str], float]] = []
-    non_inappropriate_fallback: list[tuple[OrderSheetQuestion, frozenset[str], float]] = []
+    valid_candidates: list[QuestionCandidate] = []
+    non_inappropriate_fallback: list[QuestionCandidate] = []
     for q in active_questions:
         if is_question_inappropriate_for_exclusions(q, effective_exclusions):
             continue
@@ -604,6 +600,45 @@ def select_order_sheet_questions(
     if not valid_candidates and non_inappropriate_fallback:
         valid_candidates = non_inappropriate_fallback
 
+    return OrderSheetQuestionPool(available_menus, valid_candidates, non_inappropriate_fallback)
+
+
+def select_order_sheet_questions(
+    db: Session,
+    total_count: int | None = None,
+    exploitation_count: int | None = None,
+    random_seed: int | None = None,
+    scope_key: str | None = None,
+    *,
+    user_id: int | None = None,
+    exclusion_keywords: set[str] | list[str] | None = None,
+    available_menus: list[Menu] | None = None,
+    fill_question_count: bool = False,
+    commit: bool = True,
+    question_pool: OrderSheetQuestionPool | None = None,
+) -> OrderSheetQuestionsResponse:
+    """
+    Spec #77 주문서 질문 선별:
+    - 기본 문항 수는 settings.ORDER_SHEET_QUESTION_COUNT(9)에서 관리한다.
+    - 사용자 알레르기·제외 조건에 부적절하거나 다른 선택 문항과 의미가 겹치는 질문을 제외한다.
+    - exploitation_count 미지정 시 Spec #77 기본 9개 주제(Q1~Q9)를 우선 채우고,
+      빈자리는 남은 후보를 잘 구분하는 상위 후보(종류별 1/N 엔트로피·커버리지 순)로 채운다.
+    - available_menus를 전달하는 호출자는 동일한 제외 조건을 적용한 메뉴를 재사용한다.
+    - fill_question_count는 유효 주제가 부족한 방 주문서의 빈자리를 적합한 주제로 채운다.
+    - commit=False 인 경우 상위 트랜잭션을 조기 커밋하지 않고 flush 만 수행한다.
+    """
+    target_total = (
+        int(total_count)
+        if total_count is not None
+        else int(settings.ORDER_SHEET_QUESTION_COUNT)
+    )
+    if question_pool is None:
+        question_pool = load_order_sheet_question_pool(
+            db, user_id=user_id, exclusion_keywords=exclusion_keywords, available_menus=available_menus,
+        )
+    valid_candidates = question_pool.valid_candidates
+    non_inappropriate_fallback = question_pool.non_inappropriate_fallback
+
     selected_exploit: list[OrderSheetQuestion] = []
     selected_explore: list[OrderSheetQuestion] = []
     used_axes: set[str] = set()
@@ -611,7 +646,7 @@ def select_order_sheet_questions(
     if exploitation_count is None:
         # Spec #77 기본 개인 주문서: 설정된 초기 자리(Q1~Q9)를 우선 배치하고,
         # 생략·결원 자리는 남은 후보를 가장 잘 구분하는 비겹침 주제로 채운다.
-        by_cluster: dict[str, list[tuple[OrderSheetQuestion, frozenset[str], float]]] = {}
+        by_cluster: dict[str, list[QuestionCandidate]] = {}
         for item in valid_candidates:
             by_cluster.setdefault(item[0].cluster_key, []).append(item)
 
@@ -626,15 +661,7 @@ def select_order_sheet_questions(
                 break
 
         if len(selected_exploit) < target_total:
-            remaining = sorted(
-                valid_candidates,
-                key=lambda item: (
-                    -item[2],
-                    -float(item[0].importance_weight or 0.0),
-                    item[0].id,
-                ),
-            )
-            for q, axes, _ in remaining:
+            for q, axes, _ in question_pool.ranked_candidates():
                 if len(selected_exploit) >= target_total:
                     break
                 if axes & used_axes:
@@ -806,6 +833,7 @@ def issue_order_sheet_questions(
                 OrderSheetIssuance.user_id == user_id,
                 OrderSheetIssuance.issuance_key == effective_key,
             )
+            .with_for_update()
             .first()
         )
         if existing is not None:
@@ -822,6 +850,7 @@ def issue_order_sheet_questions(
         else None
     )
 
+    question_pool = load_order_sheet_question_pool(db, user_id=user_id)
     selection = select_order_sheet_questions(
         db=db,
         total_count=effective_total,
@@ -829,7 +858,27 @@ def issue_order_sheet_questions(
         scope_key=scope_key,
         user_id=user_id,
         commit=False,
+        question_pool=question_pool,
     )
+
+    assignment = None
+    if user_id is not None and effective_exploit is None:
+        from app.recommend.question_experiments import (
+            apply_question_overrides,
+            load_personal_question_overrides,
+            pick_personal_question_assignment,
+        )
+
+        slot_keys = tuple(question.cluster_key for question in selection.questions)
+        selection = apply_question_overrides(
+            selection, slot_keys, question_pool, load_personal_question_overrides(db, user_id),
+        )
+        if effective_total == settings.ORDER_SHEET_QUESTION_COUNT:
+            assignment = pick_personal_question_assignment(
+                db, user_id, selection, slot_keys, question_pool, effective_total,
+            )
+            if assignment is not None:
+                selection = assignment.selection
 
     issuance = OrderSheetIssuance(
         order_sheet_id=f"os_{uuid4().hex}",
@@ -839,7 +888,7 @@ def issue_order_sheet_questions(
         questions_snapshot_json=[
             q.model_dump(mode="json", by_alias=True) for q in selection.questions
         ],
-        question_roles_json={
+        question_roles_json=assignment.question_roles if assignment is not None else {
             str(q.id): resolve_question_role(q.id, q.cluster_key)
             for q in selection.questions
         },
@@ -850,6 +899,14 @@ def issue_order_sheet_questions(
     )
     db.add(issuance)
     try:
+        if assignment is not None:
+            db.flush()
+            db.add(PersonalOrderSheetQuestionAssignment(
+                issuance_id=issuance.id,
+                experiment_id=assignment.experiment_id,
+                pair_number=assignment.pair_number,
+                arm=assignment.arm,
+            ))
         if commit:
             db.commit()
             db.refresh(issuance)
@@ -876,17 +933,31 @@ def issue_order_sheet_questions(
 def validate_order_sheet_answers(
     db: Session,
     answers: list[Any],
+    *,
+    questions_snapshot: list[dict] | None = None,
 ) -> list[tuple[OrderSheetQuestion, dict[str, Any]]]:
     """제출된 주문서 답변의 질문·선택지 유효성과 중복 여부를 검증해 (질문, 선택지) 쌍 목록을 반환한다."""
     question_ids = [ans.question_id for ans in answers]
     if len(set(question_ids)) != len(question_ids):
         raise InvalidOrderSheetException("동일한 질문에 중복 응답할 수 없습니다.")
 
-    questions = (
-        db.query(OrderSheetQuestion)
-        .filter(OrderSheetQuestion.id.in_(question_ids))
-        .all()
-    )
+    if questions_snapshot is None:
+        questions = (
+            db.query(OrderSheetQuestion)
+            .filter(OrderSheetQuestion.id.in_(question_ids))
+            .all()
+        )
+    else:
+        questions = [
+            OrderSheetQuestion(
+                id=question["id"],
+                question_code=question["question_code"],
+                cluster_key=question["cluster_key"],
+                question_text=question["question_text"],
+                options_json=question["options"],
+            )
+            for question in questions_snapshot
+        ]
     question_map = {q.id: q for q in questions}
 
     if not question_map:
@@ -898,7 +969,11 @@ def validate_order_sheet_answers(
         if not q:
             raise InvalidOrderSheetException(f"존재하지 않는 질문 ID입니다: {ans.question_id}")
         matched_opt = next(
-            (opt for opt in _question_options(q) if opt.get("option_id") == ans.option_id),
+            (
+                opt
+                for opt in (q.options_json if questions_snapshot is not None else _question_options(q))
+                if opt.get("option_id") == ans.option_id
+            ),
             None,
         )
         if not matched_opt:
@@ -913,29 +988,25 @@ def _find_valid_order_sheet_issuance(
     db: Session,
     order_sheet_id: str | int | None,
     user_id: int | None,
+    *,
+    for_update: bool = False,
 ) -> OrderSheetIssuance | None:
     if order_sheet_id is None:
         return None
     if isinstance(order_sheet_id, int) and not isinstance(order_sheet_id, bool):
-        issuance = (
-            db.query(OrderSheetIssuance)
-            .filter(OrderSheetIssuance.id == order_sheet_id)
-            .first()
-        )
+        identifier = OrderSheetIssuance.id == order_sheet_id
     else:
         cleaned = str(order_sheet_id).strip()
         if not cleaned:
             return None
-        issuance = (
-            db.query(OrderSheetIssuance)
-            .filter(OrderSheetIssuance.order_sheet_id == cleaned)
-            .first()
-        )
-    if issuance is None:
-        return None
-    if issuance.user_id is not None and issuance.user_id != user_id:
-        return None
-    return issuance
+        identifier = OrderSheetIssuance.order_sheet_id == cleaned
+    query = db.query(OrderSheetIssuance).filter(
+        identifier,
+        or_(OrderSheetIssuance.user_id == user_id, OrderSheetIssuance.user_id.is_(None)),
+    )
+    if for_update:
+        query = query.with_for_update().populate_existing()
+    return query.first()
 
 
 def create_order_sheet_recommendation(
@@ -968,7 +1039,22 @@ def create_order_sheet_recommendation(
             locked_user = lock_user_and_verify_session(db, current_user)
             effective_user_id = locked_user.id
 
-    validated_answers = validate_order_sheet_answers(db, request.answers)
+    issuance = None
+    if fixed_exclusion_keywords is None:
+        issuance = _find_valid_order_sheet_issuance(
+            db=db,
+            order_sheet_id=request.order_sheet_id,
+            user_id=effective_user_id,
+            for_update=True,
+        )
+    personal_assignment = issuance is not None and db.get(
+        PersonalOrderSheetQuestionAssignment, issuance.id, with_for_update=True,
+    ) is not None
+    validated_answers = validate_order_sheet_answers(
+        db,
+        request.answers,
+        questions_snapshot=issuance.questions_snapshot_json if personal_assignment else None,
+    )
 
     all_menus = db.query(Menu).all()
     if fixed_exclusion_keywords is not None:
@@ -984,11 +1070,6 @@ def create_order_sheet_recommendation(
             extra_exclusions=request.exclusions,
         )
 
-    issuance = _find_valid_order_sheet_issuance(
-        db=db,
-        order_sheet_id=request.order_sheet_id,
-        user_id=effective_user_id,
-    )
     frozen_role_overrides = (
         issuance.question_roles_json
         if issuance is not None and isinstance(issuance.question_roles_json, dict) and issuance.question_roles_json
@@ -1035,11 +1116,15 @@ def create_order_sheet_recommendation(
         {"question_id": q.id, "option_id": opt["option_id"]}
         for q, opt in validated_answers
     ]
-    completes_issuance = issuance is not None and issuance.recommendation_id is None
+    completes_issuance = (
+        issuance is not None
+        and issuance.recommendation_id is None
+        and (not personal_assignment or set(submitted_q_ids) == set(issuance.question_ids_json))
+    )
     list_scope = PERSONAL_INITIAL_LIST
     if fixed_exclusion_keywords is not None:
         list_scope = GROUP_ORDER_SHEET_LIST
-    elif issuance is not None and not completes_issuance:
+    elif request.order_sheet_id is not None and not completes_issuance:
         list_scope = PERSONAL_RETRY_LIST
 
     rec_record = Recommendation(

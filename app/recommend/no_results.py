@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.menus.models import Menu, OrderSheetQuestion
+from app.menus.models import Menu, OrderSheetQuestion, PersonalOrderSheetQuestionAssignment
 from app.recommend.common import (
     NoAvailableFoodException,
     collect_user_exclusion_keywords,
@@ -86,6 +86,7 @@ def suggest_no_result_answer_changes(
     all_menus: Sequence[Menu] | None = None,
     *,
     question_role_overrides: Mapping[int | str, str] | None = None,
+    questions_snapshot: list[dict] | None = None,
     max_display_count: int | None = None,
 ) -> OrderSheetNoResultsResponse:
     """
@@ -97,7 +98,9 @@ def suggest_no_result_answer_changes(
       내림차순, 동률 시 원래 답변 순서로 정렬한다.
     - DB 상태를 변경하지 않는 순수 읽기 동작이다.
     """
-    validated_answers = validate_order_sheet_answers(db, list(request_answers))
+    validated_answers = validate_order_sheet_answers(
+        db, list(request_answers), questions_snapshot=questions_snapshot,
+    )
 
     normalized_exclusions = {
         str(kw).strip().lower()
@@ -220,6 +223,9 @@ def get_personal_order_sheet_no_results_suggestions(
         and issuance.question_roles_json
         else None
     )
+    questions_snapshot = None
+    if issuance is not None and db.get(PersonalOrderSheetQuestionAssignment, issuance.id) is not None:
+        questions_snapshot = issuance.questions_snapshot_json
 
     max_display = min(int(request.top_k), int(settings.ORDER_SHEET_MAX_RECOMMENDATIONS))
     return suggest_no_result_answer_changes(
@@ -227,5 +233,6 @@ def get_personal_order_sheet_no_results_suggestions(
         request_answers=request.answers,
         exclusion_keywords=exclusion_keywords,
         question_role_overrides=frozen_role_overrides,
+        questions_snapshot=questions_snapshot,
         max_display_count=max_display,
     )
