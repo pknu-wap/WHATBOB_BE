@@ -51,6 +51,7 @@ from app.auth.sessions import (
 )
 from app.core.config import settings
 from app.core.security import create_access_token
+from app.map.models import PlaceSatisfaction, PlaceSelection
 from app.menus.models import (
     OrderSheetIssuance,
     QuestionSelectionState,
@@ -471,6 +472,8 @@ def _rebuild_feedback_states_for_recommendations(
                 user_id=target_user_id,
                 recommendation_id=rec_id,
                 selected_menu_id=fb.selected_menu_id,
+                food_kind_id=fb.food_kind_id,
+                exposure_rank=fb.exposure_rank,
                 menu_key=mkey,
                 menu_base_name=fb.menu_base_name or mkey,
                 menu_main_ingredient=fb.menu_main_ingredient or "other",
@@ -664,6 +667,14 @@ def _merge_uuid_user_into_kakao_target(
         RecommendationFeedbackState.user_id == origin_id
     ).update(
         {RecommendationFeedbackState.user_id: target_id},
+        synchronize_session=False,
+    )
+    db.query(PlaceSelection).filter(PlaceSelection.user_id == origin_id).update(
+        {PlaceSelection.user_id: target_id},
+        synchronize_session=False,
+    )
+    db.query(PlaceSatisfaction).filter(PlaceSatisfaction.user_id == origin_id).update(
+        {PlaceSatisfaction.user_id: target_id},
         synchronize_session=False,
     )
     db.flush()

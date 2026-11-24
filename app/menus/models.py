@@ -243,6 +243,9 @@ class Recommendation(Base):
     shown_question_ids = Column(JSON, nullable=False, default=list)
     answers_json = Column(JSON, nullable=False, default=list)
     recommended_menu_ids = Column(JSON, nullable=False, default=list)
+    initial_candidate_count = Column(Integer, nullable=True)
+    list_rejected_at = Column(DateTime, nullable=True, index=True)
+    closed_at = Column(DateTime, nullable=True, index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -290,6 +293,8 @@ class RecommendationFeedback(Base):
     )
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True)
     selected_menu_id = Column(Integer, ForeignKey("menus.id", ondelete="SET NULL"), nullable=True)
+    food_kind_id = Column(Integer, ForeignKey("food_kinds.id", ondelete="SET NULL"), index=True, nullable=True)
+    exposure_rank = Column(Integer, nullable=True)
     menu_key = Column(String(100), nullable=True, index=True)
     menu_base_name = Column(String(100), nullable=True)
     menu_main_ingredient = Column(String(30), nullable=True)
@@ -318,6 +323,8 @@ class RecommendationFeedbackState(Base):
     )
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     selected_menu_id = Column(Integer, ForeignKey("menus.id", ondelete="SET NULL"), nullable=True)
+    food_kind_id = Column(Integer, ForeignKey("food_kinds.id", ondelete="SET NULL"), index=True, nullable=True)
+    exposure_rank = Column(Integer, nullable=True)
     menu_key = Column(String(100), nullable=False)
     menu_base_name = Column(String(100), nullable=False)
     menu_main_ingredient = Column(String(30), nullable=False, default="other")

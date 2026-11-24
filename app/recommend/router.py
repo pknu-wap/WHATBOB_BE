@@ -12,12 +12,12 @@ from app.recommend.common import (
     UNABLE_CATALOG_VERSION,
     UNABLE_INGREDIENT_ITEMS,
 )
+from app.recommend.feedback import record_recommendation_feedback, reject_recommendation_list
 from app.recommend.order_sheet import (
     DEFAULT_EXPLOITATION_COUNT,
     DEFAULT_TOTAL_QUESTIONS,
     create_order_sheet_recommendation,
     issue_order_sheet_questions,
-    record_recommendation_feedback,
     select_order_sheet_questions,
     tune_question_weights,
 )
@@ -35,6 +35,7 @@ from app.recommend.schemas import (
     RandomRecommendResponse,
     RecommendationFeedbackRequest,
     RecommendationFeedbackResponse,
+    RecommendationRejectResponse,
     UnableIngredientItemDTO,
     UnableIngredientListResponse,
 )
@@ -238,6 +239,33 @@ def submit_recommendation_feedback(
         db=db,
         recommendation_id=recommendation_id,
         request=request,
+        user_id=actor.id if actor is not None else None,
+        current_user=actor,
+        idempotency_key=raw_idem_key,
+    )
+    return ApiResponse(success=True, data=result, message=None)
+
+
+@router.post(
+    "/{recommendation_id}/reject",
+    response_model=ApiResponse[RecommendationRejectResponse],
+    status_code=status.HTTP_200_OK,
+)
+def submit_recommendation_list_rejection(
+    recommendation_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    """
+    첫 추천 목록에서 '이 중엔 먹고 싶은 게 없어요'를 선택했을 때
+    해당 주문서를 종료하고 명시적 목록 거절 한 건을 멱등하게 기록합니다.
+    """
+    actor = current_user if isinstance(current_user, User) else None
+    raw_idem_key = idempotency_key if isinstance(idempotency_key, str) else None
+    result = reject_recommendation_list(
+        db=db,
+        recommendation_id=recommendation_id,
         user_id=actor.id if actor is not None else None,
         current_user=actor,
         idempotency_key=raw_idem_key,

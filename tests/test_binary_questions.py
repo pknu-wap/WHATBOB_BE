@@ -319,10 +319,13 @@ def test_seed_preserves_old_feedback_and_serves_binary_questions(db):
         question_id: count + 3 for question_id, count in initial_shown_counts.items()
     }
 
-    record_recommendation_feedback(db, record.id, RecommendationFeedbackRequest(
+    legacy_fb = record_recommendation_feedback(db, record.id, RecommendationFeedbackRequest(
         selected_menu_id=menu.id, is_satisfied=True,
     ))
-    assert old.positive_count == 1
+    # Spec #77 (#79): 비활성 이전 질문의 답변 조건 일치 기록은 유지하되 질문 전역 positive_count로 전파하지 않는다.
+    assert legacy_fb.exposure_rank == 1
+    assert legacy_fb.updated_weights == {}
+    assert old.positive_count == 0
     new_question = db.query(OrderSheetQuestion).filter(OrderSheetQuestion.is_active.is_(True)).first()
     weight = new_question.importance_weight
     repeated = seed_menus.seed_question_pool(db)

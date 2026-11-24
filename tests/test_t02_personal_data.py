@@ -331,7 +331,8 @@ def test_t02_feedback_idempotency_effective_single_vote_and_modification(env):
         json={"selected_menu_id": chicken_id, "is_satisfied": True},
     ).status_code == 404
 
-    # 1) 같은 Idempotency-Key 재전송 -> 1이력, 전역 통계 중복 없음
+    # 1) 같은 Idempotency-Key 재전송 -> 1이력, 전역 질문 가중치 미전파(Spec #77)
+    initial_soup_weight = float(env.q_soup.importance_weight)
     fb_headers = {**env.headers, "Idempotency-Key": "fb-key-1"}
     f1 = env.client.post(
         f"/api/recommendations/{rec_id}/feedback",
@@ -345,11 +346,12 @@ def test_t02_feedback_idempotency_effective_single_vote_and_modification(env):
     )
     assert f1.status_code == 200 and f2.status_code == 200
     assert f1.json()["data"]["feedback_id"] == f2.json()["data"]["feedback_id"]
+    assert f1.json()["data"]["updated_weights"] == {}
     assert env.db.query(RecommendationFeedback).filter_by(recommendation_id=rec_id).count() == 1
     assert env.db.query(RecommendationFeedbackState).filter_by(recommendation_id=rec_id).count() == 1
     env.db.refresh(env.q_soup)
-    assert env.q_soup.positive_count == 1
-    w_after_first = f1.json()["data"]["updated_weights"][env.q_soup.question_code]
+    assert env.q_soup.positive_count == 0
+    assert float(env.q_soup.importance_weight) == initial_soup_weight
 
     # 2) 같은 Idempotency-Key에 다른 payload -> 409
     f_conflict = env.client.post(
@@ -359,20 +361,21 @@ def test_t02_feedback_idempotency_effective_single_vote_and_modification(env):
     )
     assert f_conflict.status_code == 409
 
-    # 3) 같은 값(True)을 새 작업 키로 전송 -> 이력은 남지만 유효 상태/전역 집계 불변
+    # 3) 같은 값(True)을 새 작업 키로 재전송 -> 동일 클릭 중복 집계 방지(단일 반응 유지)
     f_same_val = env.client.post(
         f"/api/recommendations/{rec_id}/feedback",
         headers={**env.headers, "Idempotency-Key": "fb-key-2"},
         json={"selected_menu_id": chicken_id, "is_satisfied": True},
     )
     assert f_same_val.status_code == 200
+    assert f_same_val.json()["data"]["feedback_id"] == f1.json()["data"]["feedback_id"]
+    assert f_same_val.json()["data"]["updated_weights"] == {}
     env.db.refresh(env.q_soup)
-    assert env.q_soup.positive_count == 1
-    assert f_same_val.json()["data"]["updated_weights"][env.q_soup.question_code] == w_after_first
-    assert env.db.query(RecommendationFeedback).filter_by(recommendation_id=rec_id).count() == 2
+    assert env.q_soup.positive_count == 0
+    assert env.db.query(RecommendationFeedback).filter_by(recommendation_id=rec_id).count() == 1
     assert env.db.query(RecommendationFeedbackState).filter_by(recommendation_id=rec_id).count() == 1
 
-    # 4) 좋아요 -> 싫어요 수정 -> 이력 보존, 유효 1표는 False로 갱신, positive_count 감소
+    # 4) 좋아요 -> 싫어요 수정 -> 변경 이력 기록, 유효 1표는 False로 갱신, 질문 전역 가중치 불변
     f_mod = env.client.post(
         f"/api/recommendations/{rec_id}/feedback",
         headers={**env.headers, "Idempotency-Key": "fb-key-3"},
@@ -383,7 +386,7 @@ def test_t02_feedback_idempotency_effective_single_vote_and_modification(env):
     assert env.q_soup.positive_count == 0
     state = env.db.query(RecommendationFeedbackState).filter_by(recommendation_id=rec_id).one()
     assert state.is_satisfied is False
-    assert env.db.query(RecommendationFeedback).filter_by(recommendation_id=rec_id).count() == 3
+    assert env.db.query(RecommendationFeedback).filter_by(recommendation_id=rec_id).count() == 2
 
 
 def test_t02_personal_model_training_validation_fallback_and_weighted_draw_distribution(env):
