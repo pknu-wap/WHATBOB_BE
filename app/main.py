@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 import app.menus.models  # noqa: F401
 import app.users.models  # noqa: F401
 import app.auth.models  # noqa: F401
+import app.map.models  # noqa: F401
 from app.auth.cookie_router import router as cookie_auth_router, allowed_web_origins
 from app.auth.revocations import kakao_revocation_loop
 from app.auth.router import router as auth_router
