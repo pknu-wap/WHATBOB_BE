@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from sqlalchemy.orm import Session
 
@@ -618,6 +618,7 @@ def summarize_first_list_reactions(
     user_id: int | None = None,
     recommendation_ids: Iterable[int] | None = None,
     reaction_window_hours: float | None = None,
+    reaction_cutoffs: Mapping[int, datetime] | None = None,
 ) -> FirstListReactionSummary:
     """
     추천 목록 집합에 대해 최초 후보 0건, 첫 목록 좋아요(1건 이상), 명시적 목록 거절,
@@ -664,7 +665,7 @@ def summarize_first_list_reactions(
 
     rec_ids = [rec.id for rec in recs]
     states_by_rec: dict[int, list[RecommendationFeedbackState]] = {}
-    if reaction_window_hours is None:
+    if reaction_window_hours is None and reaction_cutoffs is None:
         for st in (
             db.query(RecommendationFeedbackState)
             .filter(RecommendationFeedbackState.recommendation_id.in_(rec_ids))
@@ -684,15 +685,15 @@ def summarize_first_list_reactions(
 
     outcomes: list[RecommendationReactionOutcome] = []
     for rec in recs:
-        cutoff_utc = None
-        if reaction_window_hours is not None and rec.created_at is not None:
+        cutoff_utc = reaction_cutoffs.get(rec.id) if reaction_cutoffs is not None else None
+        if cutoff_utc is None and reaction_window_hours is not None and rec.created_at is not None:
             cutoff_utc = as_utc_naive(rec.created_at) + timedelta(hours=float(reaction_window_hours))
 
         raw_fbs = feedbacks_by_rec.get(rec.id, [])
         if cutoff_utc is not None:
             raw_fbs = [
                 fb for fb in raw_fbs
-                if fb.created_at is not None and as_utc_naive(fb.created_at) <= cutoff_utc
+                if fb.created_at is not None and as_utc_naive(fb.created_at) <= as_utc_naive(cutoff_utc)
             ]
         if _is_zero_candidates_recommendation(rec):
             reactions: list[MenuReactionRecord] = []

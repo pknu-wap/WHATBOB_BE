@@ -170,6 +170,7 @@ def evaluate_order_sheet_candidates(
     score_weights: Mapping[int | str, float] | None = None,
     long_term_preference_scores: Mapping[str | int, float] | None = None,
     recent_meal_penalties: Mapping[int, float] | None = None,
+    ranking_rule_version: str | None = None,
 ) -> OrderSheetEvaluationResult:
     """
     Spec #77 첫 메뉴 추천 순위 평가 파이프라인:
@@ -317,5 +318,5 @@ def evaluate_order_sheet_candidates(
         hard_filter_traces=hard_filter_traces,
         applied_hard_filter_question_ids=applied_hard_filter_question_ids,
         score_question_ids=score_question_ids,
-        ranking_rule_version=str(settings.ORDER_SHEET_RANKING_RULE_VERSION),
+        ranking_rule_version=ranking_rule_version or settings.ORDER_SHEET_RANKING_RULE_VERSION,
     )
