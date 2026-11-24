@@ -29,6 +29,8 @@ def assert_legacy_schema_upgrades(engine):
         assert "order_sheet_replay_snapshots" in pending
         assert "order_sheet_question_reviews" in pending
         assert "personal_order_sheet_question_assignments" in pending
+        assert "common_order_sheet_question_experiments" in pending
+        assert "common_order_sheet_question_assignments" in pending
         assert "recommendation_feedbacks.food_kind_id" in pending
         migrate_order_sheet(connection)
         assert pending_order_sheet_schema(connection) == []

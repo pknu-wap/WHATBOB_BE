@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 import random
 
-from sqlalchemy import func, or_, tuple_
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -30,8 +30,8 @@ from app.recommend.order_sheet import (
 from app.recommend.question_experiments import (
     CONTROL,
     VARIANT,
-    _distinguishes_available_menus,
     apply_question_overrides,
+    distinguishes_available_menus,
     frozen_experiment_questions_fit,
 )
 from app.recommend.ranking import resolve_question_role, resolve_score_weight
@@ -105,7 +105,6 @@ def _open_experiment(db: Session, now: datetime) -> bool:
     common = CommonOrderSheetQuestionExperiment
     previously_tested = db.query(common.id).filter(
         common.slot_key == personal.slot_key,
-        common.control_question_id == personal.control_question_id,
         common.variant_question_id == personal.variant_question_id,
     ).exists()
     candidates = db.query(personal).filter(
@@ -126,34 +125,37 @@ def _open_experiment(db: Session, now: datetime) -> bool:
         return False
     slot_keys = tuple(question.cluster_key for question in baseline.questions)
     control = apply_question_overrides(baseline, slot_keys, pool, load_common_question_overrides(db))
-    control_by_slot = dict(zip(slot_keys, control.questions))
+    control_positions = {slot_key: index for index, slot_key in enumerate(slot_keys)}
     eligible_variants = {
         question.id: axes
         for question, axes, _ in pool.valid_candidates
         if resolve_question_role(question.id, question.cluster_key) == "score"
-        and _distinguishes_available_menus(question, pool)
+        and distinguishes_available_menus(question, pool)
     }
     if not eligible_variants:
         return False
 
-    supported_pairs = [
-        (slot_key, question.id) for slot_key, question in control_by_slot.items()
+    supported_slots = {
+        slot_key: question.id for slot_key, question in zip(slot_keys, control.questions)
         if resolve_question_role(question.id, question.cluster_key) == "score"
-    ]
+    }
     trials = (
-        candidates.with_entities(personal.slot_key, personal.control_question_id, personal.variant_question_id)
+        candidates.with_entities(personal.slot_key, personal.variant_question_id)
         .filter(
-            tuple_(personal.slot_key, personal.control_question_id).in_(supported_pairs),
+            personal.slot_key.in_(supported_slots),
             personal.variant_question_id.in_(eligible_variants),
         )
-        .group_by(personal.slot_key, personal.control_question_id, personal.variant_question_id)
+        .group_by(personal.slot_key, personal.variant_question_id)
         .order_by(func.min(personal.completed_at), func.min(personal.id))
         .all()
     )
     axes_by_id = {question.id: axes for question, axes, _ in pool.valid_candidates}
-    for slot, control_id, variant_id in trials:
+    for slot, variant_id in trials:
+        control_id = supported_slots[slot]
+        if axes_by_id[control_id] & eligible_variants[variant_id]:
+            continue
         variant = apply_question_overrides(control, slot_keys, pool, {slot: variant_id})
-        if axes_by_id[control_id] & eligible_variants[variant_id] or variant.questions[slot_keys.index(slot)].id != variant_id:
+        if variant.questions[control_positions[slot]].id != variant_id:
             continue
         roles = {
             str(question.id): resolve_question_role(question.id, question.cluster_key)
@@ -200,6 +202,7 @@ def _capture_cohort(db: Session, experiment: CommonOrderSheetQuestionExperiment,
         .filter(
             assignment.experiment_id == experiment.id,
             assignment.arm == arm,
+            OrderSheetIssuance.status == "COMPLETED",
             OrderSheetIssuance.completed_at.is_not(None),
             Recommendation.order_sheet_list_scope == PERSONAL_INITIAL_LIST,
         )
@@ -235,7 +238,7 @@ def _check_experiment(db: Session, experiment: CommonOrderSheetQuestionExperimen
         return changed
     metrics = {
         arm: ArmMetrics.from_summary(summarize_first_list_reactions(
-            db, recommendation_ids=deadlines, reaction_cutoffs=deadlines,
+            db, recommendation_ids=deadlines, reaction_cutoffs=deadlines, for_update=True,
         ))
         for arm, deadlines in cutoffs.items()
     }

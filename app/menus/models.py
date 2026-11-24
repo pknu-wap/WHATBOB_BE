@@ -15,7 +15,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.mysql import DATETIME
 from sqlalchemy.orm import relationship
-from sqlalchemy.dialects.mysql import DATETIME
 from app.core.database import Base
 
 
@@ -355,9 +354,7 @@ class CommonOrderSheetQuestionExperiment(Base):
     __tablename__ = "common_order_sheet_question_experiments"
     __table_args__ = (
         UniqueConstraint("active", name="uq_common_sheet_experiment_active"),
-        UniqueConstraint(
-            "slot_key", "control_question_id", "variant_question_id", name="uq_common_sheet_experiment_questions",
-        ),
+        UniqueConstraint("slot_key", "variant_question_id", name="uq_common_sheet_experiment_variant"),
         CheckConstraint("active IS NULL OR active = 1", name="ck_common_sheet_experiment_active"),
     )
 
@@ -373,8 +370,8 @@ class CommonOrderSheetQuestionExperiment(Base):
     submissions_per_arm = Column(Integer, nullable=False)
     reaction_window_hours = Column(Integer, nullable=False)
     active = Column(Boolean, nullable=True, default=True)
-    created_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=False)
-    completed_at = Column(DateTime().with_variant(DATETIME(fsp=6), "mysql"), nullable=True)
+    created_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False)
+    completed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
     adopted = Column(Boolean, nullable=True)
     cohorts_json = Column(JSON, nullable=False, default=dict)
     decision_metrics_json = Column(JSON, nullable=True)

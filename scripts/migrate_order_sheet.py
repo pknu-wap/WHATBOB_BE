@@ -26,6 +26,8 @@ ADDED_TABLES = (
     "personal_order_sheet_question_experiments",
     "personal_order_sheet_question_assignments",
     "personal_order_sheet_question_overrides",
+    "common_order_sheet_question_experiments",
+    "common_order_sheet_question_assignments",
     "place_selections",
     "place_satisfactions",
 )
