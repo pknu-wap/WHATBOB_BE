@@ -13,6 +13,7 @@ from app.recommend.common import (
     UNABLE_INGREDIENT_ITEMS,
 )
 from app.recommend.feedback import record_recommendation_feedback, reject_recommendation_list
+from app.recommend.no_results import get_personal_order_sheet_no_results_suggestions
 from app.recommend.order_sheet import (
     DEFAULT_EXPLOITATION_COUNT,
     DEFAULT_TOTAL_QUESTIONS,
@@ -26,6 +27,7 @@ from app.recommend.schemas import (
     AllergenItemDTO,
     AllergenListResponse,
     ApiResponse,
+    OrderSheetNoResultsResponse,
     OrderSheetQuestionsResponse,
     OrderSheetRecommendRequest,
     OrderSheetRecommendResponse,
@@ -209,6 +211,30 @@ def submit_order_sheet(
     """
     actor = current_user if isinstance(current_user, User) else None
     result = create_order_sheet_recommendation(
+        db=db,
+        request=request,
+        user_id=actor.id if actor is not None else None,
+        current_user=actor,
+    )
+    return ApiResponse(success=True, data=result, message=None)
+
+
+@router.post(
+    "/order-sheet/no-results",
+    response_model=ApiResponse[OrderSheetNoResultsResponse],
+    status_code=status.HTTP_200_OK,
+)
+def get_order_sheet_no_results_suggestions(
+    request: OrderSheetRecommendRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    개인 주문서 첫 추천 후보가 0종일 때, 적용 중인 취향 하드필터 답변을 하나씩 독립적으로
+    중립('상관없어요')으로 바꿔 후보가 생기는 변경 제안을 읽기 전용으로 조회합니다.
+    """
+    actor = current_user if isinstance(current_user, User) else None
+    result = get_personal_order_sheet_no_results_suggestions(
         db=db,
         request=request,
         user_id=actor.id if actor is not None else None,

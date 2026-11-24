@@ -59,6 +59,7 @@ from app.recommend.question_pool import (
     QUESTION_CODE_PREFIX,
     get_question_display,
 )
+from app.recommend.hard_filter_audit import record_hard_filter_traces
 from app.recommend.ranking import (
     OrderSheetEvaluationResult,
     evaluate_order_sheet_candidates,
@@ -1007,6 +1008,14 @@ def create_order_sheet_recommendation(
     )
     db.add(rec_record)
     db.flush()
+
+    record_hard_filter_traces(
+        db=db,
+        recommendation_id=rec_record.id,
+        user_id=effective_user_id,
+        traces=evaluation.hard_filter_traces,
+        created_at=now,
+    )
 
     if issuance is not None and issuance.recommendation_id is None:
         issuance.recommendation_id = rec_record.id
