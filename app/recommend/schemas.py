@@ -82,6 +82,7 @@ class UnableIngredientListResponse(BaseModel):
 
 
 class OrderSheetQuestionsResponse(BaseModel):
+    order_sheet_id: Optional[str] = None
     questions: list[OrderSheetQuestionDTO]
     total_count: int
     exploitation_count: int

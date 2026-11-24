@@ -23,6 +23,35 @@ class Settings(BaseSettings):
     PROFILE_IMAGE_MAX_SIDE: int = 512
     PROFILE_IMAGE_ORPHAN_GRACE_SECONDS: int = 300
     PERSONAL_MODEL_ARTIFACT_PATH: str = ".data/models/personal_logistic_active.json"
+    ORDER_SHEET_QUESTION_COUNT: int = Field(default=9, ge=1, le=20)
+    ORDER_SHEET_ENTROPY_WEIGHT: float = Field(default=0.75, ge=0.0, le=1.0)
+    ORDER_SHEET_COVERAGE_WEIGHT: float = Field(default=0.25, ge=0.0, le=1.0)
+    ORDER_SHEET_MAX_RECOMMENDATIONS: int = Field(default=5, ge=1, le=20)
+    ORDER_SHEET_INITIAL_CLUSTERS: tuple[str, ...] = (
+        "sodium_level",
+        "heaviness",
+        "has_soup",
+        "flavor_intensity",
+        "origin_type",
+        "carb_level",
+        "protein_level",
+        "cooking_style",
+        "main_ingredient",
+    )
+    ORDER_SHEET_HARD_FILTER_CLUSTERS: tuple[str, ...] = (
+        "has_soup",
+        "cooking_style",
+        "main_ingredient",
+    )
+    ORDER_SHEET_SCORE_CLUSTERS: tuple[str, ...] = (
+        "sodium_level",
+        "heaviness",
+        "flavor_intensity",
+        "origin_type",
+        "carb_level",
+        "protein_level",
+    )
+    ORDER_SHEET_QUESTION_ROLE_OVERRIDES: dict[int, str] = Field(default_factory=dict)
     TRANSITION_PREPARE_COOKIE_NAME: str = Field(
         default="__Secure-whatbob_transition",
         pattern=r"^__Secure-[A-Za-z0-9_-]+$",

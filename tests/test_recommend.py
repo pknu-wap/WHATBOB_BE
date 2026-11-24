@@ -93,7 +93,8 @@ def test_csv_parser_and_large_question_pool_generation():
     for q in pool:
         assert "question_code" in q
         assert "cluster_key" in q
-        assert len(q["options"]) == 3
+        expected_opt_count = 4 if q["cluster_key"] == "cooking_style" else 3
+        assert len(q["options"]) == expected_opt_count
         assert 1 <= len(q["question_text"]) <= 24
 
 

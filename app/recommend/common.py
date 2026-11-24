@@ -332,7 +332,7 @@ UNABLE_RULE_SPEC: dict[str, dict[str, Any]] = {
         "keywords": OFFICIAL_ALLERGEN_RULES["쇠고기(소고기)"] + ("쇠고기", "스테이크", "사골"),
     },
     "poultry": {
-        "main_ingredients": {"chicken"},
+        "main_ingredients": {"chicken", "poultry"},
         "allergen_tags": {"닭고기"},
         "keywords": OFFICIAL_ALLERGEN_RULES["닭고기"] + ("오리고기", "오리", "가금류"),
         "strip_stingray": True,
