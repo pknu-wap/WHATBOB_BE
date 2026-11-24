@@ -372,3 +372,38 @@ class RecommendationItemSnapshot(Base):
     feature_schema_version = Column(Integer, nullable=False, default=1)
     features_json = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class OrderSheetHardFilterTrace(Base):
+    """주문서별 하드필터 적용 순서·질문·답변 및 단계별 전후 후보 수 점검 기록 테이블 (Spec #77 / #87)"""
+    __tablename__ = "order_sheet_hard_filter_traces"
+    __table_args__ = (
+        CheckConstraint("step_order >= 1", name="ck_order_sheet_hf_traces_step_order_positive"),
+        UniqueConstraint("recommendation_id", "step_order", name="uq_order_sheet_hf_traces_rec_step"),
+        Index("ix_order_sheet_hf_traces_user_created", "user_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    recommendation_id = Column(
+        Integer,
+        ForeignKey("recommendations.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    step_order = Column(Integer, nullable=False)
+    question_id = Column(Integer, index=True, nullable=False)
+    question_code = Column(String(80), index=True, nullable=False)
+    cluster_key = Column(String(50), index=True, nullable=False)
+    option_id = Column(String(80), nullable=False)
+    before_count = Column(Integer, nullable=False)
+    after_count = Column(Integer, nullable=False)
+    before_kind_count = Column(Integer, nullable=False)
+    after_kind_count = Column(Integer, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
