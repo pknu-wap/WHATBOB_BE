@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import logging
 
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 import app.auth.models  # noqa: F401
+from app.auth.dependencies import get_current_user
 import app.map.models  # noqa: F401
 from app.auth.transitions import _merge_uuid_user_into_kakao_target
 from app.core.config import settings
-from app.core.database import Base
+from app.core.database import Base, get_db
 from app.menus.models import (
     Menu,
     OrderSheetIssuance,
@@ -35,6 +39,7 @@ from app.recommend.replay import (
     save_replay_snapshot_if_eligible,
     verify_and_load_recent_replay_snapshots,
 )
+from app.recommend.router import router as recommend_router
 from app.recommend.schemas import AnswerItemRequest, OrderSheetRecommendRequest
 from app.users.models import User
 
@@ -717,6 +722,76 @@ def test_review_budget_includes_missing_sheets_and_replays_each_question(db):
     assert set(sheet.question_replays) == {1}
     assert sheet.question_replays[1].replayed_menu_ids == [101, 102]
     assert sheet.question_replays[1].replayed_entries[0].total_score == 0.0
+
+
+def test_http_first_list_replays_in_display_order_after_catalog_changes(db):
+    user = User(kakao_id=880009, nickname="first-list")
+    db.add(user)
+    questions = _seed_initial_nine_questions(db)
+    sodium_question_id = questions["sodium_level"].id
+    names = ["비빔밥", "김치볶음밥", "제육덮밥", "오므라이스", "카레라이스", "알밥"]
+    seeded_menus = [
+        _add_menu(
+            db,
+            food_code=f"HTTP88_{i}",
+            name=names[i],
+            sodium_mg=900.0 if i == 0 else 100.0,
+            has_soup=i % 2 == 0,
+            cooking_style="rice" if i % 2 == 0 else "noodle",
+            main_ingredient="pork" if i % 2 == 0 else "seafood",
+            heaviness="light" if i % 2 == 0 else "heavy",
+            flavor_intensity="spicy_bold" if i % 2 == 0 else "mild_clean",
+            origin_type="home_style" if i % 2 == 0 else "restaurant",
+            carb_g=10.0 if i % 2 == 0 else 60.0,
+            protein_g=8.0 if i % 2 == 0 else 30.0,
+        )
+        for i in reversed(range(len(names)))
+    ]
+    menus = list(reversed(seeded_menus))
+    db.commit()
+    menu_ids = [menu.id for menu in menus]
+
+    app = FastAPI()
+    app.include_router(recommend_router)
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_current_user] = lambda: user
+
+    async def submit_issued_sheet():
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            issued = await client.get("/api/recommendations/order-sheet/questions")
+            assert issued.status_code == 200, issued.text
+            sheet = issued.json()["data"]
+            answers = [
+                {
+                    "question_id": question["id"],
+                    "option_id": "low_sodium" if question["id"] == sodium_question_id else "any",
+                }
+                for question in sheet["questions"]
+            ]
+            response = await client.post(
+                "/api/recommendations/order-sheet",
+                json={"order_sheet_id": sheet["order_sheet_id"], "answers": answers},
+            )
+            assert response.status_code == 201, response.text
+            return response.json()["data"]
+
+    recommendation = asyncio.run(submit_issued_sheet())
+    shown_ids = [entry["menu_id"] for entry in recommendation["recommended_menus"]]
+    assert shown_ids == menu_ids[1:]
+
+    menus[1].food_code = "UPDATED"
+    menus[1].sodium_mg = 2000.0
+    db.delete(menus[2])
+    db.commit()
+
+    review = verify_and_load_recent_replay_snapshots(db, user.id)
+    (verified,) = review.verified_sheets
+    assert verified.snapshot.recommendation_id == recommendation["recommendation_id"]
+    assert verified.baseline_replay.replayed_menu_ids == shown_ids
+    assert len(verified.question_replays) == 6
+    assert verified.question_replays[sodium_question_id].replayed_menu_ids == menu_ids[:5]
 
 
 def test_purge_expired_replay_snapshots_removes_only_expired_and_keeps_recommendations_and_feedback(db):

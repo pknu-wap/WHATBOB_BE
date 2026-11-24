@@ -40,6 +40,7 @@ from app.recommend.common import (
     is_menu_excluded,
 )
 from app.recommend.long_term_preference import load_long_term_preference_scores
+from app.recommend.meal_penalty import load_recent_meal_penalties
 from app.recommend.personal_model import FEATURE_SCHEMA_VERSION
 from app.recommend.schemas import (
     FilterRuleDTO,
@@ -526,15 +527,18 @@ def select_order_sheet_questions(
     *,
     user_id: int | None = None,
     exclusion_keywords: set[str] | list[str] | None = None,
+    available_menus: list[Menu] | None = None,
+    fill_question_count: bool = False,
     commit: bool = True,
 ) -> OrderSheetQuestionsResponse:
     """
     Spec #77 주문서 질문 선별:
     - 기본 문항 수는 settings.ORDER_SHEET_QUESTION_COUNT(9)에서 관리한다.
-    - 사용자 알레르기·제외 조건에 부적절한 질문, 남은 후보 메뉴를 구분하지 못하는 퇴화 질문,
-      이미 선택된 질문과 의미가 겹치는 질문(재표현·반대 방향·하위 주제)을 제외한다.
+    - 사용자 알레르기·제외 조건에 부적절하거나 다른 선택 문항과 의미가 겹치는 질문을 제외한다.
     - exploitation_count 미지정 시 Spec #77 기본 9개 주제(Q1~Q9)를 우선 채우고,
       빈자리는 남은 후보를 잘 구분하는 상위 후보(종류별 1/N 엔트로피·커버리지 순)로 채운다.
+    - available_menus를 전달하는 호출자는 동일한 제외 조건을 적용한 메뉴를 재사용한다.
+    - fill_question_count는 유효 주제가 부족한 방 주문서의 빈자리를 적합한 주제로 채운다.
     - commit=False 인 경우 상위 트랜잭션을 조기 커밋하지 않고 flush 만 수행한다.
     """
     target_total = (
@@ -562,15 +566,11 @@ def select_order_sheet_questions(
     else:
         effective_exclusions = set()
 
-    all_menus = db.query(Menu).all()
-    available_menus: list[Menu] = []
-    weighted_menus: tuple[list[tuple[Menu, float]], float] | None = None
-    if all_menus:
+    if available_menus is None:
         available_menus = [
-            menu for menu in all_menus if not is_menu_excluded(menu, effective_exclusions)
+            menu for menu in db.query(Menu).all() if not is_menu_excluded(menu, effective_exclusions)
         ]
-        if len(available_menus) >= 2:
-            weighted_menus = _build_menu_kind_weights(available_menus)
+    weighted_menus = _build_menu_kind_weights(available_menus) if len(available_menus) >= 2 else None
 
     metrics_cache: dict[str, QuestionRankingMetrics] = {}
     valid_candidates: list[tuple[OrderSheetQuestion, frozenset[str], float]] = []
@@ -632,6 +632,23 @@ def select_order_sheet_questions(
                 ),
             )
             for q, axes, _ in remaining:
+                if len(selected_exploit) >= target_total:
+                    break
+                if axes & used_axes:
+                    continue
+                selected_exploit.append(q)
+                used_axes.update(axes)
+
+        if fill_question_count and len(selected_exploit) < target_total:
+            # 카탈로그가 작을 때에도 적합하고 주제가 다른 문항을 우선순위대로 채운다.
+            initial_order = {
+                cluster: index for index, cluster in enumerate(settings.ORDER_SHEET_INITIAL_CLUSTERS)
+            }
+            fallback = sorted(
+                non_inappropriate_fallback,
+                key=lambda item: initial_order.get(item[0].cluster_key, len(initial_order)),
+            )
+            for q, axes, _ in fallback:
                 if len(selected_exploit) >= target_total:
                     break
                 if axes & used_axes:
@@ -983,6 +1000,13 @@ def create_order_sheet_recommendation(
             user_id=effective_user_id,
             reference_time=now,
         )
+    effective_recent_meal_penalties = recent_meal_penalties
+    if effective_recent_meal_penalties is None and effective_user_id is not None:
+        effective_recent_meal_penalties = load_recent_meal_penalties(
+            db=db,
+            user_id=effective_user_id,
+            reference_time=now,
+        )
 
     evaluation: OrderSheetEvaluationResult = evaluate_order_sheet_candidates(
         menus=all_menus,
@@ -991,7 +1015,7 @@ def create_order_sheet_recommendation(
         top_k=request.top_k,
         role_overrides=frozen_role_overrides,
         long_term_preference_scores=effective_long_term_scores,
-        recent_meal_penalties=recent_meal_penalties,
+        recent_meal_penalties=effective_recent_meal_penalties,
     )
     top_details = evaluation.selected_candidates
     surviving_kind_count = len(evaluation.surviving_kind_representatives)
