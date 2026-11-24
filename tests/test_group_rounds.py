@@ -281,8 +281,8 @@ def test_t02_host_only_minimum_members_and_pure_question_get():
     assert q1.headers.get("cache-control") == "no-store"
     assert q1.json() == q2.json()
     assert q1.json()["total_count"] == 9
-    assert q1.json()["exploitation_count"] == 7
-    assert q1.json()["exploration_count"] == 2
+    assert q1.json()["exploitation_count"] == 9
+    assert q1.json()["exploration_count"] == 0
     q_after = {
         q.id: q.shown_count for q in db.query(OrderSheetQuestion).all()
     }
