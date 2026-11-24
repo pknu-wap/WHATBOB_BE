@@ -47,6 +47,7 @@ from app.recommend.common import (
 )
 from app.recommend.long_term_preference import load_long_term_preference_scores
 from app.recommend.meal_penalty import load_recent_meal_penalties
+from app.recommend.personal_experiment_events import record_personal_experiment_completion
 from app.recommend.personal_model import FEATURE_SCHEMA_VERSION
 from app.recommend.schemas import (
     FilterRuleDTO,
@@ -1186,6 +1187,8 @@ def create_order_sheet_recommendation(
         issuance.recommendation_id = rec_record.id
         issuance.completed_at = now
         issuance.status = "COMPLETED"
+        if personal_assignment:
+            record_personal_experiment_completion(db, issuance.id)
 
     should_record_replay = (
         record_replay_snapshot

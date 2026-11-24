@@ -25,6 +25,7 @@ from app.recommend.common import (
     RecommendationNotFoundException,
     evaluate_option_rules,
 )
+from app.recommend.personal_experiment_events import record_personal_experiment_reaction
 from app.recommend.question_review import enqueue_rejected_initial_list_review
 from app.recommend.schemas import (
     RecommendationFeedbackRequest,
@@ -366,6 +367,7 @@ def record_recommendation_feedback(
         operation.response_json = response.model_dump()
         operation.updated_at = utc_now()
 
+    record_personal_experiment_reaction(db, rec.id, explicit=desired_satisfied)
     db.commit()
     return response
 
@@ -443,6 +445,7 @@ def reject_recommendation_list(
     if rec.list_rejected_at is None:
         rec.list_rejected_at = now
         enqueue_rejected_initial_list_review(db, rec, now)
+        record_personal_experiment_reaction(db, rec.id, explicit=True)
     if rec.closed_at is None:
         rec.closed_at = rec.list_rejected_at
 

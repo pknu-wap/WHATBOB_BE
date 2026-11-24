@@ -13,9 +13,13 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.mysql import DATETIME
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.mysql import DATETIME
 from app.core.database import Base
+
+
+ORDER_SHEET_TIMESTAMP = DateTime().with_variant(DATETIME(fsp=6), "mysql")
 
 
 class FoodKind(Base):
@@ -243,6 +247,9 @@ GROUP_ORDER_SHEET_LIST = "group"
 class Recommendation(Base):
     """주문서 추천 요청 및 결과 이력 테이블"""
     __tablename__ = "recommendations"
+    __table_args__ = (
+        Index("ix_recommendations_user_sheet_scope_created", "user_id", "order_sheet_list_scope", "created_at"),
+    )
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True)
@@ -251,8 +258,8 @@ class Recommendation(Base):
     recommended_menu_ids = Column(JSON, nullable=False, default=list)
     initial_candidate_count = Column(Integer, nullable=True)
     order_sheet_list_scope = Column(String(20), nullable=True)
-    list_rejected_at = Column(DateTime, nullable=True, index=True)
-    closed_at = Column(DateTime, nullable=True, index=True)
+    list_rejected_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True, index=True)
+    closed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True, index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -281,8 +288,8 @@ class OrderSheetIssuance(Base):
         nullable=True,
         index=True,
     )
-    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
-    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False, default=lambda: datetime.now(timezone.utc))
+    completed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
 
 
 class PersonalOrderSheetQuestionExperiment(Base):
@@ -292,6 +299,7 @@ class PersonalOrderSheetQuestionExperiment(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "active", name="uq_personal_sheet_experiment_active"),
         CheckConstraint("active IS NULL OR active = 1", name="ck_personal_sheet_experiment_active"),
+        Index("ix_personal_sheet_experiment_pending", "decision_requested_at", "id"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -303,9 +311,12 @@ class PersonalOrderSheetQuestionExperiment(Base):
     variant_questions_json = Column(JSON, nullable=False)
     question_roles_json = Column(JSON, nullable=False)
     active = Column(Boolean, nullable=True, default=True)
-    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
-    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False, default=lambda: datetime.now(timezone.utc))
+    completed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
     adopted = Column(Boolean, nullable=True)
+    decision_requested_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
+    decision_revision = Column(Integer, nullable=False, default=0, server_default="0")
+    decision_metrics_json = Column(JSON, nullable=True)
 
 
 class PersonalOrderSheetQuestionAssignment(Base):
@@ -335,7 +346,7 @@ class PersonalOrderSheetQuestionOverride(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     slot_key = Column(String(50), primary_key=True)
     question_id = Column(Integer, nullable=False)
-    adopted_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    adopted_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
 class CommonOrderSheetQuestionExperiment(Base):
@@ -558,8 +569,8 @@ class OrderSheetReplaySnapshot(Base):
         ForeignKey("order_sheet_issuances.id", ondelete="SET NULL"),
         nullable=True,
     )
-    completed_at = Column(DateTime, nullable=False)
-    expires_at = Column(DateTime, nullable=False)
+    completed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False)
+    expires_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False)
     question_answer_version = Column(String(64), nullable=False, default="spec77_qa_v1")
     ranking_rule_version = Column(String(64), nullable=False, default="spec77_v1")
     max_display_count = Column(Integer, nullable=False, default=5)
@@ -578,7 +589,7 @@ class OrderSheetQuestionReview(Base):
     __table_args__ = (Index("ix_order_sheet_question_reviews_pending", "pending_at", "user_id"),)
 
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
-    pending_at = Column(DateTime, nullable=True)
+    pending_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
     revision = Column(Integer, nullable=False, default=1)
-    reviewed_at = Column(DateTime, nullable=True)
+    reviewed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
     result_json = Column(JSON, nullable=True)

@@ -885,7 +885,3 @@ def test_uuid_to_kakao_merge_migrates_replay_snapshots_losslessly(db):
         rec_uuid.id,
     ]
     assert batch.excluded_sheets == []
-
-
-
-
