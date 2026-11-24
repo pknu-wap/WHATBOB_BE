@@ -246,6 +246,35 @@ class Recommendation(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class OrderSheetIssuance(Base):
+    """개인 주문서 발급 이력 및 동일 발급 재전송 멱등성 테이블"""
+    __tablename__ = "order_sheet_issuances"
+    __table_args__ = (
+        UniqueConstraint("user_id", "issuance_key", name="uq_order_sheet_issuances_user_key"),
+        Index("ix_order_sheet_issuances_user_created", "user_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    order_sheet_id = Column(String(64), unique=True, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=True)
+    issuance_key = Column(String(128), nullable=True, index=True)
+    question_ids_json = Column(JSON, nullable=False, default=list)
+    questions_snapshot_json = Column(JSON, nullable=False, default=list)
+    question_roles_json = Column(JSON, nullable=False, default=dict)
+    total_count = Column(Integer, nullable=False, default=9)
+    exploitation_count = Column(Integer, nullable=False, default=9)
+    exploration_count = Column(Integer, nullable=False, default=0)
+    status = Column(String(20), nullable=False, default="ISSUED", index=True)
+    recommendation_id = Column(
+        Integer,
+        ForeignKey("recommendations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    completed_at = Column(DateTime, nullable=True)
+
+
 class RecommendationFeedback(Base):
     """추천 만족 여부와 질문별 조건 일치 결과를 저장하는 피드백 테이블"""
     __tablename__ = "recommendation_feedbacks"

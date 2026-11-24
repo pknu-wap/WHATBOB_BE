@@ -1,8 +1,11 @@
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import math
 import random
 from typing import Any
+from uuid import uuid4
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth.operations import (
@@ -13,9 +16,12 @@ from app.auth.operations import (
     normalize_idempotency_key,
 )
 from app.auth.sessions import utc_now
+from app.core.config import settings
 from app.menus.display import format_menu_name
+from app.menus.food_kinds import classify_food_kind
 from app.menus.models import (
     Menu,
+    OrderSheetIssuance,
     OrderSheetQuestion,
     QuestionSelectionState,
     Recommendation,
@@ -31,6 +37,7 @@ from app.recommend.common import (
     collect_user_exclusion_keywords,
     evaluate_option_rules,
     filter_available_menus,
+    is_menu_excluded,
 )
 from app.recommend.personal_model import FEATURE_SCHEMA_VERSION
 from app.recommend.schemas import (
@@ -46,7 +53,12 @@ from app.recommend.schemas import (
     RecommendationFeedbackResponse,
     RecommendedMenuDTO,
 )
-from app.recommend.question_pool import get_question_display
+from app.recommend.question_pool import (
+    COOKING_STYLE_OPTIONS,
+    LEGACY_COOKING_STYLE_RULES,
+    QUESTION_CODE_PREFIX,
+    get_question_display,
+)
 from app.recommend.variety import menu_group, select_diverse_menus_with_snapshots
 from app.users.models import User
 
@@ -63,11 +75,40 @@ HARD_FILTER_PRIORITY: dict[str, int] = {
 HARD_FILTER_CLUSTERS = frozenset(HARD_FILTER_PRIORITY.keys())
 
 
+def resolve_question_role(question_id: int | None, cluster_key: str) -> str:
+    """질문 ID별 역할 재정의와 기본 서버 설정을 기준으로 'hard_filter' 또는 'score'를 반환한다."""
+    overrides = settings.ORDER_SHEET_QUESTION_ROLE_OVERRIDES or {}
+    if question_id is not None:
+        override = overrides.get(question_id)
+        if override is None:
+            override = overrides.get(str(question_id))
+        if override in ("hard_filter", "score"):
+            return override
+    if cluster_key in set(settings.ORDER_SHEET_HARD_FILTER_CLUSTERS):
+        return "hard_filter"
+    return "score"
+
+
 def _question_options(question: OrderSheetQuestion) -> list[dict[str, Any]]:
     options = list(question.options_json or [])
     # 기존 두 선택지 DB도 재적재 전까지 any를 조회·제출할 수 있다.
     if len(options) == 2 and not any(opt.get("option_id") == "any" for opt in options):
         options.append({"option_id": "any", "label": "상관없어요", "rules": []})
+    # 기존 3선택지(rice_noodle/other_style/any) Q8 행도 재적재 없이 4선택지(밥·면·그 외·상관없어요)로 정규화한다.
+    if (
+        question.cluster_key == "cooking_style"
+        and (question.question_code or "").startswith(QUESTION_CODE_PREFIX)
+    ):
+        actual_rules = {opt.get("option_id"): opt.get("rules", []) for opt in options}
+        if actual_rules == LEGACY_COOKING_STYLE_RULES:
+            return [
+                {
+                    "option_id": opt["option_id"],
+                    "label": opt["label"],
+                    "rules": [dict(rule) for rule in opt["rules"]],
+                }
+                for opt in COOKING_STYLE_OPTIONS
+            ]
     return options
 
 
@@ -109,99 +150,405 @@ def _to_question_dto(
     )
 
 
-def calculate_question_entropy_score(
+@dataclass(frozen=True)
+class QuestionRankingMetrics:
+    score: float
+    normalized_entropy: float
+    coverage_ratio: float
+    matched_option_count: int
+    is_degenerate: bool
+    option_votes: tuple[float, ...]
+    total_kind_votes: float
+
+
+def _menu_food_kind_key(menu: Menu, fallback_index: int) -> str:
+    if getattr(menu, "food_kind_id", None) is not None:
+        return f"kind_id:{menu.food_kind_id}"
+    raw_base = (getattr(menu, "base_name", None) or "").strip()
+    raw_name = (getattr(menu, "name", None) or "").strip()
+    if raw_base or raw_name:
+        kind_key, _ = classify_food_kind(base_name=raw_base or None, name=raw_name or None)
+        return f"kind_key:{kind_key}"
+    return f"menu_idx:{fallback_index}"
+
+
+def _build_menu_kind_weights(menus: list[Menu]) -> tuple[list[tuple[Menu, float]], float]:
+    kind_keys = [_menu_food_kind_key(menu, idx) for idx, menu in enumerate(menus)]
+    kind_counts: dict[str, int] = {}
+    for key in kind_keys:
+        kind_counts[key] = kind_counts.get(key, 0) + 1
+    weighted = [(menu, 1.0 / kind_counts[key]) for menu, key in zip(menus, kind_keys)]
+    return weighted, float(len(kind_counts))
+
+
+def calculate_question_ranking_metrics(
     menus: list[Menu],
     options_json: list[dict[str, Any]],
-) -> float:
+    *,
+    entropy_weight: float | None = None,
+    coverage_weight: float | None = None,
+    weighted_menus: tuple[list[tuple[Menu, float]], float] | None = None,
+) -> QuestionRankingMetrics:
     """
-    [3단계 초기 ML 선별]
-    피드백 데이터가 0건일 때 음식 후보 분포에 대한 선택지별 정규화 샤논 엔트로피(Information Gain)와
-    커버리지(Coverage)를 결합해 질문의 메뉴 분할 변별력(0.05 ~ 1.0)을 산출합니다.
+    Spec #77 §1 / Q18·Q19:
+    음식 종류마다 총 1표를 해당 종류의 N개 상품에 1/N표씩 배분하고,
+    속성 미입력 상품은 분모 N에만 포함(어느 선택지에도 표를 보태지 않음)한 뒤
+    정규화 샤논 엔트로피와 커버리지의 가중합을 계산한다.
+    한 선택지에만 표가 모이는 퇴화(degenerate) 질문은 제외 대상(score=0.0)으로 표시한다.
     """
     if not menus or not options_json:
-        return 0.1
+        return QuestionRankingMetrics(
+            score=0.0,
+            normalized_entropy=0.0,
+            coverage_ratio=0.0,
+            matched_option_count=0,
+            is_degenerate=True,
+            option_votes=(),
+            total_kind_votes=0.0,
+        )
 
     specific_options = [opt for opt in options_json if opt.get("rules")]
     if len(specific_options) < 2:
-        if len(specific_options) == 1:
-            rules = specific_options[0].get("rules", [])
-            match_cnt = sum(1 for m in menus if evaluate_option_rules(m, rules))
-            p = match_cnt / len(menus)
-            if p <= 0.0 or p >= 1.0:
-                return 0.05
-            binary_entropy = -(p * math.log2(p) + (1 - p) * math.log2(1 - p))
-            return round(max(0.05, min(1.0, binary_entropy)), 4)
-        return 0.1
+        return QuestionRankingMetrics(
+            score=0.0,
+            normalized_entropy=0.0,
+            coverage_ratio=0.0,
+            matched_option_count=0,
+            is_degenerate=True,
+            option_votes=(),
+            total_kind_votes=0.0,
+        )
 
-    counts = []
+    menu_weights, total_kind_votes = (
+        weighted_menus if weighted_menus is not None else _build_menu_kind_weights(menus)
+    )
+    if total_kind_votes <= 0.0:
+        return QuestionRankingMetrics(
+            score=0.0,
+            normalized_entropy=0.0,
+            coverage_ratio=0.0,
+            matched_option_count=0,
+            is_degenerate=True,
+            option_votes=tuple(0.0 for _ in specific_options),
+            total_kind_votes=0.0,
+        )
+
+    votes: list[float] = []
     for opt in specific_options:
         rules = opt.get("rules", [])
-        cnt = sum(1 for m in menus if evaluate_option_rules(m, rules))
-        counts.append(cnt)
+        vote = sum(weight for menu, weight in menu_weights if evaluate_option_rules(menu, rules))
+        votes.append(vote)
 
-    total_matched = sum(counts)
-    if total_matched == 0:
-        return 0.05
+    total_matched = sum(votes)
+    coverage_ratio = min(1.0, total_matched / total_kind_votes) if total_kind_votes > 0.0 else 0.0
+    non_zero_votes = [v for v in votes if v > 0.0]
+    matched_option_count = len(non_zero_votes)
+    if total_matched <= 0.0 or matched_option_count <= 1:
+        return QuestionRankingMetrics(
+            score=0.0,
+            normalized_entropy=0.0,
+            coverage_ratio=coverage_ratio,
+            matched_option_count=matched_option_count,
+            is_degenerate=True,
+            option_votes=tuple(votes),
+            total_kind_votes=total_kind_votes,
+        )
 
-    probs = [c / total_matched for c in counts if c > 0]
-    if len(probs) <= 1:
-        return 0.08
-
+    probs = [v / total_matched for v in non_zero_votes]
     entropy = -sum(p * math.log2(p) for p in probs)
     max_entropy = math.log2(len(specific_options))
-    normalized_entropy = entropy / max_entropy if max_entropy > 0 else 0.0
+    normalized_entropy = entropy / max_entropy if max_entropy > 0.0 else 0.0
 
-    coverage_ratio = min(1.0, total_matched / len(menus))
-    score = 0.75 * normalized_entropy + 0.25 * coverage_ratio
-    return round(max(0.05, min(1.0, score)), 4)
+    w_e = settings.ORDER_SHEET_ENTROPY_WEIGHT if entropy_weight is None else float(entropy_weight)
+    w_c = settings.ORDER_SHEET_COVERAGE_WEIGHT if coverage_weight is None else float(coverage_weight)
+    w_sum = w_e + w_c
+    raw_score = (w_e * normalized_entropy + w_c * coverage_ratio) / w_sum if w_sum > 0.0 else 0.0
+    score = round(max(0.0, min(1.0, raw_score)), 4)
+
+    return QuestionRankingMetrics(
+        score=score,
+        normalized_entropy=normalized_entropy,
+        coverage_ratio=coverage_ratio,
+        matched_option_count=matched_option_count,
+        is_degenerate=False,
+        option_votes=tuple(votes),
+        total_kind_votes=total_kind_votes,
+    )
+
+
+def calculate_question_entropy_score(
+    menus: list[Menu],
+    options_json: list[dict[str, Any]],
+    *,
+    entropy_weight: float | None = None,
+    coverage_weight: float | None = None,
+) -> float:
+    """음식 종류별 1/N 투표 기반 정규화 샤논 엔트로피와 커버리지 가중합 점수(0.0~1.0)를 반환한다."""
+    metrics = calculate_question_ranking_metrics(
+        menus,
+        options_json,
+        entropy_weight=entropy_weight,
+        coverage_weight=coverage_weight,
+    )
+    return metrics.score
+
+
+def rank_initial_question_candidates(
+    menus: list[Menu],
+    raw_questions: list[dict[str, Any]],
+    *,
+    entropy_weight: float | None = None,
+    coverage_weight: float | None = None,
+) -> list[dict[str, Any]]:
+    """
+    초기 질문 후보를 종류별 1/N 정규화 엔트로피·커버리지 순으로 정렬하고,
+    한 선택지에만 쏠리는 퇴화 후보는 제외한다.
+    """
+    weighted_menus = _build_menu_kind_weights(menus)
+    ranked: list[dict[str, Any]] = []
+    for q in raw_questions:
+        metrics = calculate_question_ranking_metrics(
+            menus,
+            q["options"],
+            entropy_weight=entropy_weight,
+            coverage_weight=coverage_weight,
+            weighted_menus=weighted_menus,
+        )
+        if metrics.is_degenerate:
+            continue
+        q_copy = dict(q)
+        q_copy["initial_score"] = metrics.score
+        q_copy["normalized_entropy"] = round(metrics.normalized_entropy, 6)
+        q_copy["coverage_ratio"] = round(metrics.coverage_ratio, 6)
+        ranked.append(q_copy)
+
+    ranked.sort(key=lambda x: (-x["initial_score"], x.get("question_code", "")))
+    return ranked
 
 
 def rank_and_score_question_pool(
     menus: list[Menu],
     raw_questions: list[dict[str, Any]],
+    *,
+    entropy_weight: float | None = None,
+    coverage_weight: float | None = None,
+    exclude_degenerate: bool = False,
 ) -> list[dict[str, Any]]:
     """
-    [3단계 초기 ML 클러스터링 & 정보 이득 정렬]
-    수백 개의 후보 질문 각각에 대해 정보 이득을 계산하고,
-    동일 의미 클러스터(cluster_key) 내 중복 질문에는 감쇠 계수를 적용해 초기 importance_weight를 산출합니다.
+    후보 질문 풀 전체에 종류별 1/N 정규화 엔트로피·커버리지 점수를 계산하고,
+    동일 cluster_key 내 문구 변형에는 감쇠 계수를 적용해 초기 importance_weight를 산출한다.
     """
+    weighted_menus = _build_menu_kind_weights(menus)
+    metrics_cache: dict[str, QuestionRankingMetrics] = {}
     scored: list[dict[str, Any]] = []
     for q in raw_questions:
-        ig = calculate_question_entropy_score(menus, q["options"])
+        rules_sig = repr([(opt.get("option_id"), opt.get("rules", [])) for opt in q["options"]])
+        metrics = metrics_cache.get(rules_sig)
+        if metrics is None:
+            metrics = calculate_question_ranking_metrics(
+                menus,
+                q["options"],
+                entropy_weight=entropy_weight,
+                coverage_weight=coverage_weight,
+                weighted_menus=weighted_menus,
+            )
+            metrics_cache[rules_sig] = metrics
+        if exclude_degenerate and metrics.is_degenerate:
+            continue
         q_copy = dict(q)
-        q_copy["initial_score"] = ig
+        q_copy["initial_score"] = metrics.score
         scored.append(q_copy)
 
-    scored.sort(key=lambda x: x["initial_score"], reverse=True)
+    scored.sort(key=lambda x: (-x["initial_score"], x.get("question_code", "")))
 
     cluster_seen_counts: dict[str, int] = {}
     for item in scored:
         cluster = item["cluster_key"]
         rank_in_cluster = cluster_seen_counts.get(cluster, 0)
         cluster_seen_counts[cluster] = rank_in_cluster + 1
-        diversity_factor = 0.90 ** rank_in_cluster
-        item["importance_weight"] = round(max(0.05, item["initial_score"] * diversity_factor), 4)
+        if item["initial_score"] <= 0.0:
+            item["importance_weight"] = 0.0
+        else:
+            diversity_factor = 0.90 ** rank_in_cluster
+            item["importance_weight"] = round(max(0.05, item["initial_score"] * diversity_factor), 4)
 
-    scored.sort(key=lambda x: x["importance_weight"], reverse=True)
+    scored.sort(key=lambda x: (-x["importance_weight"], x.get("question_code", "")))
     return scored
+
+
+FIELD_SEMANTIC_AXIS_MAP: dict[str, str] = {
+    "has_soup": "axis:has_soup",
+    "cooking_style": "axis:cooking_style",
+    "main_ingredient": "axis:main_ingredient",
+    "flavor_intensity": "axis:flavor_intensity",
+    "temperature": "axis:temperature",
+    "heaviness": "axis:heaviness",
+    "kcal": "axis:heaviness",
+    "protein_g": "axis:protein_level",
+    "carb_g": "axis:carb_level",
+    "sodium_mg": "axis:sodium_level",
+    "sugar_g": "axis:sugar_level",
+    "origin_type": "axis:origin_type",
+    "fat_g": "axis:fat_level",
+    "meal_type": "axis:meal_type",
+}
+
+TEXT_SEMANTIC_AXIS_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("axis:heaviness", ("든든한 식사", "가벼운 식사", "든든하게", "가볍게", "포만감", "칼로리")),
+    ("axis:main_ingredient", ("돼지고기", "소고기", "쇠고기", "닭고기", "오리고기", "육류", "고기 요리")),
+    ("axis:has_soup", ("국물 있", "국물 없", "국물 요리")),
+    ("axis:cooking_style", ("밥이나 면", "밥·면", "면 요리", "밥 요리")),
+    ("axis:flavor_intensity", ("매콤", "매운", "얼큰", "담백한 맛")),
+    ("axis:sodium_level", ("싱거운", "짭짤", "짠 음식", "나트륨", "간의 세기")),
+    ("axis:origin_type", ("집밥", "외식 스타일", "프랜차이즈")),
+    ("axis:carb_level", ("저탄수", "탄수화물")),
+    ("axis:protein_level", ("고단백", "단백질")),
+    ("axis:sugar_level", ("저당", "당이 적", "당류")),
+    ("axis:temperature", ("따뜻한 음식", "차가운 음식", "시원한 음식")),
+)
+
+EXCLUSION_ALIAS_GROUPS: dict[str, frozenset[str]] = {
+    "wheat": frozenset({"allergy_code:wheat", "unable_code:wheat", "wheat", "밀", "밀가루", "글루텐"}),
+    "pork": frozenset({"allergy_code:pork", "unable_code:pork", "pork", "돼지고기"}),
+    "beef": frozenset({"allergy_code:beef", "unable_code:beef", "beef", "소고기", "쇠고기", "쇠고기(소고기)"}),
+    "poultry": frozenset({
+        "allergy_code:chicken",
+        "unable_code:poultry",
+        "chicken",
+        "poultry",
+        "닭고기",
+        "닭·가금류",
+        "오리고기",
+    }),
+    "seafood": frozenset({"unable_code:seafood", "seafood", "해산물", "해산물·어패류"}),
+    "egg": frozenset({"allergy_code:egg", "unable_code:egg", "egg", "달걀", "계란", "알류(달걀)"}),
+    "dairy": frozenset({"allergy_code:milk", "unable_code:dairy", "milk", "dairy", "우유", "유제품"}),
+}
+
+
+def _extract_excluded_ingredient_groups(exclusion_keywords: set[str]) -> set[str]:
+    lowered = {str(kw).strip().lower() for kw in exclusion_keywords if kw and str(kw).strip()}
+    excluded: set[str] = set()
+    for group_name, aliases in EXCLUSION_ALIAS_GROUPS.items():
+        if lowered & {a.lower() for a in aliases}:
+            excluded.add(group_name)
+    return excluded
+
+
+def question_semantic_axes(question: OrderSheetQuestion) -> frozenset[str]:
+    """
+    질문의 규칙 필드·문구를 정규화된 의미 축 집합으로 변환한다.
+    문구 재표현, 반대 방향 선호(예: 가벼움 vs 든든함), 좁은 하위 주제(예: 고기 vs 돼지고기)는
+    동일한 의미 축을 공유하므로 한 주문서 안에 동시에 들어가지 않는다.
+    """
+    axes: set[str] = set()
+    cluster = (question.cluster_key or "").strip()
+    if cluster:
+        axes.add(f"cluster:{cluster}")
+
+    options = _question_options(question)
+    display = get_question_display(question.question_code, question.cluster_key, options)
+    effective_text = (display["question_text"] if display else question.question_text) or ""
+
+    for opt in options:
+        for rule in opt.get("rules", []) or []:
+            field = str(rule.get("field") or "").strip()
+            axis = FIELD_SEMANTIC_AXIS_MAP.get(field)
+            if axis:
+                axes.add(axis)
+            elif field in ("name", "base_name", "category_large", "category_medium"):
+                val_text = str(rule.get("value") or "")
+                for hint_axis, tokens in TEXT_SEMANTIC_AXIS_HINTS:
+                    if any(tok in val_text for tok in tokens):
+                        axes.add(hint_axis)
+
+    for hint_axis, tokens in TEXT_SEMANTIC_AXIS_HINTS:
+        if any(tok in effective_text for tok in tokens):
+            axes.add(hint_axis)
+
+    return frozenset(axes)
+
+
+def is_question_inappropriate_for_exclusions(
+    question: OrderSheetQuestion,
+    exclusion_keywords: set[str],
+) -> bool:
+    """사용자 알레르기·제외 재료 때문에 묻기 부적절한 질문인지 판정한다."""
+    if not exclusion_keywords:
+        return False
+    excluded_groups = _extract_excluded_ingredient_groups(exclusion_keywords)
+    if not excluded_groups:
+        return False
+
+    options = _question_options(question)
+    specific_rules = [
+        rule
+        for opt in options
+        for rule in (opt.get("rules") or [])
+    ]
+
+    # 밀 알레르기·제외 시 밥·면·그 외(cooking_style) 질문을 생략한다.
+    if "wheat" in excluded_groups:
+        if question.cluster_key == "cooking_style":
+            return True
+        for rule in specific_rules:
+            if rule.get("field") == "cooking_style":
+                val = rule.get("value")
+                values = val if isinstance(val, (list, tuple, set)) else [val]
+                if any(v in ("noodle", "bakery") for v in values):
+                    return True
+
+    # 주재료 질문의 대상 재료가 모두 사용자 제외 대상이면 생략한다.
+    for rule in specific_rules:
+        if rule.get("field") != "main_ingredient":
+            continue
+        op = rule.get("op", "eq")
+        val = rule.get("value")
+        if op == "eq" and isinstance(val, str):
+            target_set = {val}
+        elif op == "in" and isinstance(val, (list, tuple, set)):
+            target_set = {str(v) for v in val}
+        else:
+            continue
+        if not target_set:
+            continue
+        if target_set == {"egg_dairy"} and {"egg", "dairy"}.issubset(excluded_groups):
+            return True
+        if target_set.issubset(excluded_groups):
+            return True
+
+    return False
+
+
+def _rules_signature(options: list[dict[str, Any]]) -> str:
+    return repr([(opt.get("option_id"), opt.get("rules", [])) for opt in options])
 
 
 def select_order_sheet_questions(
     db: Session,
-    total_count: int = DEFAULT_TOTAL_QUESTIONS,
-    exploitation_count: int = DEFAULT_EXPLOITATION_COUNT,
+    total_count: int | None = None,
+    exploitation_count: int | None = None,
     random_seed: int | None = None,
     scope_key: str | None = None,
     *,
+    user_id: int | None = None,
+    exclusion_keywords: set[str] | list[str] | None = None,
     commit: bool = True,
 ) -> OrderSheetQuestionsResponse:
     """
-    [5단계 탐색+활용(Exploration-Exploitation) 질문 추출]
-    - 상위 exploitation_count(기본 7개): 서로 다른 cluster_key의 importance_weight 최상위 질문 선택
-    - 나머지 exploration_count(기본 2개): 아직 선택하지 않은 주제에서 노출 횟수를 고려해 가중 샘플링
-    - 조회 단계에서는 순환 상태(QuestionSelectionState)만 갱신하며, 실제 노출 횟수(shown_count)는
-      사용자가 주문서를 제출해 추천이 실행될 때 증가시킨다.
+    Spec #77 주문서 질문 선별:
+    - 기본 문항 수는 settings.ORDER_SHEET_QUESTION_COUNT(9)에서 관리한다.
+    - 사용자 알레르기·제외 조건에 부적절한 질문, 남은 후보 메뉴를 구분하지 못하는 퇴화 질문,
+      이미 선택된 질문과 의미가 겹치는 질문(재표현·반대 방향·하위 주제)을 제외한다.
+    - exploitation_count 미지정 시 Spec #77 기본 9개 주제(Q1~Q9)를 우선 채우고,
+      빈자리는 남은 후보를 잘 구분하는 상위 후보(종류별 1/N 엔트로피·커버리지 순)로 채운다.
+    - commit=False 인 경우 상위 트랜잭션을 조기 커밋하지 않고 flush 만 수행한다.
     """
+    target_total = (
+        int(total_count)
+        if total_count is not None
+        else int(settings.ORDER_SHEET_QUESTION_COUNT)
+    )
     active_questions = (
         db.query(OrderSheetQuestion)
         .filter(OrderSheetQuestion.is_active.is_(True))
@@ -211,62 +558,176 @@ def select_order_sheet_questions(
     if not active_questions:
         raise QuestionPoolEmptyException()
 
-    actual_total = min(total_count, len({q.cluster_key for q in active_questions}))
-    actual_exploit = min(exploitation_count, actual_total)
-    actual_explore = actual_total - actual_exploit
+    if exclusion_keywords is not None:
+        effective_exclusions = {
+            str(kw).strip()
+            for kw in exclusion_keywords
+            if kw is not None and str(kw).strip()
+        }
+    elif user_id is not None:
+        effective_exclusions = collect_user_exclusion_keywords(db=db, user_id=user_id)
+    else:
+        effective_exclusions = set()
+
+    all_menus = db.query(Menu).all()
+    available_menus: list[Menu] = []
+    weighted_menus: tuple[list[tuple[Menu, float]], float] | None = None
+    if all_menus:
+        available_menus = [
+            menu for menu in all_menus if not is_menu_excluded(menu, effective_exclusions)
+        ]
+        if len(available_menus) >= 2:
+            weighted_menus = _build_menu_kind_weights(available_menus)
+
+    metrics_cache: dict[str, QuestionRankingMetrics] = {}
+    valid_candidates: list[tuple[OrderSheetQuestion, frozenset[str], float]] = []
+    non_inappropriate_fallback: list[tuple[OrderSheetQuestion, frozenset[str], float]] = []
+    for q in active_questions:
+        if is_question_inappropriate_for_exclusions(q, effective_exclusions):
+            continue
+        axes = question_semantic_axes(q)
+        options = _question_options(q)
+        non_inappropriate_fallback.append((q, axes, float(q.importance_weight or 0.0)))
+        if weighted_menus is not None:
+            sig = _rules_signature(options)
+            metrics = metrics_cache.get(sig)
+            if metrics is None:
+                metrics = calculate_question_ranking_metrics(
+                    available_menus,
+                    options,
+                    weighted_menus=weighted_menus,
+                )
+                metrics_cache[sig] = metrics
+            if metrics.is_degenerate:
+                continue
+            candidate_score = metrics.score
+        else:
+            candidate_score = float(q.importance_weight or 0.0)
+        valid_candidates.append((q, axes, candidate_score))
+
+    if not valid_candidates and non_inappropriate_fallback:
+        valid_candidates = non_inappropriate_fallback
 
     selected_exploit: list[OrderSheetQuestion] = []
-    used_clusters: set[str] = set()
-
-    for q in active_questions:
-        if len(selected_exploit) >= actual_exploit:
-            break
-        if q.cluster_key not in used_clusters:
-            selected_exploit.append(q)
-            used_clusters.add(q.cluster_key)
-
-    remaining_pool = [q for q in active_questions if q.cluster_key not in used_clusters]
     selected_explore: list[OrderSheetQuestion] = []
-    state = None
-    topic_counts: dict[str, int] = {}
-    last_clusters: set[str] = set()
-    if scope_key is not None:
-        state = (
-            db.query(QuestionSelectionState)
-            .filter(QuestionSelectionState.scope_key == scope_key)
-            .with_for_update()
-            .first()
-        )
-        if state is None:
-            state = QuestionSelectionState(scope_key=scope_key)
-            db.add(state)
-        topic_counts = dict(state.topic_counts or {})
-        last_clusters = set(state.last_clusters or [])
+    used_axes: set[str] = set()
 
-    if actual_explore > 0 and remaining_pool:
-        rng = random.Random(random_seed)
-        pool_copy = list(remaining_pool)
-        while len(selected_explore) < actual_explore and pool_copy:
-            # 직전 주제는 뒤로 미루고, 덜 나온 주제부터 순환한다.
-            fresh = [q for q in pool_copy if q.cluster_key not in last_clusters]
-            eligible = fresh or pool_copy
-            if state is not None:
-                least_count = min(topic_counts.get(q.cluster_key, 0) for q in eligible)
-                eligible = [q for q in eligible if topic_counts.get(q.cluster_key, 0) == least_count]
-            weights = [
-                (float(q.importance_weight) + 0.3) / math.sqrt(float(q.shown_count or 0) + 1.0)
-                for q in eligible
-            ]
-            chosen = rng.choices(eligible, weights=weights, k=1)[0]
-            selected_explore.append(chosen)
-            topic_counts[chosen.cluster_key] = topic_counts.get(chosen.cluster_key, 0) + 1
-            used_clusters.add(chosen.cluster_key)
-            pool_copy = [q for q in pool_copy if q.cluster_key not in used_clusters]
+    if exploitation_count is None:
+        # Spec #77 기본 개인 주문서: 설정된 초기 자리(Q1~Q9)를 우선 배치하고,
+        # 생략·결원 자리는 남은 후보를 가장 잘 구분하는 비겹침 주제로 채운다.
+        by_cluster: dict[str, list[tuple[OrderSheetQuestion, frozenset[str], float]]] = {}
+        for item in valid_candidates:
+            by_cluster.setdefault(item[0].cluster_key, []).append(item)
 
-    if state is not None:
-        state.last_clusters = [q.cluster_key for q in selected_explore]
-        state.topic_counts = topic_counts
-        db.commit()
+        for cluster_key in settings.ORDER_SHEET_INITIAL_CLUSTERS:
+            if len(selected_exploit) >= target_total:
+                break
+            for q, axes, _ in by_cluster.get(cluster_key, ()):
+                if axes & used_axes:
+                    continue
+                selected_exploit.append(q)
+                used_axes.update(axes)
+                break
+
+        if len(selected_exploit) < target_total:
+            remaining = sorted(
+                valid_candidates,
+                key=lambda item: (
+                    -item[2],
+                    -float(item[0].importance_weight or 0.0),
+                    item[0].id,
+                ),
+            )
+            for q, axes, _ in remaining:
+                if len(selected_exploit) >= target_total:
+                    break
+                if axes & used_axes:
+                    continue
+                selected_exploit.append(q)
+                used_axes.update(axes)
+
+        if scope_key is not None:
+            state = (
+                db.query(QuestionSelectionState)
+                .filter(QuestionSelectionState.scope_key == scope_key)
+                .with_for_update()
+                .first()
+            )
+            if state is None:
+                state = QuestionSelectionState(scope_key=scope_key)
+                db.add(state)
+            topic_counts = dict(state.topic_counts or {})
+            for q in selected_exploit:
+                topic_counts[q.cluster_key] = topic_counts.get(q.cluster_key, 0) + 1
+            state.last_clusters = [q.cluster_key for q in selected_exploit]
+            state.topic_counts = topic_counts
+            if commit:
+                db.commit()
+            else:
+                db.flush()
+    else:
+        actual_exploit = min(int(exploitation_count), target_total)
+        for q, axes, _ in valid_candidates:
+            if len(selected_exploit) >= actual_exploit:
+                break
+            if axes & used_axes:
+                continue
+            selected_exploit.append(q)
+            used_axes.update(axes)
+
+        remaining_pool = [
+            (q, axes, score)
+            for q, axes, score in valid_candidates
+            if not (axes & used_axes)
+        ]
+        actual_explore = max(0, target_total - len(selected_exploit))
+        state = None
+        topic_counts: dict[str, int] = {}
+        last_clusters: set[str] = set()
+        if scope_key is not None:
+            state = (
+                db.query(QuestionSelectionState)
+                .filter(QuestionSelectionState.scope_key == scope_key)
+                .with_for_update()
+                .first()
+            )
+            if state is None:
+                state = QuestionSelectionState(scope_key=scope_key)
+                db.add(state)
+            topic_counts = dict(state.topic_counts or {})
+            last_clusters = set(state.last_clusters or [])
+
+        if actual_explore > 0 and remaining_pool:
+            rng = random.Random(random_seed)
+            pool_copy = list(remaining_pool)
+            while len(selected_explore) < actual_explore and pool_copy:
+                fresh = [item for item in pool_copy if item[0].cluster_key not in last_clusters]
+                eligible = fresh or pool_copy
+                if state is not None:
+                    least_count = min(topic_counts.get(item[0].cluster_key, 0) for item in eligible)
+                    eligible = [
+                        item
+                        for item in eligible
+                        if topic_counts.get(item[0].cluster_key, 0) == least_count
+                    ]
+                weights = [
+                    (float(item[0].importance_weight) + 0.3)
+                    / math.sqrt(float(item[0].shown_count or 0) + 1.0)
+                    for item in eligible
+                ]
+                chosen_q, chosen_axes, _ = rng.choices(eligible, weights=weights, k=1)[0]
+                selected_explore.append(chosen_q)
+                topic_counts[chosen_q.cluster_key] = topic_counts.get(chosen_q.cluster_key, 0) + 1
+                used_axes.update(chosen_axes)
+                pool_copy = [item for item in pool_copy if not (item[1] & used_axes)]
+
+        if state is not None:
+            state.last_clusters = [q.cluster_key for q in selected_explore]
+            state.topic_counts = topic_counts
+            if commit:
+                db.commit()
+            else:
+                db.flush()
 
     dtos = [
         _to_question_dto(q, is_exploration=False) for q in selected_exploit
@@ -280,6 +741,123 @@ def select_order_sheet_questions(
         exploitation_count=len(selected_exploit),
         exploration_count=len(selected_explore),
     )
+
+
+def _issuance_to_response(issuance: OrderSheetIssuance) -> OrderSheetQuestionsResponse:
+    questions = [
+        OrderSheetQuestionDTO(**item)
+        for item in (issuance.questions_snapshot_json or [])
+    ]
+    return OrderSheetQuestionsResponse(
+        order_sheet_id=issuance.order_sheet_id,
+        questions=questions,
+        total_count=int(issuance.total_count),
+        exploitation_count=int(issuance.exploitation_count),
+        exploration_count=int(issuance.exploration_count),
+    )
+
+
+def issue_order_sheet_questions(
+    db: Session,
+    *,
+    user_id: int | None = None,
+    total_count: int | None = None,
+    exploitation_count: int | None = None,
+    scope_key: str | None = None,
+    idempotency_key: str | None = None,
+    issuance_key: str | None = None,
+    commit: bool = True,
+) -> OrderSheetQuestionsResponse:
+    """
+    Spec #77 §6 #78:
+    개인 주문서 진입 시 새 주문서를 발급(OrderSheetIssuance 저장)한다.
+    동일한 Idempotency-Key(또는 issuance_key)로 재전송되면 최초 발급된 주문서와 질문을 그대로 반환하고,
+    새로고침·재입장(키 미전달 또는 새 키) 시 새 주문서를 발급한다.
+    """
+    try:
+        norm_header = normalize_idempotency_key(idempotency_key)
+        norm_query = normalize_idempotency_key(issuance_key)
+    except ValueError as exc:
+        raise RecommendationDomainException(str(exc), status_code=400) from exc
+
+    if norm_header is not None and norm_query is not None and norm_header != norm_query:
+        raise InvalidOrderSheetException(
+            "Idempotency-Key 헤더와 issuance_key 파라미터가 일치하지 않습니다."
+        )
+    effective_key = norm_header or norm_query
+
+    if effective_key is not None and user_id is not None:
+        existing = (
+            db.query(OrderSheetIssuance)
+            .filter(
+                OrderSheetIssuance.user_id == user_id,
+                OrderSheetIssuance.issuance_key == effective_key,
+            )
+            .first()
+        )
+        if existing is not None:
+            return _issuance_to_response(existing)
+
+    effective_total = (
+        int(total_count)
+        if total_count is not None
+        else int(settings.ORDER_SHEET_QUESTION_COUNT)
+    )
+    effective_exploit = (
+        min(int(exploitation_count), effective_total)
+        if exploitation_count is not None
+        else None
+    )
+
+    selection = select_order_sheet_questions(
+        db=db,
+        total_count=effective_total,
+        exploitation_count=effective_exploit,
+        scope_key=scope_key,
+        user_id=user_id,
+        commit=False,
+    )
+
+    issuance = OrderSheetIssuance(
+        order_sheet_id=f"os_{uuid4().hex}",
+        user_id=user_id,
+        issuance_key=effective_key,
+        question_ids_json=[q.id for q in selection.questions],
+        questions_snapshot_json=[
+            q.model_dump(mode="json", by_alias=True) for q in selection.questions
+        ],
+        question_roles_json={
+            str(q.id): resolve_question_role(q.id, q.cluster_key)
+            for q in selection.questions
+        },
+        total_count=selection.total_count,
+        exploitation_count=selection.exploitation_count,
+        exploration_count=selection.exploration_count,
+        status="ISSUED",
+    )
+    db.add(issuance)
+    try:
+        if commit:
+            db.commit()
+            db.refresh(issuance)
+        else:
+            db.flush()
+    except IntegrityError:
+        db.rollback()
+        if effective_key is not None and user_id is not None:
+            existing = (
+                db.query(OrderSheetIssuance)
+                .filter(
+                    OrderSheetIssuance.user_id == user_id,
+                    OrderSheetIssuance.issuance_key == effective_key,
+                )
+                .first()
+            )
+            if existing is not None:
+                return _issuance_to_response(existing)
+        raise
+
+    return _issuance_to_response(issuance)
 
 
 def create_order_sheet_recommendation(

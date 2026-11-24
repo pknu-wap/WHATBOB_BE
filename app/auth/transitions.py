@@ -52,6 +52,7 @@ from app.auth.sessions import (
 from app.core.config import settings
 from app.core.security import create_access_token
 from app.menus.models import (
+    OrderSheetIssuance,
     QuestionSelectionState,
     Recommendation,
     RecommendationFeedback,
@@ -415,6 +416,29 @@ def _merge_request_operations(db: Session, origin_user_id: int, target_user_id: 
     db.flush()
 
 
+def _merge_order_sheet_issuances(db: Session, origin_user_id: int, target_user_id: int) -> None:
+    target_rows = (
+        db.query(OrderSheetIssuance)
+        .filter(OrderSheetIssuance.user_id == target_user_id)
+        .with_for_update()
+        .all()
+    )
+    target_keys = {row.issuance_key for row in target_rows if row.issuance_key is not None}
+    origin_rows = (
+        db.query(OrderSheetIssuance)
+        .filter(OrderSheetIssuance.user_id == origin_user_id)
+        .with_for_update()
+        .all()
+    )
+    for row in origin_rows:
+        if row.issuance_key is not None and row.issuance_key in target_keys:
+            row.issuance_key = None
+        elif row.issuance_key is not None:
+            target_keys.add(row.issuance_key)
+        row.user_id = target_user_id
+    db.flush()
+
+
 def _rebuild_feedback_states_for_recommendations(
     db: Session,
     target_user_id: int,
@@ -648,8 +672,9 @@ def _merge_uuid_user_into_kakao_target(
     # 4. 질문 선택 순환 상태 합산 후 원본 user:{origin_id} 행 삭제
     _merge_question_selection_state(db, origin_id, target_id, now=now)
 
-    # 5. 작업 원장(request_operations) 소유자 이동
+    # 5. 작업 원장(request_operations) 및 주문서 발급 이력(order_sheet_issuances) 소유자 이동
     _merge_request_operations(db, origin_id, target_id)
+    _merge_order_sheet_issuances(db, origin_id, target_id)
 
     # 6. 다른 PREPARED 전환 작업의 origin_user_id 참조 해제
     db.query(AccountTransition).filter(AccountTransition.origin_user_id == origin_id).update(

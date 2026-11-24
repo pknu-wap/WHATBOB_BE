@@ -16,6 +16,7 @@ from app.recommend.order_sheet import (
     DEFAULT_EXPLOITATION_COUNT,
     DEFAULT_TOTAL_QUESTIONS,
     create_order_sheet_recommendation,
+    issue_order_sheet_questions,
     record_recommendation_feedback,
     select_order_sheet_questions,
     tune_question_weights,
@@ -142,38 +143,51 @@ def get_random_recommendation(
     status_code=status.HTTP_200_OK,
 )
 def get_order_sheet_questions(
-    total_count: int = Query(
-        default=DEFAULT_TOTAL_QUESTIONS,
+    total_count: int | None = Query(
+        default=None,
         ge=1,
         le=20,
-        description="반환할 주문서 전체 질문 개수 (기본 최대 9개, 활성 주제 수 이내)",
+        description="반환할 주문서 전체 질문 개수 (미지정 시 서버 설정 ORDER_SHEET_QUESTION_COUNT 사용)",
     ),
-    exploitation_count: int = Query(
-        default=DEFAULT_EXPLOITATION_COUNT,
+    exploitation_count: int | None = Query(
+        default=None,
         ge=1,
         le=20,
-        description="가중치 최상위 고정 질문 개수 (나머지는 후보 탐색 질문)",
+        description="가중치 최상위 고정 질문 개수 (미지정 시 기본 주문서 전체 문항 수 적용)",
     ),
+    issuance_key: str | None = Query(
+        default=None,
+        description="동일 주문서 진입 요청 재전송 식별자 (Idempotency-Key 헤더와 동일 역할)",
+    ),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     http_request: Request = None,
     response: Response = None,
     current_user: User = Depends(get_current_user),
 ):
     """
-    DB에 적재된 질문 풀에서 엔트로피·피드백 기반 중요도가 높은 질문(기본 7개)과
-    새로운 피드백 수집을 위한 탐색 질문(기본 2개)을 합쳐 최대 9개의 주문서 질문지를 반환합니다.
+    개인 주문서 진입 시 오늘 답할 9문항(서버 설정 기준)을 발급한다.
+    동일한 Idempotency-Key(또는 issuance_key)로 재전송하면 기존 발급 주문서를 그대로 반환하고,
+    새로고침·재입장 시 새 주문서를 발급한다.
     """
     if response is not None:
         response.headers["Cache-Control"] = "no-store"
+    user_id = None
     scope_key = None
     if isinstance(current_user, User):
         locked_user = lock_user_and_verify_session(db, current_user)
+        user_id = locked_user.id
         scope_key = f"user:{locked_user.id}"
-    result = select_order_sheet_questions(
+    raw_idem_key = idempotency_key if isinstance(idempotency_key, str) else None
+    raw_issuance_key = issuance_key if isinstance(issuance_key, str) else None
+    result = issue_order_sheet_questions(
         db=db,
+        user_id=user_id,
         total_count=total_count,
-        exploitation_count=min(exploitation_count, total_count),
+        exploitation_count=exploitation_count,
         scope_key=scope_key,
+        idempotency_key=raw_idem_key,
+        issuance_key=raw_issuance_key,
     )
     return ApiResponse(success=True, data=result, message=None)
 

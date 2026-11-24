@@ -161,9 +161,14 @@ def test_binary_options_cover_existing_menu_categories():
     )
     for question in pool:
         assert 1 <= len(question["question_text"]) <= 24
-        assert len(question["options"]) == 3
-        assert [o["label"] for o in question["options"]] == ["예", "아니요", "상관없어요"]
-        assert len({o["option_id"] for o in question["options"]}) == 3
+        if question["cluster_key"] == "cooking_style":
+            assert len(question["options"]) == 4
+            assert [o["label"] for o in question["options"]] == ["밥", "면", "그 외", "상관없어요"]
+            assert len({o["option_id"] for o in question["options"]}) == 4
+        else:
+            assert len(question["options"]) == 3
+            assert [o["label"] for o in question["options"]] == ["예", "아니요", "상관없어요"]
+            assert len({o["option_id"] for o in question["options"]}) == 3
         assert question["options"][-1] == {"option_id": "any", "label": "상관없어요", "rules": []}
     # 같은 주제의 문구 변형은 동일한 두 선택지를 사용한다.
     for question in {q["cluster_key"]: q for q in pool}.values():
@@ -188,7 +193,7 @@ def test_numeric_options_do_not_overlap_at_boundary(cluster, field, boundary):
         assert sum(evaluate_option_rules(menu, o["rules"]) for o in question["options"] if o["rules"]) == 1
 
 
-def test_response_contract_enforces_24_characters_and_two_or_three_options():
+def test_response_contract_enforces_24_characters_and_two_to_four_options():
     question = build_candidate_question_pool()[0]
     payload = dict(question, id=1, initial_score=0.5, importance_weight=0.5)
     payload["question_text"] = "가" * 24
@@ -196,7 +201,9 @@ def test_response_contract_enforces_24_characters_and_two_or_three_options():
     with pytest.raises(ValidationError):
         OrderSheetQuestionDTO(**dict(payload, question_text="가" * 25))
     assert len(OrderSheetQuestionDTO(**dict(payload, options=question["options"][:2])).options) == 2
-    for count in (1, 4):
+    q8 = next(q for q in build_candidate_question_pool() if q["cluster_key"] == "cooking_style")
+    assert len(OrderSheetQuestionDTO(**dict(payload, options=q8["options"])).options) == 4
+    for count in (1, 5):
         with pytest.raises(ValidationError):
             OrderSheetQuestionDTO(**dict(payload, options=[question["options"][0]] * count))
 
@@ -279,11 +286,13 @@ def test_seed_preserves_old_feedback_and_serves_binary_questions(db):
         response = client.get("/api/recommendations/order-sheet/questions")
         assert response.status_code == 200
         data = response.json()["data"]
-        assert (data["total_count"], data["exploitation_count"], data["exploration_count"]) == (9, 7, 2)
+        # 30개 샘플 메뉴에서 실제 후보를 구분하는 유효 주제만 반환한다 (퇴화 주제 제외).
+        assert (data["total_count"], data["exploitation_count"], data["exploration_count"]) == (8, 8, 0)
         for question in data["questions"]:
             assert question["id"] != old.id
             assert len(question["question_text"]) <= 24
-            assert len(question["options"]) == 3
+            expected_opts = 4 if question["cluster_key"] == "cooking_style" else 3
+            assert len(question["options"]) == expected_opts
         initial_shown_counts = {q["id"]: q["shown_count"] for q in data["questions"]}
         # 두 취향 답변과 상관없음 모두 추천과 피드백까지 처리할 수 있다.
         for index in (0, 1, 2):
