@@ -278,6 +278,59 @@ class OrderSheetIssuance(Base):
     completed_at = Column(DateTime, nullable=True)
 
 
+class PersonalOrderSheetQuestionExperiment(Base):
+    """One user's comparison of two questions in the same score slot."""
+
+    __tablename__ = "personal_order_sheet_question_experiments"
+    __table_args__ = (
+        UniqueConstraint("user_id", "active", name="uq_personal_sheet_experiment_active"),
+        CheckConstraint("active IS NULL OR active = 1", name="ck_personal_sheet_experiment_active"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    slot_key = Column(String(50), nullable=False)
+    control_question_id = Column(Integer, nullable=False)
+    variant_question_id = Column(Integer, nullable=False)
+    control_questions_json = Column(JSON, nullable=False)
+    variant_questions_json = Column(JSON, nullable=False)
+    question_roles_json = Column(JSON, nullable=False)
+    active = Column(Boolean, nullable=True, default=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    completed_at = Column(DateTime, nullable=True)
+    adopted = Column(Boolean, nullable=True)
+
+
+class PersonalOrderSheetQuestionAssignment(Base):
+    """The question arm assigned to one distinct issuance."""
+
+    __tablename__ = "personal_order_sheet_question_assignments"
+    __table_args__ = (
+        UniqueConstraint("experiment_id", "pair_number", "arm", name="uq_personal_sheet_assignment_arm"),
+        CheckConstraint("arm IN ('control', 'variant')", name="ck_personal_sheet_assignment_arm"),
+    )
+
+    issuance_id = Column(Integer, ForeignKey("order_sheet_issuances.id", ondelete="CASCADE"), primary_key=True)
+    experiment_id = Column(
+        Integer,
+        ForeignKey("personal_order_sheet_question_experiments.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    pair_number = Column(Integer, nullable=False)
+    arm = Column(String(7), nullable=False)
+
+
+class PersonalOrderSheetQuestionOverride(Base):
+    """An adopted personal question, keyed by the original score slot."""
+
+    __tablename__ = "personal_order_sheet_question_overrides"
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    slot_key = Column(String(50), primary_key=True)
+    question_id = Column(Integer, nullable=False)
+    adopted_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class RecommendationFeedback(Base):
     """추천 만족 여부와 질문별 조건 일치 결과를 저장하는 피드백 테이블"""
     __tablename__ = "recommendation_feedbacks"
