@@ -39,6 +39,7 @@ from app.recommend.common import (
     filter_available_menus,
     is_menu_excluded,
 )
+from app.recommend.meal_penalty import load_recent_meal_penalties
 from app.recommend.personal_model import FEATURE_SCHEMA_VERSION
 from app.recommend.schemas import (
     FilterRuleDTO,
@@ -971,6 +972,14 @@ def create_order_sheet_recommendation(
         else None
     )
 
+    effective_recent_meal_penalties = recent_meal_penalties
+    if effective_recent_meal_penalties is None and effective_user_id is not None:
+        effective_recent_meal_penalties = load_recent_meal_penalties(
+            db=db,
+            user_id=effective_user_id,
+            menus=all_menus,
+        )
+
     evaluation: OrderSheetEvaluationResult = evaluate_order_sheet_candidates(
         menus=all_menus,
         exclusion_keywords=exclusion_keywords,
@@ -978,7 +987,7 @@ def create_order_sheet_recommendation(
         top_k=request.top_k,
         role_overrides=frozen_role_overrides,
         long_term_preference_scores=long_term_preference_scores,
-        recent_meal_penalties=recent_meal_penalties,
+        recent_meal_penalties=effective_recent_meal_penalties,
     )
     top_details = evaluation.selected_candidates
     surviving_kind_count = len(evaluation.surviving_kind_representatives)

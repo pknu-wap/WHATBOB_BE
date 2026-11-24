@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     ORDER_SHEET_QUESTION_ROLE_OVERRIDES: dict[int, str] = Field(default_factory=dict)
     ORDER_SHEET_DEFAULT_SCORE_WEIGHT: float = Field(default=1.0, ge=0.0)
     ORDER_SHEET_SCORE_WEIGHTS: dict[str, float] = Field(default_factory=dict)
+    ORDER_SHEET_RECENT_MEAL_PENALTY_SAME_DAY: float = Field(default=-2.0, le=0.0)
+    ORDER_SHEET_RECENT_MEAL_PENALTY_NEXT_DAY: float = Field(default=-1.0, le=0.0)
+    ORDER_SHEET_RECENT_MEAL_PENALTY_TWO_DAYS_AGO: float = Field(default=-0.5, le=0.0)
+    ORDER_SHEET_RECENT_MEAL_PENALTY_OTHER_SAME_KIND: float = Field(default=0.0, le=0.0)
     ORDER_SHEET_RANKING_RULE_VERSION: str = "spec77_v1"
     TRANSITION_PREPARE_COOKIE_NAME: str = Field(
         default="__Secure-whatbob_transition",
