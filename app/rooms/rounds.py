@@ -8,6 +8,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.auth.operations import lock_user_and_verify_session
+from app.core.config import settings
 from app.menus.display import format_menu_name
 from app.menus.models import Menu
 from app.recommend.common import (
@@ -18,8 +19,6 @@ from app.recommend.common import (
     filter_available_menus,
 )
 from app.recommend.order_sheet import (
-    DEFAULT_EXPLOITATION_COUNT,
-    DEFAULT_TOTAL_QUESTIONS,
     create_order_sheet_recommendation,
     select_order_sheet_questions,
 )
@@ -566,7 +565,7 @@ def start_room_round(
         all_menus = db.query(Menu).all()
         now = now_utc()
         try:
-            filter_available_menus(all_menus, shared_exclusions_set)
+            available_menus, _ = filter_available_menus(all_menus, shared_exclusions_set)
         except NoAvailableFoodException:
             cancelled_round = RoomRound(
                 room_id=room.id,
@@ -595,14 +594,17 @@ def start_room_round(
                 },
             ) from None
 
+        target_question_count = int(settings.ORDER_SHEET_QUESTION_COUNT)
         allocated_by_user: dict[int, list[dict[str, Any]]] = {}
         for m in ordered_members:
             try:
                 q_resp = select_order_sheet_questions(
                     db=db,
-                    total_count=DEFAULT_TOTAL_QUESTIONS,
-                    exploitation_count=DEFAULT_EXPLOITATION_COUNT,
+                    total_count=target_question_count,
+                    exploitation_count=None,
                     scope_key=f"user:{m.user_id}",
+                    exclusion_keywords=shared_exclusions_set,
+                    available_menus=available_menus,
                     commit=False,
                 )
             except QuestionPoolEmptyException as exc:
@@ -613,12 +615,12 @@ def start_room_round(
                         "message": exc.message,
                     },
                 ) from exc
-            if len(q_resp.questions) < DEFAULT_TOTAL_QUESTIONS:
+            if len(q_resp.questions) < target_question_count:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail={
                         "code": "INSUFFICIENT_QUESTION_POOL",
-                        "message": "그룹 주문서를 구성할 9개 질문 주제가 부족합니다.",
+                        "message": f"그룹 주문서를 구성할 {target_question_count}개 질문 주제가 부족합니다.",
                     },
                 )
             allocated_by_user[m.user_id] = [
@@ -695,7 +697,6 @@ def get_room_round_questions(
 ) -> RoomRoundQuestionsResponse:
     """T02-D03: Pure read-only retrieval of pre-generated personal order-sheet questions for the current round."""
     from app.rooms.service import _as_utc, utcnow
-    from app.core.config import settings
     from datetime import timedelta
 
     now = utcnow()
@@ -854,7 +855,7 @@ def submit_room_round_order_sheet(
         if set(raw_qids) != set(assigned_qids) or len(raw_qids) != len(assigned_qids):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="배정된 9개 주문서 질문 전체에 정확히 응답해야 합니다.",
+                detail=f"배정된 {len(assigned_qids)}개 주문서 질문 전체에 정확히 응답해야 합니다.",
             )
 
         canonical_answers = [
@@ -938,7 +939,7 @@ def submit_room_round_order_sheet(
                 request=OrderSheetRecommendRequest(
                     answers=ordered_answer_items,
                     exclusions=[],
-                    top_k=5,
+                    top_k=int(settings.ORDER_SHEET_MAX_RECOMMENDATIONS),
                 ),
                 user_id=locked_user.id,
                 current_user=locked_user,
