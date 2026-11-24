@@ -310,7 +310,7 @@ class PersonalOrderSheetQuestionExperiment(Base):
     variant_questions_json = Column(JSON, nullable=False)
     question_roles_json = Column(JSON, nullable=False)
     active = Column(Boolean, nullable=True, default=True)
-    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False, default=lambda: datetime.now(timezone.utc))
     completed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
     adopted = Column(Boolean, nullable=True)
     decision_requested_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
@@ -345,7 +345,7 @@ class PersonalOrderSheetQuestionOverride(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     slot_key = Column(String(50), primary_key=True)
     question_id = Column(Integer, nullable=False)
-    adopted_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    adopted_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
 class RecommendationFeedback(Base):
