@@ -222,4 +222,3 @@ def load_long_term_preference_scores(
         max_score=max_score,
         exclude_recommendation_id=exclude_recommendation_id,
     )
-

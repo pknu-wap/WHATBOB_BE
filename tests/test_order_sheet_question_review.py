@@ -20,6 +20,7 @@ from app.recommend.question_review import (
 )
 from app.recommend.schemas import AnswerItemRequest, OrderSheetRecommendRequest, RecommendationFeedbackRequest
 from app.users.models import User
+from tests.test_issue39_mysql_concurrency import mysql_env  # noqa: F401
 
 
 @pytest.fixture
@@ -29,6 +30,18 @@ def db():
     with Session(engine) as session:
         yield session
     engine.dispose()
+
+
+@pytest.fixture(params=("sqlite", "mysql"))
+def review_db(request):
+    if request.param == "sqlite":
+        yield request.getfixturevalue("db")
+        return
+
+    environment = request.getfixturevalue("mysql_env")
+    Base.metadata.create_all(environment["engine"])
+    with environment["SessionLocal"]() as session:
+        yield session
 
 
 def add_exposure(db, user, created_at, *, menu_ids=(101,), scope="personal_initial"):
@@ -111,7 +124,8 @@ def add_replay(db, user, completed_at, shown_ids, candidates, *, question_ids, n
     return rec
 
 
-def test_review_ranks_changes_then_actual_likes_then_neutral_answers(db):
+def test_review_ranks_changes_then_actual_likes_then_neutral_answers(review_db):
+    db = review_db
     user = User(kakao_id=890002, nickname="question impact")
     db.add(user)
     db.add(Menu(id=102, food_code="102", name="liked meal", base_name="liked meal", category_large="meal"))
@@ -141,10 +155,12 @@ def test_review_ranks_changes_then_actual_likes_then_neutral_answers(db):
         )
     for rec in (five_shown, two_shown):
         reject_recommendation_list(db, rec.id, user_id=user.id)
-    assert run_pending_question_reviews(db) == 1
+    # The legacy feedback table stores whole-second timestamps on MySQL.
+    tick = utc_now() + timedelta(seconds=1)
+    assert run_pending_question_reviews(db, now=tick) == 1
 
-    assert load_ranked_question_ids(db, user.id) == (40, 50, 30, 10, 60, 20, 70)
-    review = load_question_review(db, user.id)
+    assert load_ranked_question_ids(db, user.id, now=tick) == (40, 50, 30, 10, 60, 20, 70)
+    review = load_question_review(db, user.id, now=tick)
     assert (review.rejected_count, review.shown_count) == (2, 2)
     scores = {score.question_id: score for score in review.ranked_questions}
     assert scores[10].changed_sheet_count == 1
