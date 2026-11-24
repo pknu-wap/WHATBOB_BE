@@ -1,11 +1,25 @@
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Path, Query, status
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
 from app.core.database import get_db
 from app.map.kakao_local import PlaceSearchClient, get_place_search_client
-from app.map.schemas import NearbyPlacesResponse, SearchRadius
-from app.map.service import find_nearby_restaurants
+from app.map.schemas import (
+    NearbyPlacesResponse,
+    PlaceSatisfactionDTO,
+    PlaceSatisfactionUpsertRequest,
+    PlaceSelectionCreateRequest,
+    PlaceSelectionDTO,
+    PlaceSelectionListResponse,
+    SearchRadius,
+)
+from app.map.service import (
+    create_place_selection,
+    find_nearby_restaurants,
+    get_place_selection,
+    list_place_selections,
+    record_place_satisfaction,
+)
 from app.recommend.schemas import ApiResponse
 from app.users.models import User
 
@@ -40,5 +54,87 @@ def search_nearby_places(
         latitude=latitude,
         longitude=longitude,
         radius=radius,
+    )
+    return ApiResponse(success=True, data=result, message=None)
+
+
+@router.post(
+    "/selections",
+    response_model=ApiResponse[PlaceSelectionDTO],
+    status_code=status.HTTP_201_CREATED,
+    summary="지도에서 음식점 명시적 선택 기록",
+    description=(
+        "추천 메뉴에서 지도로 이동한 사용자가 음식점을 명시적으로 선택했을 때 기록합니다. "
+        "가게 선택만으로는 가게 만족이 미확인(null) 상태로 남으며 메뉴 좋아요·싫어요가 자동으로 생성되지 않습니다."
+    ),
+)
+def record_place_selection(
+    request: PlaceSelectionCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = create_place_selection(db=db, current_user=current_user, request=request)
+    return ApiResponse(success=True, data=result, message=None)
+
+
+@router.get(
+    "/selections",
+    response_model=ApiResponse[PlaceSelectionListResponse],
+    status_code=status.HTTP_200_OK,
+    summary="내 지도 음식점 선택 기록 목록 조회",
+)
+def read_place_selections(
+    recommendation_id: int | None = Query(default=None, ge=1, description="주문서 추천 ID 필터"),
+    menu_id: int | None = Query(default=None, ge=1, description="메뉴 ID 필터"),
+    limit: int = Query(default=20, ge=1, le=100, description="최대 조회 건수"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = list_place_selections(
+        db=db,
+        current_user=current_user,
+        recommendation_id=recommendation_id,
+        menu_id=menu_id,
+        limit=limit,
+    )
+    return ApiResponse(success=True, data=result, message=None)
+
+
+@router.get(
+    "/selections/{selection_id}",
+    response_model=ApiResponse[PlaceSelectionDTO],
+    status_code=status.HTTP_200_OK,
+    summary="지도 음식점 선택 기록 단건 조회",
+)
+def read_place_selection(
+    selection_id: int = Path(..., ge=1, description="가게 선택 기록 ID"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = get_place_selection(db=db, current_user=current_user, selection_id=selection_id)
+    return ApiResponse(success=True, data=result, message=None)
+
+
+@router.post(
+    "/selections/{selection_id}/satisfaction",
+    response_model=ApiResponse[PlaceSatisfactionDTO],
+    status_code=status.HTTP_200_OK,
+    summary="선택한 음식점에 대한 명시적 만족 기록",
+    description=(
+        "선택한 가게에 대한 사용자의 명시적 만족 여부를 가게 선택 기록과 별도로 저장합니다. "
+        "같은 선택 기록에 대해 다시 제출하면 중복 생성하지 않고 안전하게 갱신하며, 메뉴 좋아요·싫어요를 생성하지 않습니다."
+    ),
+)
+def upsert_place_satisfaction(
+    request: PlaceSatisfactionUpsertRequest,
+    selection_id: int = Path(..., ge=1, description="가게 선택 기록 ID"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = record_place_satisfaction(
+        db=db,
+        current_user=current_user,
+        selection_id=selection_id,
+        request=request,
     )
     return ApiResponse(success=True, data=result, message=None)

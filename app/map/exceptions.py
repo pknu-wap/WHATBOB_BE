@@ -19,3 +19,50 @@ class PlaceSearchUnavailableException(PlaceSearchException):
 
     def __init__(self, message: str = "주변 음식점 검색을 일시적으로 사용할 수 없습니다. 잠시 후 다시 시도해 주세요."):
         super().__init__(message=message, status_code=503)
+
+
+class PlaceRecommendationNotFoundException(PlaceSearchException):
+    """연결하려는 추천 이력이 존재하지 않을 때 발생하는 예외"""
+
+    def __init__(self, recommendation_id: int):
+        super().__init__(
+            message=f"추천 이력(id={recommendation_id})을 찾을 수 없습니다.",
+            status_code=404,
+        )
+
+
+class PlaceRecommendationForbiddenException(PlaceSearchException):
+    """다른 사용자의 추천 이력에 가게 선택을 연결하려 할 때 발생하는 예외"""
+
+    def __init__(self):
+        super().__init__(
+            message="본인의 추천 이력에만 가게 선택을 연결할 수 있습니다.",
+            status_code=403,
+        )
+
+
+class PlaceSelectionInvalidException(PlaceSearchException):
+    """가게 선택 요청 값이 도메인 규칙에 맞지 않을 때 발생하는 예외"""
+
+    def __init__(self, message: str):
+        super().__init__(message=message, status_code=400)
+
+
+class PlaceSelectionNotFoundException(PlaceSearchException):
+    """가게 선택 기록을 찾을 수 없을 때 발생하는 예외"""
+
+    def __init__(self, selection_id: int):
+        super().__init__(
+            message=f"가게 선택 기록(id={selection_id})을 찾을 수 없습니다.",
+            status_code=404,
+        )
+
+
+class PlaceSelectionForbiddenException(PlaceSearchException):
+    """다른 사용자의 가게 선택 기록에 접근하거나 평가하려 할 때 발생하는 예외"""
+
+    def __init__(self):
+        super().__init__(
+            message="본인의 가게 선택 기록에만 접근할 수 있습니다.",
+            status_code=403,
+        )
