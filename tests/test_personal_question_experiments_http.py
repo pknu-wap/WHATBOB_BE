@@ -2,6 +2,7 @@
 
 import pytest
 
+from app.recommend.question_review import run_pending_question_reviews
 from app.users.models import User
 from tests.test_order_sheet_issuance import _seed_diverse_menus_and_full_pool
 from tests.test_order_sheet_issuance_http import _make_client, db
@@ -56,6 +57,7 @@ def _question_ids(sheet):
 def test_retries_keep_assignment_and_every_two_new_issuances_get_both_questions(db, user):
     with _make_client(db, user) as client:
         baseline = _reject_first_two_lists(client)
+        assert run_pending_question_reviews(db) == 1
         first = _issue(client, "experiment-screen-1")
         assert _issue(client, "experiment-screen-1") == first
         second = _issue(client, "experiment-screen-2")

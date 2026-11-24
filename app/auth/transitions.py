@@ -64,6 +64,7 @@ from app.menus.models import (
     UserFoodExclusion,
     UserMeal,
 )
+from app.recommend.question_review import merge_question_review_work
 from app.rooms.models import Room, RoomMember, RoomMemberOrderSheet
 from app.rooms.service import has_active_or_pending_room_activity
 from app.rooms.state import prepare_room_notifications, close_pending_notifications
@@ -693,6 +694,7 @@ def _merge_uuid_user_into_kakao_target(
     )
     db.flush()
     _rebuild_feedback_states_for_recommendations(db, target_id, moved_rec_ids, now=now)
+    merge_question_review_work(db, origin_id, target_id, now)
 
     # 4. 질문 선택 순환 상태 합산 후 원본 user:{origin_id} 행 삭제
     _merge_question_selection_state(db, origin_id, target_id, now=now)

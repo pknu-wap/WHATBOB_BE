@@ -14,6 +14,7 @@ from app.menus.models import (
 )
 from app.recommend.common import evaluate_option_rules
 from app.recommend.order_sheet import OrderSheetQuestionPool, _question_options, _to_question_dto
+from app.recommend.question_review import load_ranked_question_ids
 from app.recommend.ranking import resolve_question_role
 from app.recommend.schemas import OrderSheetQuestionDTO, OrderSheetQuestionsResponse
 
@@ -133,7 +134,7 @@ def _start_experiment(
     slot_keys: tuple[str, ...],
     question_pool: OrderSheetQuestionPool,
 ) -> PersonalOrderSheetQuestionExperiment | None:
-    ranked_question_ids = _load_ranked_question_ids(db, user_id)
+    ranked_question_ids = load_ranked_question_ids(db, user_id)
     if not ranked_question_ids:
         return None
     axes_by_id = _axes_by_question_id(question_pool)
@@ -191,10 +192,6 @@ def _start_experiment(
             question_roles_json=question_roles,
         )
     return None
-
-
-def _load_ranked_question_ids(db: Session, user_id: int) -> tuple[int, ...]:
-    return ()
 
 
 def _frozen_questions_fit(

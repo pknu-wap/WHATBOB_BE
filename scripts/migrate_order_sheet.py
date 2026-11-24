@@ -19,6 +19,7 @@ ADDED_COLUMNS = {
 ADDED_TABLES = (
     "order_sheet_issuances",
     "order_sheet_hard_filter_traces",
+    "order_sheet_replay_snapshots",
     "place_selections",
     "place_satisfactions",
 )

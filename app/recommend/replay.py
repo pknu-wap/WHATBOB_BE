@@ -9,8 +9,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
@@ -22,14 +21,20 @@ from sqlalchemy.orm import Session
 
 from app.auth.sessions import as_utc_naive, utc_now
 from app.core.config import settings
-from app.menus.models import OrderSheetReplaySnapshot, Recommendation
+from app.menus.models import (
+    PERSONAL_INITIAL_LIST,
+    OrderSheetIssuance,
+    OrderSheetReplaySnapshot,
+    Recommendation,
+)
 from app.recommend.ranking import OrderSheetEvaluationResult, RankedCandidate
 from app.rooms.models import RoomRoundMember
 
 logger = logging.getLogger(__name__)
 
 SORT_RULE_NAME = "final_score_desc_food_code_asc_menu_id_asc"
-REPLAY_CLEANUP_INTERVAL_SECONDS = 3600
+REPLAY_CLEANUP_INTERVAL_SECONDS = 300
+REPLAY_CLEANUP_BATCH_SIZE = 100
 
 
 @dataclass(frozen=True)
@@ -334,6 +339,7 @@ def verify_and_load_recent_replay_snapshots(
     now: datetime | None = None,
     window_days: int | None = None,
     max_sheets: int | None = None,
+    initial_personal_only: bool = False,
 ) -> ReplayLoadBatchResult:
     """Verify recent first lists and replay them with each score question omitted."""
     effective_window_days = (
@@ -344,6 +350,14 @@ def verify_and_load_recent_replay_snapshots(
     )
     now_naive = as_utc_naive(now) if now is not None else utc_now()
     cutoff = now_naive - timedelta(days=effective_window_days)
+    scope_filter = (
+        initial_personal_list_filter()
+        if initial_personal_only
+        else or_(
+            Recommendation.order_sheet_list_scope.is_(None),
+            Recommendation.order_sheet_list_scope == PERSONAL_INITIAL_LIST,
+        )
+    )
 
     snapshot_refs = (
         db.query(
@@ -358,6 +372,7 @@ def verify_and_load_recent_replay_snapshots(
             OrderSheetReplaySnapshot.completed_at <= now_naive,
             OrderSheetReplaySnapshot.expires_at > now_naive,
             Recommendation.initial_candidate_count >= 2,
+            scope_filter,
         )
         .order_by(
             OrderSheetReplaySnapshot.completed_at.desc(),
@@ -379,6 +394,7 @@ def verify_and_load_recent_replay_snapshots(
             Recommendation.created_at >= cutoff,
             Recommendation.created_at <= now_naive,
             Recommendation.initial_candidate_count >= 2,
+            scope_filter,
             ~has_snapshot,
             ~is_group_recommendation,
         )
@@ -467,19 +483,48 @@ def verify_and_load_recent_replay_snapshots(
     )
 
 
+def initial_personal_list_filter():
+    """Recognize first personal lists with explicit scope or legacy personal issuance evidence."""
+    completed_issuance = (
+        OrderSheetIssuance.__table__.select()
+        .where(
+            OrderSheetIssuance.recommendation_id == Recommendation.id,
+            OrderSheetIssuance.user_id == Recommendation.user_id,
+            OrderSheetIssuance.status == "COMPLETED",
+            OrderSheetIssuance.completed_at.is_not(None),
+        )
+        .exists()
+    )
+    return or_(
+        Recommendation.order_sheet_list_scope == PERSONAL_INITIAL_LIST,
+        Recommendation.order_sheet_list_scope.is_(None) & completed_issuance,
+    )
+
+
 def purge_expired_replay_snapshots(
     db: Session,
     *,
     now: datetime | None = None,
     commit: bool = True,
+    limit: int = REPLAY_CLEANUP_BATCH_SIZE,
 ) -> int:
-    """만료 시각(expires_at <= now)이 지난 재현 스냅샷만 삭제하고 기존 추천·피드백 이력은 보존한다."""
+    """Delete a bounded batch of expired snapshots, preserving recommendations and feedback."""
     now_naive = as_utc_naive(now) if now is not None else utc_now()
-    deleted_count = (
-        db.query(OrderSheetReplaySnapshot)
-        .filter(OrderSheetReplaySnapshot.expires_at <= now_naive)
-        .delete(synchronize_session=False)
-    )
+    expired = OrderSheetReplaySnapshot.expires_at <= now_naive
+    expired_ids = [
+        row.id
+        for row in db.query(OrderSheetReplaySnapshot.id)
+        .filter(expired)
+        .order_by(OrderSheetReplaySnapshot.expires_at, OrderSheetReplaySnapshot.id)
+        .limit(limit)
+    ]
+    deleted_count = 0
+    if expired_ids:
+        deleted_count = (
+            db.query(OrderSheetReplaySnapshot)
+            .filter(expired, OrderSheetReplaySnapshot.id.in_(expired_ids))
+            .delete(synchronize_session=False)
+        )
     if commit:
         db.commit()
     else:
@@ -487,15 +532,18 @@ def purge_expired_replay_snapshots(
     return int(deleted_count)
 
 
-def _purge_replay_snapshots_once(session_factory: Callable[[], Session]) -> None:
+def _purge_replay_snapshots_once(session_factory: Callable[[], Session]) -> int:
     with session_factory() as db:
-        purge_expired_replay_snapshots(db)
+        return purge_expired_replay_snapshots(db)
 
 
 async def replay_snapshot_cleanup_loop(session_factory: Callable[[], Session]) -> None:
     while True:
+        delay = REPLAY_CLEANUP_INTERVAL_SECONDS
         try:
-            await asyncio.to_thread(_purge_replay_snapshots_once, session_factory)
+            deleted = await asyncio.to_thread(_purge_replay_snapshots_once, session_factory)
+            if deleted == REPLAY_CLEANUP_BATCH_SIZE:
+                delay = 1
         except Exception:
             logger.exception("Order-sheet replay snapshot cleanup failed")
-        await asyncio.sleep(REPLAY_CLEANUP_INTERVAL_SECONDS)
+        await asyncio.sleep(delay)

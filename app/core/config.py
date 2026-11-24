@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     ORDER_SHEET_LONG_TERM_HALF_LIFE_DAYS: float = Field(default=42.0, gt=0.0)
     ORDER_SHEET_LONG_TERM_MAX_SCORE: float = Field(default=0.25, ge=0.0)
     ORDER_SHEET_RANKING_RULE_VERSION: str = "spec77_v1"
+    ORDER_SHEET_PERSONAL_MIN_EXPLICIT: int = Field(default=15, ge=1)
+    ORDER_SHEET_PERSONAL_MIN_LIKE_GAIN: float = Field(default=0.20, ge=0, le=1)
+    ORDER_SHEET_COMMON_SUBMISSIONS_PER_ARM: int = Field(default=100, ge=1)
+    ORDER_SHEET_COMMON_REACTION_WINDOW_HOURS: int = Field(default=24, ge=1)
+    ORDER_SHEET_COMMON_MIN_LIKE_GAIN: float = Field(default=0.10, ge=0, le=1)
+    ORDER_SHEET_COMMON_MAX_ZERO_GAIN: float = Field(default=0.01, ge=0, le=1)
+    ORDER_SHEET_COMMON_MAX_P_VALUE: float = Field(default=0.05, gt=0, le=1)
     ORDER_SHEET_QUESTION_ANSWER_VERSION: str = "spec77_qa_v1"
     ORDER_SHEET_REPLAY_RETENTION_DAYS: int = Field(default=30, ge=1, le=365)
     ORDER_SHEET_REPLAY_MAX_SHEETS: int = Field(default=20, ge=1, le=100)

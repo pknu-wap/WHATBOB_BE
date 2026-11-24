@@ -1,4 +1,4 @@
-"""Spec #77 / Ticket #85 (T08): 같이 고르기에 9문항 추천 적용 HTTP 테스트."""
+"""HTTP coverage for group order-sheet assignment, submission, and retry."""
 from __future__ import annotations
 
 from fastapi import FastAPI
@@ -317,6 +317,188 @@ def _answers_from_map(questions: list[dict], option_by_cluster: dict[str, str]) 
         }
         for q in questions
     ]
+
+
+def test_only_member_with_no_matching_menus_can_retry_and_start_voting():
+    _, _, users, _, room_id, as_user = build_group_order_sheet_env(member_count=2)
+    host, member = users
+    room_url = f"/api/rooms/{room_id}"
+    assert as_user(host).post(f"{room_url}/rounds/start").status_code == 200
+    questions_url = f"{room_url}/rounds/current/questions"
+    host_sheet = as_user(host).get(questions_url).json()
+    member_sheet = as_user(member).get(questions_url).json()
+    submit_url = f"{room_url}/rounds/current/order-sheet"
+
+    host_submit = as_user(host).post(
+        submit_url,
+        json={"answers": _answers_from_map(host_sheet["questions"], {
+            "has_soup": "soup_no",
+            "cooking_style": "rice",
+            "main_ingredient": "non_meat",
+            "flavor_intensity": "spicy_bold",
+        })},
+    )
+    assert host_submit.status_code == 200
+    before = as_user(member).get(room_url).json()["current_round"]
+    failed = as_user(member).post(
+        f"{room_url}/order-sheet/submit",
+        json={"answers": _answers_from_map(member_sheet["questions"], {
+            "has_soup": "soup_no",
+            "cooking_style": "noodle",
+            "main_ingredient": "meat",
+        })},
+    )
+    assert failed.status_code == 409
+    assert failed.json()["detail"]["code"] == "NO_MATCHING_MENUS_FOR_ANSWERS"
+    assert as_user(member).get(room_url).json()["current_round"] == before
+    assert as_user(member).get(questions_url).json() == member_sheet
+    assert as_user(host).get(questions_url).json()["has_submitted"] is True
+
+    retry = as_user(member).post(
+        f"{room_url}/order-sheet",
+        json={
+            "round_id": member_sheet["round_id"],
+            "answers": _answers_from_map(member_sheet["questions"], {
+                "has_soup": "any",
+                "cooking_style": "noodle",
+                "main_ingredient": "meat",
+            }),
+        },
+    )
+    assert retry.status_code == 200
+    round_state = retry.json()["common_state"]["current_round"]
+    assert round_state["round_id"] == member_sheet["round_id"]
+    assert round_state["status"] == "VOTING"
+    assert round_state["all_orders_submitted"] is True
+    assert {c["food_code"]: c["proposer_user_ids"] for c in round_state["candidates"]} == {
+        "G002": [host.id],
+        "G011": [member.id],
+    }
+
+
+def test_room_no_results_suggests_one_answer_change_using_frozen_exclusions():
+    _, db, users, _, room_id, as_user = build_group_order_sheet_env(member_count=2)
+    host, member = users
+    db.add(UserFoodExclusion(user_id=host.id, exclusion_type="DISLIKE", keyword="소고기쌀국수"))
+    db.commit()
+
+    room_url = f"/api/rooms/{room_id}"
+    assert as_user(host).post(f"{room_url}/rounds/start").status_code == 200
+    questions_url = f"{room_url}/rounds/current/questions"
+    member_sheet = as_user(member).get(questions_url).json()
+    questions = member_sheet["questions"]
+    round_id = member_sheet["round_id"]
+    request = {
+        "round_id": round_id,
+        "answers": _answers_from_map(questions, {
+            "has_soup": "soup_no",
+            "cooking_style": "noodle",
+            "main_ingredient": "meat",
+        }),
+    }
+    submit_url = f"{room_url}/rounds/current/order-sheet"
+    failed = as_user(member).post(submit_url, json=request)
+    assert failed.status_code == 409
+    assert failed.json()["detail"]["code"] == "NO_MATCHING_MENUS_FOR_ANSWERS"
+
+    db.add(UserFoodExclusion(user_id=member.id, exclusion_type="DISLIKE", keyword="불고기"))
+    db.commit()
+    before = as_user(member).get(room_url).json()
+    changes_url = f"{submit_url}/no-results"
+    lookup = as_user(member).post(changes_url, json=request)
+    assert lookup.status_code == 200
+    assert lookup.json() == {
+        "success": True,
+        "data": {
+            "suggested_answer_changes": [{
+                "question_id": next(q["id"] for q in questions if q["cluster_key"] == "cooking_style"),
+                "replacement_option_id": "any",
+                "display_text": "밥·면·그 외 답변을 '상관없어요'로 바꾸면 2종 추천",
+                "display_menu_count": 2,
+            }],
+            "can_review_my_answers": True,
+        },
+        "message": None,
+    }
+    assert as_user(member).post(changes_url, json=request).json() == lookup.json()
+    assert as_user(member).get(room_url).json() == before
+
+    has_results = as_user(member).post(changes_url, json={
+        "round_id": round_id,
+        "answers": _answers_from_map(questions, {}),
+    })
+    assert has_results.status_code == 200
+    assert has_results.json()["data"] == {
+        "suggested_answer_changes": [],
+        "can_review_my_answers": True,
+    }
+
+
+def test_shared_exclusion_zero_cancels_round_and_previous_suggestion_request_is_stale():
+    _, db, users, menus, room_id, as_user = build_group_order_sheet_env(member_count=2)
+    host, member = users
+    db.add(UserFoodExclusion(user_id=host.id, exclusion_type="DISLIKE", keyword="특수메뉴"))
+    db.commit()
+
+    room_url = f"/api/rooms/{room_id}"
+    start_url = f"{room_url}/rounds/start"
+    questions_url = f"{room_url}/rounds/current/questions"
+    submit_url = f"{room_url}/rounds/current/order-sheet"
+    changes_url = f"{submit_url}/no-results"
+    assert as_user(host).post(start_url).status_code == 200
+    sheet = as_user(member).get(questions_url).json()
+    original_request = {
+        "round_id": sheet["round_id"],
+        "answers": _answers_from_map(sheet["questions"], {}),
+    }
+
+    for menu in menus:
+        menu.category_small = "특수메뉴"
+    db.commit()
+    lookup = as_user(member).post(changes_url, json=original_request)
+    assert lookup.status_code == 200
+    assert lookup.json()["data"]["suggested_answer_changes"] == []
+    assert as_user(member).get(questions_url).json()["round_status"] == "ANSWERING"
+
+    failure = as_user(member).post(submit_url, json=original_request)
+    assert failure.status_code == 409
+    assert failure.json()["detail"]["code"] == "NO_AVAILABLE_MENUS"
+    cancelled = as_user(host).get(room_url).json()
+    assert cancelled["status"] == "WAITING"
+    assert cancelled["current_round"]["status"] == "CANCELLED"
+    assert cancelled["current_round"]["cancel_reason"] == "NO_AVAILABLE_MENUS"
+
+    for menu in menus:
+        menu.category_small = None
+    db.commit()
+    new_round = as_user(host).post(start_url)
+    assert new_round.status_code == 200
+    assert new_round.json()["round_id"] != original_request["round_id"]
+    stale = as_user(member).post(changes_url, json=original_request)
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "STALE_ROUND_ID"
+
+
+def test_room_no_results_requires_round_member_and_valid_assigned_answers():
+    _, db, users, _, room_id, as_user = build_group_order_sheet_env(member_count=2)
+    host, member = users
+    outsider = User(kakao_id=5100, nickname="방 외부 사용자")
+    db.add(outsider)
+    db.commit()
+
+    room_url = f"/api/rooms/{room_id}"
+    assert as_user(host).post(f"{room_url}/rounds/start").status_code == 200
+    sheet = as_user(member).get(f"{room_url}/rounds/current/questions").json()
+    changes_url = f"{room_url}/rounds/current/order-sheet/no-results"
+    answers = _answers_from_map(sheet["questions"], {})
+    request = {"round_id": sheet["round_id"], "answers": answers}
+
+    assert as_user(outsider).post(changes_url, json=request).status_code == 403
+    assert as_user(member).post(changes_url, json={"answers": answers}).status_code == 422
+    assert as_user(member).post(changes_url, json={**request, "exclusions": []}).status_code == 422
+    assert as_user(member).post(changes_url, json={**request, "answers": answers[1:]}).status_code == 400
+    invalid_answers = [{**answers[0], "option_id": "invalid"}, *answers[1:]]
+    assert as_user(member).post(changes_url, json={**request, "answers": invalid_answers}).status_code == 400
 
 
 def test_shared_exclusions_and_spec77_hard_filter_score_pipeline_work_across_all_aliases_into_voting():
