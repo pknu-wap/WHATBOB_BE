@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.auth.sessions import utc_now
 from app.menus.models import (
     OrderSheetIssuance,
+    OrderSheetQuestionReview,
     PersonalOrderSheetQuestionAssignment,
     PersonalOrderSheetQuestionExperiment,
     PersonalOrderSheetQuestionOverride,
@@ -74,6 +75,24 @@ def _summarize_experiment(db: Session, experiment_id: int) -> dict[str, ArmMetri
     }
 
 
+def _serialize_decision_metrics(metrics: dict[str, ArmMetrics]) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    no_response_rates: dict[str, float | None] = {}
+    for arm, values in metrics.items():
+        arm_data = asdict(values)
+        no_response_rate = (
+            values.no_response_count / values.shown_count if values.shown_count > 0 else None
+        )
+        arm_data["no_response_rate"] = no_response_rate
+        no_response_rates[arm] = no_response_rate
+        payload[arm] = arm_data
+    control_rate = no_response_rates.get(CONTROL)
+    variant_rate = no_response_rates.get(VARIANT)
+    if control_rate is not None and variant_rate is not None:
+        payload["no_response_rate_diff"] = variant_rate - control_rate
+    return payload
+
+
 def _publish_decision(
     db: Session,
     experiment_id: int,
@@ -100,7 +119,7 @@ def _publish_decision(
         experiment.active = None
         experiment.adopted = adopted
         experiment.completed_at = now
-        experiment.decision_metrics_json = {arm: asdict(values) for arm, values in metrics.items()}
+        experiment.decision_metrics_json = _serialize_decision_metrics(metrics)
         if adopted:
             override = db.get(PersonalOrderSheetQuestionOverride, (user_id, experiment.slot_key))
             if override is None:
@@ -108,5 +127,16 @@ def _publish_decision(
                 db.add(override)
             override.question_id = experiment.variant_question_id
             override.adopted_at = now
+        review = (
+            db.query(OrderSheetQuestionReview)
+            .filter(OrderSheetQuestionReview.user_id == user_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if review is not None:
+            review.pending_at = None
+            review.revision = int(review.revision or 0) + 1
+            review.reviewed_at = None
+            review.result_json = None
     db.commit()
     return adopted is not None

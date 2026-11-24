@@ -4,7 +4,7 @@ import math
 import random
 from typing import Any
 from uuid import uuid4
-from sqlalchemy import func, or_
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -63,10 +63,8 @@ from app.recommend.schemas import (
     RecommendedMenuDTO,
 )
 from app.recommend.question_pool import (
-    COOKING_STYLE_OPTIONS,
-    LEGACY_COOKING_STYLE_RULES,
-    QUESTION_CODE_PREFIX,
     get_question_display,
+    normalize_question_options as _question_options,
 )
 from app.recommend.hard_filter_audit import record_hard_filter_traces
 from app.recommend.ranking import (
@@ -88,29 +86,6 @@ HARD_FILTER_PRIORITY: dict[str, int] = {
     "main_ingredient": 3,
 }
 HARD_FILTER_CLUSTERS = frozenset(HARD_FILTER_PRIORITY.keys())
-
-
-def _question_options(question: OrderSheetQuestion) -> list[dict[str, Any]]:
-    options = list(question.options_json or [])
-    # 기존 두 선택지 DB도 재적재 전까지 any를 조회·제출할 수 있다.
-    if len(options) == 2 and not any(opt.get("option_id") == "any" for opt in options):
-        options.append({"option_id": "any", "label": "상관없어요", "rules": []})
-    # 기존 3선택지(rice_noodle/other_style/any) Q8 행도 재적재 없이 4선택지(밥·면·그 외·상관없어요)로 정규화한다.
-    if (
-        question.cluster_key == "cooking_style"
-        and (question.question_code or "").startswith(QUESTION_CODE_PREFIX)
-    ):
-        actual_rules = {opt.get("option_id"): opt.get("rules", []) for opt in options}
-        if actual_rules == LEGACY_COOKING_STYLE_RULES:
-            return [
-                {
-                    "option_id": opt["option_id"],
-                    "label": opt["label"],
-                    "rules": [dict(rule) for rule in opt["rules"]],
-                }
-                for opt in COOKING_STYLE_OPTIONS
-            ]
-    return options
 
 
 def _to_question_dto(
@@ -1023,10 +998,12 @@ def _find_valid_order_sheet_issuance(
         if not cleaned:
             return None
         identifier = OrderSheetIssuance.order_sheet_id == cleaned
-    query = db.query(OrderSheetIssuance).filter(
-        identifier,
-        or_(OrderSheetIssuance.user_id == user_id, OrderSheetIssuance.user_id.is_(None)),
+    owner_filter = (
+        OrderSheetIssuance.user_id == user_id
+        if user_id is not None
+        else OrderSheetIssuance.user_id.is_(None)
     )
+    query = db.query(OrderSheetIssuance).filter(identifier, owner_filter)
     if for_update:
         query = query.with_for_update().populate_existing()
     return query.first()

@@ -26,6 +26,7 @@ from app.recommend.common import (
     evaluate_option_rules,
 )
 from app.recommend.personal_experiment_events import record_personal_experiment_reaction
+from app.recommend.question_pool import normalize_question_options as _question_options
 from app.recommend.question_review import enqueue_rejected_initial_list_review
 from app.recommend.schemas import (
     RecommendationFeedbackRequest,
@@ -87,13 +88,6 @@ class FirstListReactionSummary:
     total_liked_menu_count: int
     total_disliked_menu_count: int
     outcomes: list[RecommendationReactionOutcome]
-
-
-def _question_options(question: OrderSheetQuestion) -> list[dict[str, Any]]:
-    options = list(question.options_json or [])
-    if len(options) == 2 and not any(opt.get("option_id") == "any" for opt in options):
-        options.append({"option_id": "any", "label": "상관없어요", "rules": []})
-    return options
 
 
 def _shown_menu_ids(rec: Recommendation) -> list[int]:

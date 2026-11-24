@@ -45,9 +45,9 @@ class PlaceSelection(Base):
 
     satisfaction = relationship(
         "PlaceSatisfaction",
-        back_populates="place_selection",
         uselist=False,
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
 
@@ -98,5 +98,3 @@ class PlaceSatisfaction(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
-
-    place_selection = relationship("PlaceSelection", back_populates="satisfaction")

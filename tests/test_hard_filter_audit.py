@@ -594,3 +594,76 @@ def test_uuid_to_kakao_transition_migrates_hard_filter_traces_without_losing_use
     sat = summarize_overall_satisfaction_with_hard_filter_audit(db, user_id=target_user.id)
     assert sat.overall.list_rejected_count == 1
     assert sat.single_candidate_rejected_count == 1
+
+
+def test_single_candidate_like_then_explicit_rejection_is_captured_in_audit_and_summary(db: Session):
+    user = User(kakao_id=870301, nickname="좋아요후거절테스터")
+    db.add(user)
+    q_map = _seed_initial_questions(db)
+    m_single = _add_menu(
+        db,
+        food_code="LR01",
+        name="소고기국밥",
+        base_name="소고기국밥",
+        has_soup=True,
+        cooking_style="rice",
+        main_ingredient="beef",
+    )
+    _add_menu(
+        db,
+        food_code="LR02",
+        name="비빔밥",
+        base_name="비빔밥",
+        has_soup=False,
+        cooking_style="rice",
+        main_ingredient="beef",
+    )
+    db.commit()
+
+    rec_resp = create_order_sheet_recommendation(
+        db=db,
+        user_id=user.id,
+        request=OrderSheetRecommendRequest(
+            answers=[
+                AnswerItemRequest(question_id=q_map["has_soup"].id, option_id="soup_yes"),
+                AnswerItemRequest(question_id=q_map["cooking_style"].id, option_id="rice"),
+                AnswerItemRequest(question_id=q_map["main_ingredient"].id, option_id="meat"),
+            ],
+            top_k=5,
+        ),
+    )
+    assert rec_resp.candidate_count == 1
+
+    # 1종 후보에 좋아요를 누른 뒤 명시적으로 첫 목록 거절까지 수행한 경우
+    record_recommendation_feedback(
+        db=db,
+        recommendation_id=rec_resp.recommendation_id,
+        request=RecommendationFeedbackRequest(selected_menu_id=m_single.id, is_satisfied=True),
+        user_id=user.id,
+    )
+    reject_recommendation_list(
+        db=db,
+        recommendation_id=rec_resp.recommendation_id,
+        user_id=user.id,
+    )
+
+    audit = get_order_sheet_hard_filter_audit(db, rec_resp.recommendation_id)
+    assert audit.is_single_candidate is True
+    assert audit.outcome.is_first_list_liked is True
+    assert audit.outcome.is_list_rejected is True
+    assert audit.is_single_candidate_liked is True
+    assert audit.is_single_candidate_rejection is True
+
+    rej_summary = summarize_single_candidate_rejections(db, user_id=user.id)
+    assert rej_summary.total_single_candidate_rejections == 1
+    assert rej_summary.unique_combination_count == 1
+    assert rej_summary.combinations[0].recommendation_ids == [rec_resp.recommendation_id]
+    assert rej_summary.combinations[0].rejected_menu_ids == [m_single.id]
+
+    sat = summarize_overall_satisfaction_with_hard_filter_audit(db, user_id=user.id)
+    assert sat.single_candidate_total_count == 1
+    assert sat.single_candidate_liked_count == 1
+    assert sat.single_candidate_rejected_count == 1
+    assert sat.overall.first_list_liked_count == 1
+    assert sat.overall.list_rejected_count == 1
+    assert sat.overall.list_rejected_count == sat.single_candidate_rejected_count + sat.multi_candidate_rejected_count

@@ -8,17 +8,33 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.config import settings
 from app.core.database import Base
-from app.menus.models import Menu, OrderSheetQuestion, QuestionSelectionState, UserFoodExclusion
+from app.menus.models import (
+    PERSONAL_RETRY_LIST,
+    Menu,
+    OrderSheetIssuance,
+    OrderSheetQuestion,
+    QuestionSelectionState,
+    Recommendation,
+    UserFoodExclusion,
+)
 from app.recommend.common import evaluate_option_rules
+from app.recommend.feedback import _question_options as feedback_question_options
 from app.recommend.order_sheet import (
+    _find_valid_order_sheet_issuance,
     calculate_question_entropy_score,
     calculate_question_ranking_metrics,
+    create_order_sheet_recommendation,
+    issue_order_sheet_questions,
     rank_initial_question_candidates,
     resolve_question_role,
     select_order_sheet_questions,
 )
 from app.recommend.question_pool import QUESTION_OPTION_COUNT, build_candidate_question_pool
-from app.recommend.schemas import OrderSheetQuestionDTO
+from app.recommend.schemas import (
+    AnswerItemRequest,
+    OrderSheetQuestionDTO,
+    OrderSheetRecommendRequest,
+)
 from app.users.models import User
 
 
@@ -425,3 +441,66 @@ def test_select_order_sheet_questions_respects_commit_false(db):
     # commit=False 이므로 rollback 하면 QuestionSelectionState 가 남지 않아야 한다.
     db.rollback()
     assert db.get(QuestionSelectionState, "tx:rollback-check") is None
+
+
+def test_authenticated_user_cannot_claim_unowned_order_sheet_issuance(db):
+    _seed_diverse_menus_and_full_pool(db)
+    user = User(kakao_id=880099, nickname="인증소유경계유저")
+    other_user = User(kakao_id=880100, nickname="다른인증유저")
+    db.add_all([user, other_user])
+    db.commit()
+
+    unowned = issue_order_sheet_questions(db, user_id=None)
+    owned = issue_order_sheet_questions(db, user_id=other_user.id)
+
+    assert _find_valid_order_sheet_issuance(db, unowned.order_sheet_id, user_id=None) is not None
+    assert _find_valid_order_sheet_issuance(db, unowned.order_sheet_id, user_id=user.id) is None
+    assert _find_valid_order_sheet_issuance(db, owned.order_sheet_id, user_id=user.id) is None
+    assert _find_valid_order_sheet_issuance(db, owned.order_sheet_id, user_id=None) is None
+
+    rec_resp = create_order_sheet_recommendation(
+        db=db,
+        user_id=user.id,
+        request=OrderSheetRecommendRequest(
+            order_sheet_id=unowned.order_sheet_id,
+            answers=[
+                AnswerItemRequest(question_id=q.id, option_id="any")
+                for q in unowned.questions
+            ],
+        ),
+    )
+    unowned_row = (
+        db.query(OrderSheetIssuance)
+        .filter(OrderSheetIssuance.order_sheet_id == unowned.order_sheet_id)
+        .one()
+    )
+    assert unowned_row.status == "ISSUED"
+    assert unowned_row.recommendation_id is None
+    rec_row = db.get(Recommendation, rec_resp.recommendation_id)
+    assert rec_row.order_sheet_list_scope == PERSONAL_RETRY_LIST
+
+
+def test_feedback_question_options_normalizes_legacy_three_option_cooking_style(db):
+    legacy_q8 = OrderSheetQuestion(
+        question_code="q_binary_v1_cooking_style_01",
+        cluster_key="cooking_style",
+        question_text="밥이나 면 요리가 당기나요?",
+        options_json=[
+            {
+                "option_id": "rice_noodle",
+                "label": "예",
+                "rules": [{"field": "cooking_style", "op": "in", "value": ["rice", "noodle"]}],
+            },
+            {
+                "option_id": "other_style",
+                "label": "아니요",
+                "rules": [{"field": "cooking_style", "op": "not_in", "value": ["rice", "noodle"]}],
+            },
+            {"option_id": "any", "label": "상관없어요", "rules": []},
+        ],
+        initial_score=0.8,
+        importance_weight=0.8,
+        is_active=True,
+    )
+    normalized = feedback_question_options(legacy_q8)
+    assert [opt["option_id"] for opt in normalized] == ["rice", "noodle", "other_style", "any"]

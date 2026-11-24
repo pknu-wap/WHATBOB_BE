@@ -1,6 +1,8 @@
 """HTTP coverage for group order-sheet assignment, submission, and retry."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -14,7 +16,12 @@ import app.users.models  # noqa: F401
 from app.auth.dependencies import get_current_user
 from app.core.config import settings
 from app.core.database import Base, get_db
-from app.menus.models import Menu, OrderSheetQuestion, UserFoodExclusion
+from app.menus.models import (
+    CommonOrderSheetQuestionExperiment,
+    Menu,
+    OrderSheetQuestion,
+    UserFoodExclusion,
+)
 from app.recommend.question_pool import build_candidate_question_pool
 from app.rooms.router import operations_router, router as rooms_router
 from app.users.models import User
@@ -761,3 +768,84 @@ def test_start_alias_omits_topics_that_become_degenerate_on_surviving_shared_men
         assert len(set(clusters)) == 9
         assert "has_soup" not in clusters
         assert set(clusters) & {"sugar_level", "temperature"}
+
+
+def test_adopted_common_question_override_propagates_to_group_rounds_and_respects_exclusions():
+    # (1) 채택된 공통 질문(carb_level -> temperature)이 새 그룹 라운드 참여자 전원에게 적용된다.
+    _, db, users, _, room_id, as_user = build_group_order_sheet_env(member_count=2)
+    host, member = users
+    carb_q = db.query(OrderSheetQuestion).filter_by(cluster_key="carb_level").one()
+    temp_q = db.query(OrderSheetQuestion).filter_by(cluster_key="temperature").one()
+    now = datetime.now(timezone.utc)
+    adopted_common = CommonOrderSheetQuestionExperiment(
+        slot_key="carb_level",
+        control_question_id=carb_q.id,
+        variant_question_id=temp_q.id,
+        control_questions_json=[],
+        variant_questions_json=[],
+        question_roles_json={},
+        score_weights_json={},
+        ranking_rule_version=settings.ORDER_SHEET_RANKING_RULE_VERSION,
+        submissions_per_arm=100,
+        reaction_window_hours=24,
+        active=None,
+        created_at=now,
+        completed_at=now,
+        adopted=True,
+        cohorts_json={},
+    )
+    db.add(adopted_common)
+    db.commit()
+
+    started = as_user(host).post(f"/api/rooms/{room_id}/rounds/start")
+    assert started.status_code == 200
+    for participant in (host, member):
+        res = as_user(participant).get(f"/api/rooms/{room_id}/rounds/current/questions")
+        assert res.status_code == 200
+        qs = res.json()["questions"]
+        clusters = [q["cluster_key"] for q in qs]
+        assert len(clusters) == len(set(clusters)) == 9
+        assert "temperature" in clusters
+        assert "carb_level" not in clusters
+        assert temp_q.id in {q["id"] for q in qs}
+
+    # (2) 참여자 알레르기·제외로 채택 공통 질문이 부적합하거나 무의미해지면 생략/대체된다.
+    _, db2, users2, _, room_id2, as_user2 = build_group_order_sheet_env(member_count=2)
+    host2, member2 = users2
+    carb_q2 = db2.query(OrderSheetQuestion).filter_by(cluster_key="carb_level").one()
+    temp_q2 = db2.query(OrderSheetQuestion).filter_by(cluster_key="temperature").one()
+    db2.add(
+        CommonOrderSheetQuestionExperiment(
+            slot_key="carb_level",
+            control_question_id=carb_q2.id,
+            variant_question_id=temp_q2.id,
+            control_questions_json=[],
+            variant_questions_json=[],
+            question_roles_json={},
+            score_weights_json={},
+            ranking_rule_version=settings.ORDER_SHEET_RANKING_RULE_VERSION,
+            submissions_per_arm=100,
+            reaction_window_hours=24,
+            active=None,
+            created_at=now,
+            completed_at=now,
+            adopted=True,
+            cohorts_json={},
+        )
+    )
+    # 차가운 메뉴(두부샐러드, 포케, 냉국밥)를 제외하면 temperature 질문이 퇴화되어 풀에서 빠진다.
+    for kw in ("두부샐러드", "포케", "냉국밥"):
+        db2.add(UserFoodExclusion(user_id=member2.id, exclusion_type="DISLIKE", keyword=kw))
+    db2.add(UserFoodExclusion(user_id=host2.id, exclusion_type="ALLERGY", keyword="밀", catalog_code="wheat"))
+    db2.commit()
+
+    started2 = as_user2(host2).post(f"/api/rooms/{room_id2}/rounds/start")
+    assert started2.status_code == 200
+    for participant in (host2, member2):
+        res = as_user2(participant).get(f"/api/rooms/{room_id2}/rounds/current/questions")
+        assert res.status_code == 200
+        clusters = [q["cluster_key"] for q in res.json()["questions"]]
+        assert len(clusters) == len(set(clusters)) == 9
+        assert "cooking_style" not in clusters
+        assert "temperature" not in clusters
+        assert "carb_level" in clusters

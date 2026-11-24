@@ -33,6 +33,30 @@ LEGACY_COOKING_STYLE_RULES: dict[str, list[dict[str, Any]]] = {
 }
 
 
+def normalize_question_options(question: Any) -> list[dict[str, Any]]:
+    """Normalize legacy 2-option rows and 3-option cooking_style rows into current options."""
+    options = list(question.options_json or [])
+    # 기존 두 선택지 DB도 재적재 전까지 any를 조회·제출할 수 있다.
+    if len(options) == 2 and not any(opt.get("option_id") == "any" for opt in options):
+        options.append({"option_id": "any", "label": "상관없어요", "rules": []})
+    # 기존 3선택지(rice_noodle/other_style/any) Q8 행도 재적재 없이 4선택지(밥·면·그 외·상관없어요)로 정규화한다.
+    if (
+        question.cluster_key == "cooking_style"
+        and (question.question_code or "").startswith(QUESTION_CODE_PREFIX)
+    ):
+        actual_rules = {opt.get("option_id"): opt.get("rules", []) for opt in options}
+        if actual_rules == LEGACY_COOKING_STYLE_RULES:
+            return [
+                {
+                    "option_id": opt["option_id"],
+                    "label": opt["label"],
+                    "rules": [dict(rule) for rule in opt["rules"]],
+                }
+                for opt in COOKING_STYLE_OPTIONS
+            ]
+    return options
+
+
 def build_candidate_question_pool() -> list[dict[str, Any]]:
     # 두 번째 선택지는 첫 번째 조건의 반대다. 기존 재료·조리 분류를 버리지 않는다.
     specs = [

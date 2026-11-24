@@ -17,9 +17,7 @@ from app.auth.sessions import as_utc_naive
 from app.menus.models import OrderSheetHardFilterTrace, Recommendation
 from app.recommend.common import RecommendationNotFoundException
 from app.recommend.feedback import (
-    OUTCOME_FIRST_LIST_LIKED,
     OUTCOME_INDIVIDUAL_DISLIKED_ONLY,
-    OUTCOME_LIST_REJECTED,
     OUTCOME_NO_RESPONSE,
     FirstListReactionSummary,
     RecommendationReactionOutcome,
@@ -190,10 +188,10 @@ def _build_audit_record(
         outcome=outcome,
         is_single_candidate=is_single_candidate,
         is_single_candidate_rejection=(
-            is_single_candidate and outcome.outcome == OUTCOME_LIST_REJECTED
+            is_single_candidate and outcome.is_list_rejected
         ),
         is_single_candidate_liked=(
-            is_single_candidate and outcome.outcome == OUTCOME_FIRST_LIST_LIKED
+            is_single_candidate and outcome.is_first_list_liked
         ),
         answer_combination=_canonical_answer_combination(traces),
     )
@@ -325,7 +323,7 @@ def summarize_single_candidate_rejections(
 
     grouped_cases: dict[tuple[tuple[str, str], ...], list[OrderSheetHardFilterAudit]] = {}
     for outcome in reaction_summary.outcomes:
-        if outcome.outcome != OUTCOME_LIST_REJECTED:
+        if not outcome.is_list_rejected:
             continue
         trace_rows = traces_by_rec.get(outcome.recommendation_id)
         if not trace_rows:
@@ -420,19 +418,19 @@ def summarize_overall_satisfaction_with_hard_filter_audit(
 
         if final_kind_count == 1:
             single_total += 1
-            if outcome.outcome == OUTCOME_FIRST_LIST_LIKED:
+            if outcome.is_first_list_liked:
                 single_liked += 1
-            elif outcome.outcome == OUTCOME_LIST_REJECTED:
+            if outcome.is_list_rejected:
                 single_rejected += 1
-            elif outcome.outcome == OUTCOME_INDIVIDUAL_DISLIKED_ONLY:
+            if outcome.outcome == OUTCOME_INDIVIDUAL_DISLIKED_ONLY:
                 single_disliked_only += 1
             elif outcome.outcome == OUTCOME_NO_RESPONSE:
                 single_no_response += 1
         elif final_kind_count >= 2:
             multi_total += 1
-            if outcome.outcome == OUTCOME_FIRST_LIST_LIKED:
+            if outcome.is_first_list_liked:
                 multi_liked += 1
-            elif outcome.outcome == OUTCOME_LIST_REJECTED:
+            if outcome.is_list_rejected:
                 multi_rejected += 1
 
     shown_count = overall.shown_list_count

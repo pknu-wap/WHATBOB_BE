@@ -18,11 +18,14 @@ from app.recommend.common import (
     collect_user_exclusion_keywords,
     filter_available_menus,
 )
+from app.recommend.common_question_experiments import load_common_question_overrides
 from app.recommend.no_results import suggest_no_result_answer_changes
 from app.recommend.order_sheet import (
     create_order_sheet_recommendation,
+    load_order_sheet_question_pool,
     select_order_sheet_questions,
 )
+from app.recommend.question_experiments import apply_question_overrides
 from app.recommend.schemas import (
     AnswerItemRequest,
     OrderSheetNoResultsResponse,
@@ -602,6 +605,22 @@ def start_room_round(
             ) from None
 
         target_question_count = int(settings.ORDER_SHEET_QUESTION_COUNT)
+        try:
+            shared_question_pool = load_order_sheet_question_pool(
+                db=db,
+                exclusion_keywords=shared_exclusions_set,
+                available_menus=available_menus,
+            )
+        except QuestionPoolEmptyException as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "QUESTION_POOL_EMPTY",
+                    "message": exc.message,
+                },
+            ) from exc
+        common_overrides = load_common_question_overrides(db)
+
         allocated_by_user: dict[int, list[dict[str, Any]]] = {}
         for m in ordered_members:
             try:
@@ -614,6 +633,7 @@ def start_room_round(
                     available_menus=available_menus,
                     fill_question_count=True,
                     commit=False,
+                    question_pool=shared_question_pool,
                 )
             except QuestionPoolEmptyException as exc:
                 raise HTTPException(
@@ -623,6 +643,13 @@ def start_room_round(
                         "message": exc.message,
                     },
                 ) from exc
+            slot_keys = tuple(q.cluster_key for q in q_resp.questions)
+            q_resp = apply_question_overrides(
+                q_resp,
+                slot_keys,
+                shared_question_pool,
+                common_overrides,
+            )
             if len(q_resp.questions) < target_question_count:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
