@@ -452,5 +452,3 @@ def summarize_overall_satisfaction_with_hard_filter_audit(
         overall_like_rate=like_rate,
         overall_rejection_rate=rejection_rate,
     )
-
-

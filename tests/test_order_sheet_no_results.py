@@ -342,4 +342,3 @@ def test_suggest_respects_question_role_overrides_and_skips_already_neutral_answ
         (q_map["flavor_intensity"].id, "any", 1),
     ]
     assert "매운맛" in result.suggested_answer_changes[0].display_text
-

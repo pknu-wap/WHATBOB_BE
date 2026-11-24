@@ -594,6 +594,3 @@ def test_uuid_to_kakao_transition_migrates_hard_filter_traces_without_losing_use
     sat = summarize_overall_satisfaction_with_hard_filter_audit(db, user_id=target_user.id)
     assert sat.overall.list_rejected_count == 1
     assert sat.single_candidate_rejected_count == 1
-
-
-

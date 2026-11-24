@@ -425,5 +425,3 @@ def test_select_order_sheet_questions_respects_commit_false(db):
     # commit=False 이므로 rollback 하면 QuestionSelectionState 가 남지 않아야 한다.
     db.rollback()
     assert db.get(QuestionSelectionState, "tx:rollback-check") is None
-
-

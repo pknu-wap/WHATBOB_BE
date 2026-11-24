@@ -580,6 +580,3 @@ def test_todays_hard_filter_and_score_answers_override_max_long_term_boost(db: S
         user_id=user.id,
     )
     assert [m.base_name for m in score_priority.recommended_menus] == ["비빔밥", "우동"]
-
-
-

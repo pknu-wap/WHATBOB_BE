@@ -14,7 +14,8 @@ def assert_legacy_schema_upgrades(engine):
             "recommendation_feedbacks",
             "recommendation_feedback_states",
         ):
-            connection.execute(text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)"))
+            legacy_columns = ", user_id INTEGER, created_at DATETIME" if table == "recommendations" else ""
+            connection.execute(text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY{legacy_columns})"))
             connection.execute(text(f"INSERT INTO {table} (id) VALUES (42)"))
 
     with engine.begin() as connection:
