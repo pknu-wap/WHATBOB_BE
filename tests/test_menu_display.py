@@ -100,7 +100,8 @@ def test_recommendation_formats_names_without_changing_storage_or_exclusions():
                 assert [item["base_name"] for item in results] == ["김밥", "닭튀김"]
                 assert [item["menu_id"] for item in results] == [m.id for m in menus]
                 assert [item["food_code"] for item in results] == [m.food_code for m in menus]
-                assert [item["match_score"] for item in results] == [0.8, 0.8]
+                assert [item["match_score"] for item in results] == [0.0, 0.0]
+                assert all(item["matched_question_codes"] == [question.question_code] for item in results)
                 record = db.get(Recommendation, data["recommendation_id"])
                 assert set(record.recommended_menu_ids) == {m.id for m in menus}
                 feedback = client.post(f'/api/recommendations/{record.id}/feedback', json={
