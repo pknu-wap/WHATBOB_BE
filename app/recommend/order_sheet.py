@@ -4,7 +4,7 @@ import math
 import random
 from typing import Any
 from uuid import uuid4
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -833,6 +833,7 @@ def issue_order_sheet_questions(
                 OrderSheetIssuance.user_id == user_id,
                 OrderSheetIssuance.issuance_key == effective_key,
             )
+            .with_for_update()
             .first()
         )
         if existing is not None:
@@ -987,29 +988,25 @@ def _find_valid_order_sheet_issuance(
     db: Session,
     order_sheet_id: str | int | None,
     user_id: int | None,
+    *,
+    for_update: bool = False,
 ) -> OrderSheetIssuance | None:
     if order_sheet_id is None:
         return None
     if isinstance(order_sheet_id, int) and not isinstance(order_sheet_id, bool):
-        issuance = (
-            db.query(OrderSheetIssuance)
-            .filter(OrderSheetIssuance.id == order_sheet_id)
-            .first()
-        )
+        identifier = OrderSheetIssuance.id == order_sheet_id
     else:
         cleaned = str(order_sheet_id).strip()
         if not cleaned:
             return None
-        issuance = (
-            db.query(OrderSheetIssuance)
-            .filter(OrderSheetIssuance.order_sheet_id == cleaned)
-            .first()
-        )
-    if issuance is None:
-        return None
-    if issuance.user_id is not None and issuance.user_id != user_id:
-        return None
-    return issuance
+        identifier = OrderSheetIssuance.order_sheet_id == cleaned
+    query = db.query(OrderSheetIssuance).filter(
+        identifier,
+        or_(OrderSheetIssuance.user_id == user_id, OrderSheetIssuance.user_id.is_(None)),
+    )
+    if for_update:
+        query = query.with_for_update().populate_existing()
+    return query.first()
 
 
 def create_order_sheet_recommendation(
@@ -1042,13 +1039,16 @@ def create_order_sheet_recommendation(
             locked_user = lock_user_and_verify_session(db, current_user)
             effective_user_id = locked_user.id
 
-    issuance = _find_valid_order_sheet_issuance(
-        db=db,
-        order_sheet_id=request.order_sheet_id,
-        user_id=effective_user_id,
-    )
+    issuance = None
+    if fixed_exclusion_keywords is None:
+        issuance = _find_valid_order_sheet_issuance(
+            db=db,
+            order_sheet_id=request.order_sheet_id,
+            user_id=effective_user_id,
+            for_update=True,
+        )
     personal_assignment = issuance is not None and db.get(
-        PersonalOrderSheetQuestionAssignment, issuance.id,
+        PersonalOrderSheetQuestionAssignment, issuance.id, with_for_update=True,
     ) is not None
     validated_answers = validate_order_sheet_answers(
         db,

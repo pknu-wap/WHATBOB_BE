@@ -15,7 +15,7 @@ from app.menus.models import (
 from app.recommend.common import evaluate_option_rules
 from app.recommend.order_sheet import OrderSheetQuestionPool, _question_options, _to_question_dto
 from app.recommend.question_review import load_ranked_question_ids
-from app.recommend.ranking import resolve_question_role
+from app.recommend.ranking import _is_neutral_option, resolve_question_role
 from app.recommend.schemas import OrderSheetQuestionDTO, OrderSheetQuestionsResponse
 
 CONTROL = "control"
@@ -113,14 +113,17 @@ def _distinguishes_available_menus(
 ) -> bool:
     matched_groups = set()
     for option in _question_options(question):
-        rules = option.get("rules")
-        if rules:
-            matches = frozenset(
-                menu.id for menu in question_pool.available_menus if evaluate_option_rules(menu, rules)
-            )
-            if matches:
-                matched_groups.add(matches)
-    return len(matched_groups) >= 2
+        if _is_neutral_option(option):
+            continue
+        matches = frozenset(
+            menu.id for menu in question_pool.available_menus
+            if evaluate_option_rules(menu, option["rules"])
+        )
+        if matches:
+            matched_groups.add(matches)
+            if len(matched_groups) >= 2:
+                return True
+    return False
 
 
 def _snapshot(questions: list[OrderSheetQuestionDTO]) -> list[dict]:
@@ -194,7 +197,7 @@ def _start_experiment(
     return None
 
 
-def _frozen_questions_fit(
+def frozen_experiment_questions_fit(
     experiment: PersonalOrderSheetQuestionExperiment,
     question_pool: OrderSheetQuestionPool,
     target_count: int,
@@ -270,7 +273,7 @@ def pick_personal_question_assignment(
             return None
         db.add(experiment)
         db.flush()
-    elif not _frozen_questions_fit(experiment, question_pool, target_count):
+    elif not frozen_experiment_questions_fit(experiment, question_pool, target_count):
         return None
 
     pair_number, arm = _next_pair_arm(db, experiment.id)
