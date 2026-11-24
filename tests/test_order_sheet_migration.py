@@ -20,8 +20,10 @@ def assert_legacy_schema_upgrades(engine):
     with engine.begin() as connection:
         pending = pending_order_sheet_schema(connection)
         assert "recommendations.initial_candidate_count" in pending
+        assert "recommendations.order_sheet_list_scope" in pending
         assert "order_sheet_issuances" in pending
         assert "order_sheet_replay_snapshots" in pending
+        assert "order_sheet_question_reviews" in pending
         assert "recommendation_feedbacks.food_kind_id" in pending
         migrate_order_sheet(connection)
         assert pending_order_sheet_schema(connection) == []

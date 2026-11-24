@@ -12,7 +12,9 @@ from app.core.database import Base, engine
 
 
 ADDED_COLUMNS = {
-    "recommendations": ("initial_candidate_count", "list_rejected_at", "closed_at"),
+    "recommendations": (
+        "initial_candidate_count", "list_rejected_at", "closed_at", "order_sheet_list_scope",
+    ),
     "recommendation_feedbacks": ("food_kind_id", "exposure_rank"),
     "recommendation_feedback_states": ("food_kind_id", "exposure_rank"),
 }
@@ -20,6 +22,7 @@ ADDED_TABLES = (
     "order_sheet_issuances",
     "order_sheet_hard_filter_traces",
     "order_sheet_replay_snapshots",
+    "order_sheet_question_reviews",
     "place_selections",
     "place_satisfactions",
 )
@@ -50,7 +53,7 @@ def _missing_schema(connection):
 
         indexes = {index["name"] for index in inspector.get_indexes(table_name)}
         for index in sorted(table.indexes, key=lambda item: item.name):
-            if tuple(column.name for column in index.columns) in {(name,) for name in names}:
+            if any(column.name in names for column in index.columns):
                 if index.name not in indexes:
                     yield index.name, index
 

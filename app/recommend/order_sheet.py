@@ -1119,8 +1119,7 @@ def create_order_sheet_recommendation(
     completes_issuance = (
         issuance is not None
         and issuance.recommendation_id is None
-        and set(issuance.question_ids_json).issubset(submitted_q_ids)
-        and (not personal_assignment or len(submitted_q_ids) == len(issuance.question_ids_json))
+        and (not personal_assignment or set(submitted_q_ids) == set(issuance.question_ids_json))
     )
     list_scope = PERSONAL_INITIAL_LIST
     if fixed_exclusion_keywords is not None:
