@@ -448,6 +448,8 @@ def _rebuild_feedback_states_for_recommendations(
                 user_id=target_user_id,
                 recommendation_id=rec_id,
                 selected_menu_id=fb.selected_menu_id,
+                food_kind_id=fb.food_kind_id,
+                exposure_rank=fb.exposure_rank,
                 menu_key=mkey,
                 menu_base_name=fb.menu_base_name or mkey,
                 menu_main_ingredient=fb.menu_main_ingredient or "other",
