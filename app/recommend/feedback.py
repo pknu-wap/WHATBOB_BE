@@ -25,6 +25,7 @@ from app.recommend.common import (
     RecommendationNotFoundException,
     evaluate_option_rules,
 )
+from app.recommend.question_review import enqueue_rejected_initial_list_review
 from app.recommend.schemas import (
     RecommendationFeedbackRequest,
     RecommendationFeedbackResponse,
@@ -441,6 +442,7 @@ def reject_recommendation_list(
     now = utc_now()
     if rec.list_rejected_at is None:
         rec.list_rejected_at = now
+        enqueue_rejected_initial_list_review(db, rec, now)
     if rec.closed_at is None:
         rec.closed_at = rec.list_rejected_at
 

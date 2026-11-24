@@ -234,6 +234,11 @@ class QuestionSelectionState(Base):
                         onupdate=lambda: datetime.now(timezone.utc))
 
 
+PERSONAL_INITIAL_LIST = "personal_initial"
+PERSONAL_RETRY_LIST = "personal_retry"
+GROUP_ORDER_SHEET_LIST = "group"
+
+
 class Recommendation(Base):
     """주문서 추천 요청 및 결과 이력 테이블"""
     __tablename__ = "recommendations"
@@ -244,6 +249,7 @@ class Recommendation(Base):
     answers_json = Column(JSON, nullable=False, default=list)
     recommended_menu_ids = Column(JSON, nullable=False, default=list)
     initial_candidate_count = Column(Integer, nullable=True)
+    order_sheet_list_scope = Column(String(20), nullable=True)
     list_rejected_at = Column(DateTime, nullable=True, index=True)
     closed_at = Column(DateTime, nullable=True, index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -460,3 +466,16 @@ class OrderSheetReplaySnapshot(Base):
     candidates_json = Column(JSON, nullable=False, default=list)
     tie_break_inputs_json = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class OrderSheetQuestionReview(Base):
+    """Coalesced replacement review work and the latest published result for a user."""
+
+    __tablename__ = "order_sheet_question_reviews"
+    __table_args__ = (Index("ix_order_sheet_question_reviews_pending", "pending_at", "user_id"),)
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    pending_at = Column(DateTime, nullable=True)
+    revision = Column(Integer, nullable=False, default=1)
+    reviewed_at = Column(DateTime, nullable=True)
+    result_json = Column(JSON, nullable=True)
