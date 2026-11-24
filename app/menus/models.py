@@ -416,6 +416,10 @@ class OrderSheetReplaySnapshot(Base):
             "recommendation_id",
             name="uq_order_sheet_replay_snapshots_recommendation_id",
         ),
+        UniqueConstraint(
+            "order_sheet_id",
+            name="uq_order_sheet_replay_snapshots_order_sheet_id",
+        ),
         Index(
             "ix_order_sheet_replay_snapshots_user_completed",
             "user_id",
@@ -443,7 +447,6 @@ class OrderSheetReplaySnapshot(Base):
     order_sheet_id = Column(
         Integer,
         ForeignKey("order_sheet_issuances.id", ondelete="SET NULL"),
-        index=True,
         nullable=True,
     )
     completed_at = Column(DateTime, nullable=False)

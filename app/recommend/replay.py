@@ -8,13 +8,15 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
 from typing import Any
 
-from sqlalchemy import inspect
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -22,10 +24,12 @@ from app.auth.sessions import as_utc_naive, utc_now
 from app.core.config import settings
 from app.menus.models import OrderSheetReplaySnapshot, Recommendation
 from app.recommend.ranking import OrderSheetEvaluationResult, RankedCandidate
+from app.rooms.models import RoomRoundMember
 
 logger = logging.getLogger(__name__)
 
 SORT_RULE_NAME = "final_score_desc_food_code_asc_menu_id_asc"
+REPLAY_CLEANUP_INTERVAL_SECONDS = 3600
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,7 @@ class ReplayResult:
 class VerifiedReplaySheet:
     snapshot: OrderSheetReplaySnapshot
     baseline_replay: ReplayResult
+    question_replays: dict[int, ReplayResult]
 
 
 @dataclass(frozen=True)
@@ -132,30 +137,19 @@ def save_replay_snapshot_if_eligible(
     if recommendation.user_id is None:
         return None
 
-    surviving_kinds = getattr(
-        evaluation,
-        "surviving_kind_representatives",
-        getattr(evaluation, "ranked_kinds", ()),
-    )
-    if len(surviving_kinds) < 2:
+    if len(evaluation.surviving_kind_representatives) < 2:
         return None
 
-    existing = (
-        db.query(OrderSheetReplaySnapshot)
-        .filter(OrderSheetReplaySnapshot.recommendation_id == recommendation.id)
-        .first()
-    )
+    replay_identity = OrderSheetReplaySnapshot.recommendation_id == recommendation.id
+    if order_sheet_id is not None:
+        replay_identity = or_(
+            replay_identity,
+            OrderSheetReplaySnapshot.order_sheet_id == order_sheet_id,
+        )
+    existing_query = db.query(OrderSheetReplaySnapshot).filter(replay_identity)
+    existing = existing_query.first()
     if existing is not None:
         return existing
-
-    if order_sheet_id is not None:
-        existing_by_sheet = (
-            db.query(OrderSheetReplaySnapshot)
-            .filter(OrderSheetReplaySnapshot.order_sheet_id == order_sheet_id)
-            .first()
-        )
-        if existing_by_sheet is not None:
-            return existing_by_sheet
 
     completed_naive = (
         as_utc_naive(completed_at)
@@ -211,11 +205,7 @@ def save_replay_snapshot_if_eligible(
             db.add(snapshot)
             db.flush()
     except IntegrityError:
-        existing_after_race = (
-            db.query(OrderSheetReplaySnapshot)
-            .filter(OrderSheetReplaySnapshot.recommendation_id == recommendation.id)
-            .first()
-        )
+        existing_after_race = existing_query.with_for_update().first()
         if existing_after_race is not None:
             return existing_after_race
         raise
@@ -281,7 +271,7 @@ def replay_first_list_from_snapshot(
         recent_meal_adj = round(float(entry.get("recent_meal_adjustment", 0.0)), 6)
         personal_adj = round(float(entry.get("personal_adjustment", 0.0)), 6)
         other_score = round(float(entry.get("other_score", 0.0)), 6)
-        total_score = round(rule_score + recent_meal_adj + personal_adj + other_score, 6)
+        total_score = round(rule_score + personal_adj + recent_meal_adj + other_score, 6)
 
         tie_breaker = _normalize_tie_breaker(entry)
         dedup_key = _candidate_dedup_key(entry)
@@ -337,25 +327,6 @@ def replay_first_list_from_snapshot(
     )
 
 
-def _group_round_recommendation_ids(
-    db: Session,
-    candidate_rec_ids: Sequence[int],
-) -> set[int]:
-    if not candidate_rec_ids:
-        return set()
-    bind = db.get_bind()
-    if bind is None or not inspect(bind).has_table("room_round_members"):
-        return set()
-    from app.rooms.models import RoomRoundMember
-
-    rows = (
-        db.query(RoomRoundMember.recommendation_id)
-        .filter(RoomRoundMember.recommendation_id.in_(list(candidate_rec_ids)))
-        .all()
-    )
-    return {int(row[0]) for row in rows if row[0] is not None}
-
-
 def verify_and_load_recent_replay_snapshots(
     db: Session,
     user_id: int,
@@ -364,129 +335,75 @@ def verify_and_load_recent_replay_snapshots(
     window_days: int | None = None,
     max_sheets: int | None = None,
 ) -> ReplayLoadBatchResult:
-    """
-    Spec #77 §4 / #88:
-    사용자·완료 시각 인덱스를 사용해 최근 window_days(기본 30일) 이내의
-    미만료 재현 스냅샷을 최신순(completed_at DESC, id DESC)으로 최대 max_sheets(기본 20장) 조회한다.
-    각 스냅샷의 재계산 결과가 저장된 첫 목록(shown_menu_ids_json)과 불일치하거나
-    대상 개인 주문서의 재현 스냅샷이 누락된 경우 배치를 중단하지 않고 해당 주문서만 제외하며
-    구조화된 제외 사유('missing_snapshot' / 'replay_mismatch')와 경고 로그를 남긴다.
-    """
+    """Verify recent first lists and replay them with each score question omitted."""
     effective_window_days = (
-        int(window_days)
-        if window_days is not None
-        else int(settings.ORDER_SHEET_REPLAY_RETENTION_DAYS)
+        window_days if window_days is not None else settings.ORDER_SHEET_REPLAY_RETENTION_DAYS
     )
     effective_max_sheets = (
-        int(max_sheets)
-        if max_sheets is not None
-        else int(settings.ORDER_SHEET_REPLAY_MAX_SHEETS)
+        max_sheets if max_sheets is not None else settings.ORDER_SHEET_REPLAY_MAX_SHEETS
     )
     now_naive = as_utc_naive(now) if now is not None else utc_now()
     cutoff = now_naive - timedelta(days=effective_window_days)
 
-    snapshots = (
-        db.query(OrderSheetReplaySnapshot)
+    snapshot_refs = (
+        db.query(
+            OrderSheetReplaySnapshot.completed_at,
+            OrderSheetReplaySnapshot.recommendation_id,
+            OrderSheetReplaySnapshot.id,
+        )
+        .join(Recommendation, Recommendation.id == OrderSheetReplaySnapshot.recommendation_id)
         .filter(
             OrderSheetReplaySnapshot.user_id == user_id,
             OrderSheetReplaySnapshot.completed_at >= cutoff,
+            OrderSheetReplaySnapshot.completed_at <= now_naive,
             OrderSheetReplaySnapshot.expires_at > now_naive,
+            Recommendation.initial_candidate_count >= 2,
         )
         .order_by(
             OrderSheetReplaySnapshot.completed_at.desc(),
-            OrderSheetReplaySnapshot.id.desc(),
+            OrderSheetReplaySnapshot.recommendation_id.desc(),
         )
         .limit(effective_max_sheets)
         .all()
     )
-
-    verified_sheets: list[VerifiedReplaySheet] = []
-    excluded_sheets: list[ExcludedReplaySheet] = []
-
-    for snap in snapshots:
-        expected_ids = [int(mid) for mid in (snap.shown_menu_ids_json or [])]
-        try:
-            baseline = replay_first_list_from_snapshot(snap, omit_question_id=None)
-        except (ValueError, TypeError, KeyError) as exc:
-            details = {
-                "error": str(exc),
-                "ranking_rule_version": snap.ranking_rule_version,
-                "question_answer_version": snap.question_answer_version,
-            }
-            logger.warning(
-                "order_sheet_replay_excluded reason=replay_mismatch user_id=%s recommendation_id=%s snapshot_id=%s error=%s",
-                user_id,
-                snap.recommendation_id,
-                snap.id,
-                exc,
-            )
-            excluded_sheets.append(
-                ExcludedReplaySheet(
-                    recommendation_id=int(snap.recommendation_id),
-                    snapshot_id=int(snap.id),
-                    reason="replay_mismatch",
-                    expected_menu_ids=expected_ids,
-                    replayed_menu_ids=None,
-                    details=details,
-                )
-            )
-            continue
-
-        if not baseline.matches_shown:
-            details = {
-                "ranking_rule_version": snap.ranking_rule_version,
-                "question_answer_version": snap.question_answer_version,
-            }
-            logger.warning(
-                "order_sheet_replay_excluded reason=replay_mismatch user_id=%s recommendation_id=%s snapshot_id=%s expected=%s replayed=%s",
-                user_id,
-                snap.recommendation_id,
-                snap.id,
-                expected_ids,
-                baseline.replayed_menu_ids,
-            )
-            excluded_sheets.append(
-                ExcludedReplaySheet(
-                    recommendation_id=int(snap.recommendation_id),
-                    snapshot_id=int(snap.id),
-                    reason="replay_mismatch",
-                    expected_menu_ids=expected_ids,
-                    replayed_menu_ids=baseline.replayed_menu_ids,
-                    details=details,
-                )
-            )
-            continue
-
-        verified_sheets.append(
-            VerifiedReplaySheet(snapshot=snap, baseline_replay=baseline)
-        )
-
-    # 최근 윈도우 내 2종 이상 통과 개인 주문서 중 재현 스냅샷이 누락된 건을 탐지·제외 기록
-    recent_eligible_recs = (
-        db.query(Recommendation)
+    has_snapshot = db.query(OrderSheetReplaySnapshot.id).filter(
+        OrderSheetReplaySnapshot.recommendation_id == Recommendation.id,
+    ).exists()
+    is_group_recommendation = db.query(RoomRoundMember.id).filter(
+        RoomRoundMember.recommendation_id == Recommendation.id,
+    ).exists()
+    missing = (
+        db.query(Recommendation.id, Recommendation.created_at, Recommendation.recommended_menu_ids)
         .filter(
             Recommendation.user_id == user_id,
             Recommendation.created_at >= cutoff,
+            Recommendation.created_at <= now_naive,
             Recommendation.initial_candidate_count >= 2,
+            ~has_snapshot,
+            ~is_group_recommendation,
         )
         .order_by(Recommendation.created_at.desc(), Recommendation.id.desc())
         .limit(effective_max_sheets)
         .all()
     )
-    if recent_eligible_recs:
-        rec_ids = [int(rec.id) for rec in recent_eligible_recs]
-        existing_snap_rec_ids = {
-            int(row[0])
-            for row in db.query(OrderSheetReplaySnapshot.recommendation_id)
-            .filter(OrderSheetReplaySnapshot.recommendation_id.in_(rec_ids))
-            .all()
-        }
-        group_rec_ids = _group_round_recommendation_ids(db, rec_ids)
-        for rec in recent_eligible_recs:
-            rec_id = int(rec.id)
-            if rec_id in existing_snap_rec_ids or rec_id in group_rec_ids:
-                continue
-            expected_ids = [int(mid) for mid in (rec.recommended_menu_ids or [])]
+    missing_by_id = {row.id: row.recommended_menu_ids for row in missing}
+    refs = sorted(
+        [tuple(row) for row in snapshot_refs]
+        + [(row.created_at, row.id, None) for row in missing],
+        reverse=True,
+    )[:effective_max_sheets]
+    snapshot_ids = [snapshot_id for _, _, snapshot_id in refs if snapshot_id is not None]
+    snapshots_by_id = {
+        snap.id: snap
+        for snap in db.query(OrderSheetReplaySnapshot)
+        .filter(OrderSheetReplaySnapshot.id.in_(snapshot_ids))
+    }
+
+    verified_sheets: list[VerifiedReplaySheet] = []
+    excluded_sheets: list[ExcludedReplaySheet] = []
+    for _, rec_id, snapshot_id in refs:
+        snapshot = snapshots_by_id.get(snapshot_id)
+        if snapshot is None:
             logger.warning(
                 "order_sheet_replay_excluded reason=missing_snapshot user_id=%s recommendation_id=%s",
                 user_id,
@@ -497,16 +414,52 @@ def verify_and_load_recent_replay_snapshots(
                     recommendation_id=rec_id,
                     snapshot_id=None,
                     reason="missing_snapshot",
-                    expected_menu_ids=expected_ids,
+                    expected_menu_ids=missing_by_id.get(rec_id) or [],
                     replayed_menu_ids=None,
-                    details={
-                        "initial_candidate_count": rec.initial_candidate_count,
-                    },
+                    details={},
                 )
             )
+            continue
+
+        expected_ids: list[int] = []
+        replayed_ids: list[int] | None = None
+        details = {
+            "ranking_rule_version": snapshot.ranking_rule_version,
+            "question_answer_version": snapshot.question_answer_version,
+        }
+        try:
+            expected_ids = [int(mid) for mid in snapshot.shown_menu_ids_json]
+            baseline = replay_first_list_from_snapshot(snapshot)
+            replayed_ids = baseline.replayed_menu_ids
+            if baseline.matches_shown:
+                question_replays = {
+                    qid: replay_first_list_from_snapshot(snapshot, omit_question_id=qid)
+                    for qid in map(int, snapshot.score_question_ids_json)
+                }
+                verified_sheets.append(VerifiedReplaySheet(snapshot, baseline, question_replays))
+                continue
+        except (ValueError, TypeError, KeyError, OverflowError) as exc:
+            details["error"] = str(exc)
+
+        logger.warning(
+            "order_sheet_replay_excluded reason=replay_mismatch user_id=%s recommendation_id=%s snapshot_id=%s",
+            user_id,
+            rec_id,
+            snapshot_id,
+        )
+        excluded_sheets.append(
+            ExcludedReplaySheet(
+                recommendation_id=rec_id,
+                snapshot_id=snapshot_id,
+                reason="replay_mismatch",
+                expected_menu_ids=expected_ids,
+                replayed_menu_ids=replayed_ids,
+                details=details,
+            )
+        )
 
     return ReplayLoadBatchResult(
-        user_id=int(user_id),
+        user_id=user_id,
         window_days=effective_window_days,
         max_sheets=effective_max_sheets,
         verified_sheets=verified_sheets,
@@ -532,3 +485,17 @@ def purge_expired_replay_snapshots(
     else:
         db.flush()
     return int(deleted_count)
+
+
+def _purge_replay_snapshots_once(session_factory: Callable[[], Session]) -> None:
+    with session_factory() as db:
+        purge_expired_replay_snapshots(db)
+
+
+async def replay_snapshot_cleanup_loop(session_factory: Callable[[], Session]) -> None:
+    while True:
+        try:
+            await asyncio.to_thread(_purge_replay_snapshots_once, session_factory)
+        except Exception:
+            logger.exception("Order-sheet replay snapshot cleanup failed")
+        await asyncio.sleep(REPLAY_CLEANUP_INTERVAL_SECONDS)

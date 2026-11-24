@@ -685,6 +685,40 @@ def test_verify_and_load_excludes_mismatched_and_missing_snapshots_with_reasons_
     assert any("missing_snapshot" in rec.message for rec in caplog.records)
 
 
+def test_review_budget_includes_missing_sheets_and_replays_each_question(db):
+    now = datetime(2026, 11, 24, 12, 0, 0, tzinfo=timezone.utc)
+    user = User(kakao_id=880008, nickname="review")
+    db.add(user)
+    db.flush()
+    rec, _ = _make_synthetic_rec_and_snapshot(
+        db,
+        user_id=user.id,
+        completed_at=(now - timedelta(hours=1)).replace(tzinfo=None),
+    )
+    missing, _ = _make_synthetic_rec_and_snapshot(
+        db,
+        user_id=user.id,
+        completed_at=(now - timedelta(hours=2)).replace(tzinfo=None),
+        with_snapshot=False,
+    )
+    _make_synthetic_rec_and_snapshot(
+        db,
+        user_id=user.id,
+        completed_at=(now - timedelta(hours=3)).replace(tzinfo=None),
+    )
+    db.commit()
+
+    batch = verify_and_load_recent_replay_snapshots(db, user.id, now=now, max_sheets=2)
+
+    assert [sheet.snapshot.recommendation_id for sheet in batch.verified_sheets] == [rec.id]
+    assert [sheet.recommendation_id for sheet in batch.excluded_sheets] == [missing.id]
+    (sheet,) = batch.verified_sheets
+    assert sheet.baseline_replay.replayed_menu_ids == [101, 102]
+    assert set(sheet.question_replays) == {1}
+    assert sheet.question_replays[1].replayed_menu_ids == [101, 102]
+    assert sheet.question_replays[1].replayed_entries[0].total_score == 0.0
+
+
 def test_purge_expired_replay_snapshots_removes_only_expired_and_keeps_recommendations_and_feedback(db):
     now = datetime(2026, 11, 24, 12, 0, 0, tzinfo=timezone.utc)
     user = User(kakao_id=880007, nickname="만료정리유저")
