@@ -372,3 +372,54 @@ class RecommendationItemSnapshot(Base):
     feature_schema_version = Column(Integer, nullable=False, default=1)
     features_json = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class OrderSheetReplaySnapshot(Base):
+    """과거 개인 주문서의 첫 추천 순위 재현용 불변 스냅샷 테이블 (Spec #77 §4 / #88)"""
+    __tablename__ = "order_sheet_replay_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "recommendation_id",
+            name="uq_order_sheet_replay_snapshots_recommendation_id",
+        ),
+        Index(
+            "ix_order_sheet_replay_snapshots_user_completed",
+            "user_id",
+            "completed_at",
+        ),
+        Index(
+            "ix_order_sheet_replay_snapshots_expires_at",
+            "expires_at",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    recommendation_id = Column(
+        Integer,
+        ForeignKey("recommendations.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    order_sheet_id = Column(
+        Integer,
+        ForeignKey("order_sheet_issuances.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    completed_at = Column(DateTime, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    question_answer_version = Column(String(64), nullable=False, default="spec77_qa_v1")
+    ranking_rule_version = Column(String(64), nullable=False, default="spec77_v1")
+    max_display_count = Column(Integer, nullable=False, default=5)
+    shown_menu_ids_json = Column(JSON, nullable=False, default=list)
+    score_question_ids_json = Column(JSON, nullable=False, default=list)
+    answers_json = Column(JSON, nullable=False, default=list)
+    candidates_json = Column(JSON, nullable=False, default=list)
+    tie_break_inputs_json = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))

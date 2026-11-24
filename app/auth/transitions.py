@@ -54,6 +54,7 @@ from app.core.security import create_access_token
 from app.map.models import PlaceSatisfaction, PlaceSelection
 from app.menus.models import (
     OrderSheetIssuance,
+    OrderSheetReplaySnapshot,
     QuestionSelectionState,
     Recommendation,
     RecommendationFeedback,
@@ -661,6 +662,12 @@ def _merge_uuid_user_into_kakao_target(
         RecommendationItemSnapshot.user_id == origin_id
     ).update(
         {RecommendationItemSnapshot.user_id: target_id},
+        synchronize_session=False,
+    )
+    db.query(OrderSheetReplaySnapshot).filter(
+        OrderSheetReplaySnapshot.user_id == origin_id
+    ).update(
+        {OrderSheetReplaySnapshot.user_id: target_id},
         synchronize_session=False,
     )
     db.query(RecommendationFeedbackState).filter(
