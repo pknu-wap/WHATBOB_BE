@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     ORDER_SHEET_QUESTION_ROLE_OVERRIDES: dict[int, str] = Field(default_factory=dict)
     ORDER_SHEET_DEFAULT_SCORE_WEIGHT: float = Field(default=1.0, ge=0.0)
     ORDER_SHEET_SCORE_WEIGHTS: dict[str, float] = Field(default_factory=dict)
+    ORDER_SHEET_LONG_TERM_MIN_DAYS: int = Field(default=2, ge=1)
+    ORDER_SHEET_LONG_TERM_HALF_LIFE_DAYS: float = Field(default=42.0, gt=0.0)
+    ORDER_SHEET_LONG_TERM_MAX_SCORE: float = Field(default=0.25, ge=0.0)
     ORDER_SHEET_RANKING_RULE_VERSION: str = "spec77_v1"
     ORDER_SHEET_QUESTION_ANSWER_VERSION: str = "spec77_qa_v1"
     ORDER_SHEET_REPLAY_RETENTION_DAYS: int = Field(default=30, ge=1, le=365)
