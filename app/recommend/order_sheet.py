@@ -39,6 +39,7 @@ from app.recommend.common import (
     filter_available_menus,
     is_menu_excluded,
 )
+from app.recommend.long_term_preference import load_long_term_preference_scores
 from app.recommend.personal_model import FEATURE_SCHEMA_VERSION
 from app.recommend.schemas import (
     FilterRuleDTO,
@@ -59,6 +60,7 @@ from app.recommend.question_pool import (
     QUESTION_CODE_PREFIX,
     get_question_display,
 )
+from app.recommend.hard_filter_audit import record_hard_filter_traces
 from app.recommend.ranking import (
     OrderSheetEvaluationResult,
     evaluate_order_sheet_candidates,
@@ -985,13 +987,22 @@ def create_order_sheet_recommendation(
         else None
     )
 
+    now = datetime.now(timezone.utc)
+    effective_long_term_scores = long_term_preference_scores
+    if effective_long_term_scores is None and effective_user_id is not None:
+        effective_long_term_scores = load_long_term_preference_scores(
+            db=db,
+            user_id=effective_user_id,
+            reference_time=now,
+        )
+
     evaluation: OrderSheetEvaluationResult = evaluate_order_sheet_candidates(
         menus=all_menus,
         exclusion_keywords=exclusion_keywords,
         validated_answers=validated_answers,
         top_k=request.top_k,
         role_overrides=frozen_role_overrides,
-        long_term_preference_scores=long_term_preference_scores,
+        long_term_preference_scores=effective_long_term_scores,
         recent_meal_penalties=recent_meal_penalties,
     )
     top_details = evaluation.selected_candidates
@@ -1005,7 +1016,6 @@ def create_order_sheet_recommendation(
             synchronize_session="fetch",
         )
 
-    now = datetime.now(timezone.utc)
     rec_record = Recommendation(
         user_id=effective_user_id,
         shown_question_ids=submitted_q_ids,
@@ -1018,6 +1028,14 @@ def create_order_sheet_recommendation(
     )
     db.add(rec_record)
     db.flush()
+
+    record_hard_filter_traces(
+        db=db,
+        recommendation_id=rec_record.id,
+        user_id=effective_user_id,
+        traces=evaluation.hard_filter_traces,
+        created_at=now,
+    )
 
     if issuance is not None and issuance.recommendation_id is None:
         issuance.recommendation_id = rec_record.id

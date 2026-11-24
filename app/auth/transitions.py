@@ -53,6 +53,7 @@ from app.core.config import settings
 from app.core.security import create_access_token
 from app.map.models import PlaceSatisfaction, PlaceSelection
 from app.menus.models import (
+    OrderSheetHardFilterTrace,
     OrderSheetIssuance,
     QuestionSelectionState,
     Recommendation,
@@ -661,6 +662,12 @@ def _merge_uuid_user_into_kakao_target(
         RecommendationItemSnapshot.user_id == origin_id
     ).update(
         {RecommendationItemSnapshot.user_id: target_id},
+        synchronize_session=False,
+    )
+    db.query(OrderSheetHardFilterTrace).filter(
+        OrderSheetHardFilterTrace.user_id == origin_id
+    ).update(
+        {OrderSheetHardFilterTrace.user_id: target_id},
         synchronize_session=False,
     )
     db.query(RecommendationFeedbackState).filter(
