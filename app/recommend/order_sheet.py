@@ -40,6 +40,7 @@ from app.recommend.common import (
     is_menu_excluded,
 )
 from app.recommend.long_term_preference import load_long_term_preference_scores
+from app.recommend.meal_penalty import load_recent_meal_penalties
 from app.recommend.personal_model import FEATURE_SCHEMA_VERSION
 from app.recommend.schemas import (
     FilterRuleDTO,
@@ -66,6 +67,7 @@ from app.recommend.ranking import (
     evaluate_order_sheet_candidates,
     resolve_question_role,
 )
+from app.recommend.replay import save_replay_snapshot_if_eligible
 from app.recommend.variety import menu_group
 from app.users.models import User
 
@@ -944,6 +946,7 @@ def create_order_sheet_recommendation(
     skip_user_lock: bool = False,
     long_term_preference_scores: dict[str, float] | None = None,
     recent_meal_penalties: dict[int, float] | None = None,
+    record_replay_snapshot: bool | None = None,
 ) -> OrderSheetRecommendResponse:
     """
     Spec #77 주문서 첫 메뉴 추천 파이프라인:
@@ -997,6 +1000,13 @@ def create_order_sheet_recommendation(
             user_id=effective_user_id,
             reference_time=now,
         )
+    effective_recent_meal_penalties = recent_meal_penalties
+    if effective_recent_meal_penalties is None and effective_user_id is not None:
+        effective_recent_meal_penalties = load_recent_meal_penalties(
+            db=db,
+            user_id=effective_user_id,
+            reference_time=now,
+        )
 
     evaluation: OrderSheetEvaluationResult = evaluate_order_sheet_candidates(
         menus=all_menus,
@@ -1005,7 +1015,7 @@ def create_order_sheet_recommendation(
         top_k=request.top_k,
         role_overrides=frozen_role_overrides,
         long_term_preference_scores=effective_long_term_scores,
-        recent_meal_penalties=recent_meal_penalties,
+        recent_meal_penalties=effective_recent_meal_penalties,
     )
     top_details = evaluation.selected_candidates
     surviving_kind_count = len(evaluation.surviving_kind_representatives)
@@ -1018,13 +1028,14 @@ def create_order_sheet_recommendation(
             synchronize_session="fetch",
         )
 
+    answers_payload = [
+        {"question_id": q.id, "option_id": opt["option_id"]}
+        for q, opt in validated_answers
+    ]
     rec_record = Recommendation(
         user_id=effective_user_id,
         shown_question_ids=submitted_q_ids,
-        answers_json=[
-            {"question_id": q.id, "option_id": opt["option_id"]}
-            for q, opt in validated_answers
-        ],
+        answers_json=answers_payload,
         recommended_menu_ids=[d.menu.id for d in top_details],
         initial_candidate_count=surviving_kind_count,
     )
@@ -1043,6 +1054,24 @@ def create_order_sheet_recommendation(
         issuance.recommendation_id = rec_record.id
         issuance.completed_at = now
         issuance.status = "COMPLETED"
+
+    should_record_replay = (
+        record_replay_snapshot
+        if record_replay_snapshot is not None
+        else (fixed_exclusion_keywords is None)
+    )
+    if should_record_replay:
+        save_replay_snapshot_if_eligible(
+            db=db,
+            recommendation=rec_record,
+            evaluation=evaluation,
+            answers_payload=answers_payload,
+            order_sheet_id=issuance.id if issuance is not None else None,
+            max_display_count=min(
+                int(request.top_k), int(settings.ORDER_SHEET_MAX_RECOMMENDATIONS)
+            ),
+            completed_at=now,
+        )
 
     if effective_user_id is not None:
         for rank_idx, detail in enumerate(top_details, start=1):

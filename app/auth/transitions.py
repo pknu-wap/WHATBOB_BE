@@ -55,6 +55,7 @@ from app.map.models import PlaceSatisfaction, PlaceSelection
 from app.menus.models import (
     OrderSheetHardFilterTrace,
     OrderSheetIssuance,
+    OrderSheetReplaySnapshot,
     QuestionSelectionState,
     Recommendation,
     RecommendationFeedback,
@@ -668,6 +669,12 @@ def _merge_uuid_user_into_kakao_target(
         OrderSheetHardFilterTrace.user_id == origin_id
     ).update(
         {OrderSheetHardFilterTrace.user_id: target_id},
+        synchronize_session=False,
+    )
+    db.query(OrderSheetReplaySnapshot).filter(
+        OrderSheetReplaySnapshot.user_id == origin_id
+    ).update(
+        {OrderSheetReplaySnapshot.user_id: target_id},
         synchronize_session=False,
     )
     db.query(RecommendationFeedbackState).filter(
