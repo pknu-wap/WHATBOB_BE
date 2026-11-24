@@ -23,9 +23,17 @@ ADDED_TABLES = (
     "order_sheet_hard_filter_traces",
     "order_sheet_replay_snapshots",
     "order_sheet_question_reviews",
+    "personal_order_sheet_question_experiments",
+    "personal_order_sheet_question_assignments",
+    "personal_order_sheet_question_overrides",
     "place_selections",
     "place_satisfactions",
 )
+PRECISE_TIMESTAMPS = {
+    "recommendations": ("created_at", "list_rejected_at", "closed_at"),
+    "recommendation_feedbacks": ("created_at",),
+    "order_sheet_issuances": ("created_at", "completed_at"),
+}
 
 
 def _missing_schema(connection):
@@ -58,6 +66,20 @@ def _missing_schema(connection):
                     yield index.name, index
 
     existing_tables = set(inspector.get_table_names())
+    if connection.dialect.name in {"mysql", "mariadb"}:
+        for table_name, names in PRECISE_TIMESTAMPS.items():
+            if table_name not in existing_tables:
+                continue
+            columns = {column["name"]: column for column in inspector.get_columns(table_name)}
+            for name in names:
+                column = columns.get(name)
+                if column is None or getattr(column["type"], "fsp", None) == 6:
+                    continue
+                nullability = "NULL" if column["nullable"] else "NOT NULL"
+                default = f" DEFAULT {column['default']}" if column.get("default") is not None else ""
+                yield f"{table_name}.{name} precision", text(
+                    f"ALTER TABLE {table_name} MODIFY COLUMN {name} DATETIME(6) {nullability}{default}"
+                )
     for name in ADDED_TABLES:
         if name not in existing_tables:
             yield name, Base.metadata.tables[name]

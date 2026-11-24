@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
@@ -33,6 +33,7 @@ from app.rooms.models import RoomRoundMember
 logger = logging.getLogger(__name__)
 
 SORT_RULE_NAME = "final_score_desc_food_code_asc_menu_id_asc"
+CANDIDATE_ENCODING = "compact_v1"
 REPLAY_CLEANUP_INTERVAL_SECONDS = 300
 REPLAY_CLEANUP_BATCH_SIZE = 100
 
@@ -87,13 +88,11 @@ class ReplayLoadBatchResult:
     excluded_sheets: list[ExcludedReplaySheet]
 
 
-def _serialize_candidate(candidate: RankedCandidate) -> dict[str, Any]:
-    menu = candidate.menu
-    menu_id = int(menu.id)
-    food_code = str(menu.food_code or "")
+def _serialize_candidate(candidate: RankedCandidate) -> list[Any]:
     question_scores = {
         str(int(qid)): round(float(score), 6)
         for qid, score in candidate.question_scores.items()
+        if score
     }
     question_sum = round(sum(question_scores.values()), 6)
     recent_meal_adj = round(float(candidate.recent_meal_penalty), 6)
@@ -102,24 +101,42 @@ def _serialize_candidate(candidate: RankedCandidate) -> dict[str, Any]:
         float(candidate.final_score) - (question_sum + recent_meal_adj + personal_adj),
         6,
     )
-    food_kind_id = int(candidate.food_kind_id) if candidate.food_kind_id is not None else None
-    dedup_kind_key = (
-        f"kind_id:{food_kind_id}"
-        if food_kind_id is not None
-        else f"kind_key:{candidate.food_kind_key}"
-    )
-    return {
-        "menu_id": menu_id,
-        "food_code": food_code,
-        "food_kind_key": str(candidate.food_kind_key),
-        "food_kind_id": food_kind_id,
-        "dedup_kind_key": dedup_kind_key,
-        "question_scores": question_scores,
-        "recent_meal_adjustment": recent_meal_adj,
-        "personal_adjustment": personal_adj,
-        "other_score": other_score,
-        "tie_breaker": [food_code, menu_id],
-    }
+    kind = candidate.food_kind_id if candidate.food_kind_id is not None else candidate.food_kind_key
+    # Sparse contributions default to zero. food_code and menu_id also determine the tie order.
+    return [
+        int(candidate.menu.id), candidate.menu.food_code or "", kind, question_scores,
+        recent_meal_adj, personal_adj, other_score,
+    ]
+
+
+def _candidate_entries(snapshot: OrderSheetReplaySnapshot) -> Iterator[dict[str, Any]]:
+    rows = snapshot.candidates_json
+    if not isinstance(rows, list):
+        raise ValueError("snapshot.candidates_json must be a list")
+    metadata = snapshot.tie_break_inputs_json or {}
+    encoding = metadata.get("candidate_encoding")
+    if encoding is None:
+        yield from rows
+        return
+    if encoding != CANDIDATE_ENCODING:
+        raise ValueError("unknown replay candidate encoding")
+
+    kind_keys = metadata.get("food_kind_keys", {})
+    for row in rows:
+        if not isinstance(row, list) or len(row) != 7:
+            raise ValueError("invalid compact replay candidate")
+        menu_id, food_code, kind, scores, meal_adjustment, personal_adjustment, other_score = row
+        kind_id = kind if isinstance(kind, int) else None
+        yield {
+            "menu_id": menu_id,
+            "food_code": food_code,
+            "food_kind_key": kind_keys.get(str(kind_id), "") if kind_id is not None else kind,
+            "food_kind_id": kind_id,
+            "question_scores": scores,
+            "recent_meal_adjustment": meal_adjustment,
+            "personal_adjustment": personal_adjustment,
+            "other_score": other_score,
+        }
 
 
 def save_replay_snapshot_if_eligible(
@@ -201,6 +218,12 @@ def save_replay_snapshot_if_eligible(
             "sort_rule": SORT_RULE_NAME,
             "uses_random_draw": False,
             "random_seed": None,
+            "candidate_encoding": CANDIDATE_ENCODING,
+            "food_kind_keys": {
+                str(cand.food_kind_id): cand.food_kind_key
+                for cand in evaluation.surviving_candidates
+                if cand.food_kind_id is not None
+            },
         },
         created_at=completed_naive,
     )
@@ -254,12 +277,8 @@ def replay_first_list_from_snapshot(
     omit_question_id가 주어지면 해당 질문의 가점만 0으로 치환해 재계산한다.
     """
     omit_key = str(int(omit_question_id)) if omit_question_id is not None else None
-    raw_candidates = snapshot.candidates_json
-    if not isinstance(raw_candidates, list):
-        raise ValueError("snapshot.candidates_json must be a list")
-
     scored_rows: list[tuple[tuple[float, tuple[Any, ...]], str, dict[str, Any], float, float, float, float, float]] = []
-    for entry in raw_candidates:
+    for entry in _candidate_entries(snapshot):
         if not isinstance(entry, dict) or "menu_id" not in entry:
             raise ValueError("invalid candidate entry in snapshot.candidates_json")
         q_scores = entry.get("question_scores") or {}

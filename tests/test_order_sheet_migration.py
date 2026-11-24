@@ -14,7 +14,10 @@ def assert_legacy_schema_upgrades(engine):
             "recommendation_feedbacks",
             "recommendation_feedback_states",
         ):
-            legacy_columns = ", user_id INTEGER, created_at DATETIME" if table == "recommendations" else ""
+            legacy_columns = {
+                "recommendations": ", user_id INTEGER, created_at DATETIME",
+                "recommendation_feedbacks": ", created_at DATETIME",
+            }.get(table, "")
             connection.execute(text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY{legacy_columns})"))
             connection.execute(text(f"INSERT INTO {table} (id) VALUES (42)"))
 
@@ -25,6 +28,7 @@ def assert_legacy_schema_upgrades(engine):
         assert "order_sheet_issuances" in pending
         assert "order_sheet_replay_snapshots" in pending
         assert "order_sheet_question_reviews" in pending
+        assert "personal_order_sheet_question_assignments" in pending
         assert "recommendation_feedbacks.food_kind_id" in pending
         migrate_order_sheet(connection)
         assert pending_order_sheet_schema(connection) == []
@@ -43,4 +47,9 @@ def test_order_sheet_migration_is_additive_and_resumable():
 
 
 def test_mysql_order_sheet_migration_preserves_legacy_records(mysql_env):
-    assert_legacy_schema_upgrades(mysql_env["engine"])
+    engine = mysql_env["engine"]
+    assert_legacy_schema_upgrades(engine)
+    with engine.connect() as connection:
+        for table in ("recommendations", "recommendation_feedbacks", "order_sheet_issuances"):
+            timestamps = {column["name"]: column["type"] for column in inspect(connection).get_columns(table)}
+            assert timestamps["created_at"].fsp == 6

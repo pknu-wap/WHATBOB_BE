@@ -155,8 +155,7 @@ def test_review_ranks_changes_then_actual_likes_then_neutral_answers(review_db):
         )
     for rec in (five_shown, two_shown):
         reject_recommendation_list(db, rec.id, user_id=user.id)
-    # The legacy feedback table stores whole-second timestamps on MySQL.
-    tick = utc_now() + timedelta(seconds=1)
+    tick = utc_now()
     assert run_pending_question_reviews(db, now=tick) == 1
 
     assert load_ranked_question_ids(db, user.id, now=tick) == (40, 50, 30, 10, 60, 20, 70)
