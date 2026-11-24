@@ -99,6 +99,10 @@ class AnswerItemRequest(BaseModel):
 class OrderSheetRecommendRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    order_sheet_id: Optional[str | int] = Field(
+        default=None,
+        description="발급된 개인 주문서 식별자(선택, 전달 시 해당 발급 이력을 완료 처리)",
+    )
     exclusions: list[str] = Field(
         default_factory=list,
         description="추가로 제외할 알레르기/섭취불가/비선호 음식 또는 재료 키워드",

@@ -59,34 +59,24 @@ from app.recommend.question_pool import (
     QUESTION_CODE_PREFIX,
     get_question_display,
 )
-from app.recommend.variety import menu_group, select_diverse_menus_with_snapshots
+from app.recommend.ranking import (
+    OrderSheetEvaluationResult,
+    evaluate_order_sheet_candidates,
+    resolve_question_role,
+)
+from app.recommend.variety import menu_group
 from app.users.models import User
 
 DEFAULT_TOTAL_QUESTIONS = 9
 DEFAULT_EXPLOITATION_COUNT = 7
 
-# 숫자가 작을수록 먼저 적용되는 하드 필터 우선순위 (후보 부족 시 후순위부터 완화되어 점수제로 전환)
+# 하위 호환 상수: 실제 역할 판정은 app.recommend.ranking.resolve_question_role 을 사용한다.
 HARD_FILTER_PRIORITY: dict[str, int] = {
-    "meal_type": 1,        # 식사 종류 (식사 vs 간식/음료)
-    "main_ingredient": 2,  # 주요 재료 (육류 vs 비육류)
-    "has_soup": 3,         # 국물 여부
-    "cooking_style": 4,    # 조리 방식
+    "has_soup": 1,
+    "cooking_style": 2,
+    "main_ingredient": 3,
 }
 HARD_FILTER_CLUSTERS = frozenset(HARD_FILTER_PRIORITY.keys())
-
-
-def resolve_question_role(question_id: int | None, cluster_key: str) -> str:
-    """질문 ID별 역할 재정의와 기본 서버 설정을 기준으로 'hard_filter' 또는 'score'를 반환한다."""
-    overrides = settings.ORDER_SHEET_QUESTION_ROLE_OVERRIDES or {}
-    if question_id is not None:
-        override = overrides.get(question_id)
-        if override is None:
-            override = overrides.get(str(question_id))
-        if override in ("hard_filter", "score"):
-            return override
-    if cluster_key in set(settings.ORDER_SHEET_HARD_FILTER_CLUSTERS):
-        return "hard_filter"
-    return "score"
 
 
 def _question_options(question: OrderSheetQuestion) -> list[dict[str, Any]]:
@@ -860,6 +850,71 @@ def issue_order_sheet_questions(
     return _issuance_to_response(issuance)
 
 
+def validate_order_sheet_answers(
+    db: Session,
+    answers: list[Any],
+) -> list[tuple[OrderSheetQuestion, dict[str, Any]]]:
+    """제출된 주문서 답변의 질문·선택지 유효성과 중복 여부를 검증해 (질문, 선택지) 쌍 목록을 반환한다."""
+    question_ids = [ans.question_id for ans in answers]
+    if len(set(question_ids)) != len(question_ids):
+        raise InvalidOrderSheetException("동일한 질문에 중복 응답할 수 없습니다.")
+
+    questions = (
+        db.query(OrderSheetQuestion)
+        .filter(OrderSheetQuestion.id.in_(question_ids))
+        .all()
+    )
+    question_map = {q.id: q for q in questions}
+
+    if not question_map:
+        raise InvalidOrderSheetException("제출된 질문 ID에 해당하는 주문서 질문이 없습니다.")
+
+    validated_answers: list[tuple[OrderSheetQuestion, dict[str, Any]]] = []
+    for ans in answers:
+        q = question_map.get(ans.question_id)
+        if not q:
+            raise InvalidOrderSheetException(f"존재하지 않는 질문 ID입니다: {ans.question_id}")
+        matched_opt = next(
+            (opt for opt in _question_options(q) if opt.get("option_id") == ans.option_id),
+            None,
+        )
+        if not matched_opt:
+            raise InvalidOrderSheetException(
+                f"질문({q.question_code})에 유효하지 않은 선택지 ID입니다: {ans.option_id}"
+            )
+        validated_answers.append((q, matched_opt))
+    return validated_answers
+
+
+def _find_valid_order_sheet_issuance(
+    db: Session,
+    order_sheet_id: str | int | None,
+    user_id: int | None,
+) -> OrderSheetIssuance | None:
+    if order_sheet_id is None:
+        return None
+    if isinstance(order_sheet_id, int) and not isinstance(order_sheet_id, bool):
+        issuance = (
+            db.query(OrderSheetIssuance)
+            .filter(OrderSheetIssuance.id == order_sheet_id)
+            .first()
+        )
+    else:
+        cleaned = str(order_sheet_id).strip()
+        if not cleaned:
+            return None
+        issuance = (
+            db.query(OrderSheetIssuance)
+            .filter(OrderSheetIssuance.order_sheet_id == cleaned)
+            .first()
+        )
+    if issuance is None:
+        return None
+    if issuance.user_id is not None and issuance.user_id != user_id:
+        return None
+    return issuance
+
+
 def create_order_sheet_recommendation(
     db: Session,
     request: OrderSheetRecommendRequest,
@@ -869,14 +924,17 @@ def create_order_sheet_recommendation(
     commit: bool = True,
     fixed_exclusion_keywords: set[str] | list[str] | None = None,
     skip_user_lock: bool = False,
+    long_term_preference_scores: dict[str, float] | None = None,
+    recent_meal_penalties: dict[int, float] | None = None,
 ) -> OrderSheetRecommendResponse:
     """
-    [하이브리드 주문서 추천 파이프라인]
-    0. 사용자 알레르기/비선호/섭취불가 메뉴 제외
-    1. 우선순위 기반 태그 하드 필터링 (meal_type -> main_ingredient -> has_soup -> cooking_style)
-       - 서로 다른 추천 메뉴 그룹이 top_k 미만으로 줄어드는 필터는 점수제 질문으로 전환
-    2. 남은 후보 메뉴에 대해 점수제 질문(완화된 필터 포함) 가중치 합산
-    3. 다양성 보정 후 상위 top_k 메뉴 추천, 실제 제출된 질문의 shown_count 갱신 및 스냅샷 저장
+    Spec #77 주문서 첫 메뉴 추천 파이프라인:
+    0. 사용자 알레르기·제외 재료를 먼저 적용한다 (0개면 NoAvailableFoodException).
+    1. 역할이 hard_filter인 답변(초기 Q3 국물, Q8 밥·면·그 외, Q9 고기)만 엄격 적용한다(자동 완화 없음).
+    2. 역할이 score인 답변(초기 Q1, Q2, Q4, Q5, Q6, Q7)의 동일 비중(설정 가능) 점수와
+       장기 취향 보정(#83)·최근 식사 감점(#82)을 합산해 결정적으로 정렬한다.
+    3. 음식 종류별로 최상위 상품 1개를 대표로 선정해 0종이면 빈 목록, 1~5종이면 전부,
+       6종 이상이면 상위 min(top_k, ORDER_SHEET_MAX_RECOMMENDATIONS)종을 반환한다.
     """
     effective_user_id = user_id
     if current_user is not None:
@@ -886,9 +944,7 @@ def create_order_sheet_recommendation(
             locked_user = lock_user_and_verify_session(db, current_user)
             effective_user_id = locked_user.id
 
-    question_ids = [ans.question_id for ans in request.answers]
-    if len(set(question_ids)) != len(question_ids):
-        raise InvalidOrderSheetException("동일한 질문에 중복 응답할 수 없습니다.")
+    validated_answers = validate_order_sheet_answers(db, request.answers)
 
     all_menus = db.query(Menu).all()
     if fixed_exclusion_keywords is not None:
@@ -903,96 +959,29 @@ def create_order_sheet_recommendation(
             user_id=effective_user_id,
             extra_exclusions=request.exclusions,
         )
-    available_menus, excluded_count = filter_available_menus(all_menus, exclusion_keywords)
 
-    questions = (
-        db.query(OrderSheetQuestion)
-        .filter(OrderSheetQuestion.id.in_(question_ids))
-        .all()
-    )
-    question_map = {q.id: q for q in questions}
-
-    if not question_map:
-        raise InvalidOrderSheetException("제출된 질문 ID에 해당하는 주문서 질문이 없습니다.")
-
-    validated_answers: list[tuple[OrderSheetQuestion, dict[str, Any]]] = []
-    for ans in request.answers:
-        q = question_map.get(ans.question_id)
-        if not q:
-            raise InvalidOrderSheetException(f"존재하지 않는 질문 ID입니다: {ans.question_id}")
-        matched_opt = next(
-            (opt for opt in _question_options(q) if opt.get("option_id") == ans.option_id),
-            None,
-        )
-        if not matched_opt:
-            raise InvalidOrderSheetException(
-                f"질문({q.question_code})에 유효하지 않은 선택지 ID입니다: {ans.option_id}"
-            )
-        validated_answers.append((q, matched_opt))
-
-    # ---------------------------------------------------------
-    # ① 우선순위 기반 태그 하드 필터링 ('상관없어요'는 rules=[] 이므로 자동 패스)
-    # ---------------------------------------------------------
-    hard_filter_answers: list[tuple[OrderSheetQuestion, dict[str, Any]]] = [
-        (q, opt)
-        for q, opt in validated_answers
-        if q.cluster_key in HARD_FILTER_CLUSTERS and opt.get("rules")
-    ]
-    hard_filter_answers.sort(
-        key=lambda item: HARD_FILTER_PRIORITY.get(item[0].cluster_key, 999)
-    )
-
-    score_answers: list[tuple[OrderSheetQuestion, dict[str, Any]]] = [
-        (q, opt)
-        for q, opt in validated_answers
-        if q.cluster_key not in HARD_FILTER_CLUSTERS
-    ]
-
-    filtered_menus = list(available_menus)
-    applied_hard_filters: list[tuple[OrderSheetQuestion, list[dict[str, Any]]]] = []
-
-    for q, opt in hard_filter_answers:
-        rules = opt.get("rules", [])
-        next_filtered = [m for m in filtered_menus if evaluate_option_rules(m, rules)]
-        # 최종 추천은 그룹당 한 메뉴를 고르므로 필터도 같은 단위로 후보를 센다.
-        if len({menu_group(menu) for menu in next_filtered}) >= request.top_k:
-            filtered_menus = next_filtered
-            applied_hard_filters.append((q, rules))
-        else:
-            # 후보 부족으로 완화된 하드 필터는 점수제 질문으로 전환해 선호도가 반영되도록 보존
-            score_answers.append((q, opt))
-
-    applied_filter_codes = [q.question_code for q, _ in applied_hard_filters]
-
-    # ---------------------------------------------------------
-    # ② 필터링된 후보 메뉴 대상으로 점수제 질문(완화된 필터 포함) 평가
-    # ---------------------------------------------------------
-    scored_candidates: list[tuple[float, list[str], Menu]] = []
-    for menu in filtered_menus:
-        score = 0.0
-        # 하드 필터를 통과한 질문 코드는 조건을 충족했으므로 matched_codes에 포함
-        matched_codes: list[str] = list(applied_filter_codes)
-
-        for q, opt in score_answers:
-            rules = opt.get("rules", [])
-            weight = float(q.importance_weight)
-            if rules and evaluate_option_rules(menu, rules):
-                score += weight * 1.0
-                matched_codes.append(q.question_code)
-
-        scored_candidates.append((round(score, 4), matched_codes, menu))
-
-    score_total_weight = sum(
-        float(q.importance_weight) for q, opt in score_answers if opt.get("rules")
-    )
-
-    top_details = select_diverse_menus_with_snapshots(
+    issuance = _find_valid_order_sheet_issuance(
         db=db,
-        candidates=scored_candidates,
+        order_sheet_id=request.order_sheet_id,
         user_id=effective_user_id,
-        top_k=request.top_k,
-        total_weight=score_total_weight if score_total_weight > 0 else 1.0,
     )
+    frozen_role_overrides = (
+        issuance.question_roles_json
+        if issuance is not None and isinstance(issuance.question_roles_json, dict) and issuance.question_roles_json
+        else None
+    )
+
+    evaluation: OrderSheetEvaluationResult = evaluate_order_sheet_candidates(
+        menus=all_menus,
+        exclusion_keywords=exclusion_keywords,
+        validated_answers=validated_answers,
+        top_k=request.top_k,
+        role_overrides=frozen_role_overrides,
+        long_term_preference_scores=long_term_preference_scores,
+        recent_meal_penalties=recent_meal_penalties,
+    )
+    top_details = evaluation.selected_candidates
+    surviving_kind_count = len(evaluation.surviving_kind_representatives)
 
     # 실제로 사용자에게 노출되어 제출된 질문들의 shown_count 증가 (NULL 방어 포함)
     submitted_q_ids = [q.id for q, _ in validated_answers]
@@ -1002,6 +991,7 @@ def create_order_sheet_recommendation(
             synchronize_session="fetch",
         )
 
+    now = datetime.now(timezone.utc)
     rec_record = Recommendation(
         user_id=effective_user_id,
         shown_question_ids=submitted_q_ids,
@@ -1010,13 +1000,17 @@ def create_order_sheet_recommendation(
             for q, opt in validated_answers
         ],
         recommended_menu_ids=[d.menu.id for d in top_details],
-        initial_candidate_count=len(filtered_menus),
+        initial_candidate_count=surviving_kind_count,
     )
     db.add(rec_record)
     db.flush()
 
+    if issuance is not None and issuance.recommendation_id is None:
+        issuance.recommendation_id = rec_record.id
+        issuance.completed_at = now
+        issuance.status = "COMPLETED"
+
     if effective_user_id is not None:
-        now = datetime.now(timezone.utc)
         for rank_idx, detail in enumerate(top_details, start=1):
             m = detail.menu
             mkey = menu_group(m)
@@ -1029,12 +1023,19 @@ def create_order_sheet_recommendation(
                 menu_main_ingredient=(m.main_ingredient or "other").strip() or "other",
                 rank_position=rank_idx,
                 rule_score=detail.rule_score,
-                recent_meal_adjustment=detail.personal_result.recent_meal_adjustment,
-                personal_adjustment=detail.personal_result.personal_adjustment,
+                recent_meal_adjustment=detail.recent_meal_penalty,
+                personal_adjustment=detail.long_term_score,
                 final_score=detail.final_score,
-                draw_weight=detail.personal_result.draw_weight,
+                draw_weight=1.0,
                 feature_schema_version=FEATURE_SCHEMA_VERSION,
-                features_json=dict(detail.personal_result.features),
+                features_json={
+                    "food_kind_key": detail.food_kind_key,
+                    "food_kind_id": detail.food_kind_id,
+                    "question_scores": {
+                        str(qid): score for qid, score in detail.question_scores.items()
+                    },
+                    "ranking_rule_version": evaluation.ranking_rule_version,
+                },
                 created_at=now,
             )
             db.add(snapshot)
@@ -1065,8 +1066,8 @@ def create_order_sheet_recommendation(
             fat_g=d.menu.fat_g,
             carb_g=d.menu.carb_g,
             sodium_mg=d.menu.sodium_mg,
-            match_score=d.rule_score,
-            matched_question_codes=d.matched_codes,
+            match_score=round(d.rule_score, 4),
+            matched_question_codes=list(d.matched_question_codes),
         )
         for d in top_details
     ]
@@ -1074,8 +1075,8 @@ def create_order_sheet_recommendation(
     return OrderSheetRecommendResponse(
         recommendation_id=rec_record.id,
         recommended_menus=recommended_dtos,
-        excluded_count=excluded_count,
-        candidate_count=len(filtered_menus),
+        excluded_count=evaluation.excluded_count,
+        candidate_count=surviving_kind_count,
     )
 
 

@@ -136,7 +136,8 @@ def test_http_legacy_labels_display_yes_no_and_submit_original_ids():
                     assert response.status_code == 201
                     menu = response.json()["data"]["recommended_menus"][0]
                     if expected:
-                        assert menu["name"] == expected and menu["match_score"] == .67
+                        # Spec #77 (#81): 점수제 초기 비중은 질문별 ml_weight 대신 동일 비중(1.0)을 사용한다.
+                        assert menu["name"] == expected and menu["match_score"] == 1.0
                     else:
                         assert menu["match_score"] == 0
                 # 표시 글자가 아닌 기존 답변 ID를 보내는 계약을 유지한다.

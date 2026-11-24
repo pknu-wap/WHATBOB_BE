@@ -295,20 +295,30 @@ def test_seed_preserves_old_feedback_and_serves_binary_questions(db):
             assert len(question["options"]) == expected_opts
         initial_shown_counts = {q["id"]: q["shown_count"] for q in data["questions"]}
         # 두 취향 답변과 상관없음 모두 추천과 피드백까지 처리할 수 있다.
+        # Spec #77 (#81): 하드필터는 자동 완화하지 않으므로 남은 음식 종류 수(최대 5종)만큼 반환한다.
+        feedback_recorded = 0
         for index in (0, 1, 2):
             response = client.post("/api/recommendations/order-sheet", json={
-                "answers": [{"question_id": q["id"], "option_id": q["options"][index]["option_id"]}
-                            for q in data["questions"]],
+                "answers": [
+                    {
+                        "question_id": q["id"],
+                        "option_id": q["options"][-1]["option_id"] if index == 2 else q["options"][index]["option_id"],
+                    }
+                    for q in data["questions"]
+                ],
                 "top_k": 5,
             })
             assert response.status_code == 201
             result = response.json()["data"]
-            assert len(result["recommended_menus"]) == 5
-            feedback = client.post(f'/api/recommendations/{result["recommendation_id"]}/feedback', json={
-                "selected_menu_id": result["recommended_menus"][0]["menu_id"],
-                "is_satisfied": index == 0,
-            })
-            assert feedback.status_code == 200
+            assert len(result["recommended_menus"]) == min(result["candidate_count"], 5)
+            if result["recommended_menus"]:
+                feedback = client.post(f'/api/recommendations/{result["recommendation_id"]}/feedback', json={
+                    "selected_menu_id": result["recommended_menus"][0]["menu_id"],
+                    "is_satisfied": index == 0,
+                })
+                assert feedback.status_code == 200
+                feedback_recorded += 1
+        assert feedback_recorded >= 2
 
     submitted_questions = (
         db.query(OrderSheetQuestion)
