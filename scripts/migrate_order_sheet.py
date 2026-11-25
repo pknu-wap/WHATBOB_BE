@@ -13,7 +13,7 @@ from app.core.database import Base, engine
 
 ADDED_COLUMNS = {
     "recommendations": (
-        "initial_candidate_count", "list_rejected_at", "all_menus_disliked_at", "closed_at", "order_sheet_list_scope",
+        "initial_candidate_count", "list_rejected_at", "closed_at", "order_sheet_list_scope",
     ),
     "recommendation_feedbacks": ("food_kind_id", "exposure_rank"),
     "recommendation_feedback_states": ("food_kind_id", "exposure_rank"),
@@ -32,7 +32,7 @@ ADDED_TABLES = (
     "place_satisfactions",
 )
 PRECISE_TIMESTAMPS = {
-    "recommendations": ("created_at", "list_rejected_at", "all_menus_disliked_at", "closed_at"),
+    "recommendations": ("created_at", "list_rejected_at", "closed_at"),
     "recommendation_feedbacks": ("created_at",),
     "order_sheet_issuances": ("created_at", "completed_at"),
 }

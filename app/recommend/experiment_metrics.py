@@ -27,11 +27,8 @@ class ArmMetrics:
             submitted_count=summary.total_recommendations,
             shown_count=summary.shown_list_count,
             liked_count=summary.first_list_liked_count,
-            rejected_count=sum(outcome.is_all_menus_disliked for outcome in summary.outcomes),
-            explicit_count=sum(
-                outcome.is_first_list_liked or outcome.is_all_menus_disliked
-                for outcome in summary.outcomes
-            ),
+            rejected_count=summary.list_rejected_count,
+            explicit_count=summary.explicit_reaction_count,
             no_response_count=summary.no_response_count,
             zero_candidates_count=summary.zero_candidates_count,
         )

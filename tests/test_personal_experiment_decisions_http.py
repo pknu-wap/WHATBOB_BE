@@ -10,7 +10,6 @@ from app.menus.models import (
 from app.recommend.personal_experiment_decisions import run_personal_experiment_decision_batch
 from app.recommend.question_review import run_pending_question_reviews
 from app.users.models import User
-from tests.test_first_list_reactions_http import dislike_all_recommended_menus as _reject
 from tests.test_order_sheet_issuance import _seed_diverse_menus_and_full_pool
 from tests.test_order_sheet_issuance_http import _make_client, db
 
@@ -58,6 +57,11 @@ def _menu_feedback(client, recommendation, *, liked):
             "is_satisfied": liked,
         },
     )
+    assert response.status_code == 200, response.text
+
+
+def _reject(client, recommendation):
+    response = client.post(f"/api/recommendations/{recommendation['recommendation_id']}/reject")
     assert response.status_code == 200, response.text
 
 

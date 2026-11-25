@@ -24,7 +24,6 @@ def assert_legacy_schema_upgrades(engine):
     with engine.begin() as connection:
         pending = pending_order_sheet_schema(connection)
         assert "recommendations.initial_candidate_count" in pending
-        assert "recommendations.all_menus_disliked_at" in pending
         assert "recommendations.order_sheet_list_scope" in pending
         assert "order_sheet_issuances" in pending
         assert "order_sheet_replay_snapshots" in pending
@@ -37,7 +36,6 @@ def assert_legacy_schema_upgrades(engine):
         assert pending_order_sheet_schema(connection) == []
         assert migrate_order_sheet(connection) == []
         assert connection.execute(text("SELECT id FROM recommendations")).scalar_one() == 42
-        assert connection.execute(text("SELECT all_menus_disliked_at FROM recommendations")).scalar_one() is None
         assert connection.execute(text("SELECT id FROM recommendation_feedbacks")).scalar_one() == 42
         assert inspect(connection).get_foreign_keys("recommendation_feedbacks")[0]["referred_table"] == "food_kinds"
 

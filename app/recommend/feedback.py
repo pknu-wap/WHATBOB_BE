@@ -13,7 +13,6 @@ from app.auth.operations import (
 )
 from app.auth.sessions import as_utc_naive, utc_now
 from app.menus.models import (
-    PERSONAL_INITIAL_LIST,
     Menu,
     OrderSheetQuestion,
     Recommendation,
@@ -28,8 +27,7 @@ from app.recommend.common import (
 )
 from app.recommend.personal_experiment_events import record_personal_experiment_reaction
 from app.recommend.question_pool import normalize_question_options as _question_options
-from app.recommend.question_review import enqueue_question_review
-from app.recommend.replay import initial_personal_list_filter
+from app.recommend.question_review import enqueue_rejected_initial_list_review
 from app.recommend.schemas import (
     RecommendationFeedbackRequest,
     RecommendationFeedbackResponse,
@@ -66,7 +64,6 @@ class RecommendationReactionOutcome:
     is_zero_candidates: bool
     is_first_list_liked: bool
     is_list_rejected: bool
-    is_all_menus_disliked: bool
     is_closed: bool
     list_rejected_at: datetime | None
     closed_at: datetime | None
@@ -105,43 +102,6 @@ def _resolve_exposure_rank(rec: Recommendation, menu_id: int | None) -> int | No
         if item_id is not None and int(item_id) == int(menu_id):
             return idx
     return None
-
-
-def _close_if_all_menus_disliked(db: Session, rec: Recommendation) -> bool:
-    shown_menu_ids = set(_shown_menu_ids(rec))
-    if rec.user_id is None or not shown_menu_ids or _is_zero_candidates_recommendation(rec):
-        return False
-    if rec.order_sheet_list_scope is None:
-        if db.query(Recommendation.id).filter(
-            Recommendation.id == rec.id, initial_personal_list_filter(),
-        ).first() is None:
-            return False
-    elif rec.order_sheet_list_scope != PERSONAL_INITIAL_LIST:
-        return False
-
-    # Read current feedback while the recommendation is locked. The history preserves
-    # separate reviews for the actual cards even if two menus share a normalized key.
-    reactions = (
-        db.query(RecommendationFeedback.selected_menu_id, RecommendationFeedback.is_satisfied)
-        .filter(
-            RecommendationFeedback.recommendation_id == rec.id,
-            RecommendationFeedback.selected_menu_id.in_(shown_menu_ids),
-        )
-        .order_by(RecommendationFeedback.id.desc())
-        .with_for_update()
-    )
-    latest_by_menu_id: dict[int, bool] = {}
-    for menu_id, is_satisfied in reactions:
-        latest_by_menu_id.setdefault(menu_id, is_satisfied)
-    if len(latest_by_menu_id) != len(shown_menu_ids) or any(latest_by_menu_id.values()):
-        return False
-
-    now = utc_now()
-    rec.all_menus_disliked_at = now
-    rec.list_rejected_at = now
-    rec.closed_at = now
-    enqueue_question_review(db, rec.user_id, now)
-    return True
 
 
 def _as_utc_aware(dt: datetime) -> datetime:
@@ -217,7 +177,6 @@ def record_recommendation_feedback(
     rec = (
         db.query(Recommendation)
         .filter(Recommendation.id == recommendation_id)
-        .populate_existing()
         .with_for_update()
         .first()
     )
@@ -282,7 +241,6 @@ def record_recommendation_feedback(
             RecommendationFeedbackState.recommendation_id == rec.id,
             RecommendationFeedbackState.menu_key == mkey,
         )
-        .populate_existing()
         .with_for_update()
         .first()
         if owner_user_id is not None
@@ -320,9 +278,6 @@ def record_recommendation_feedback(
                 latest_fb.food_kind_id = food_kind_id
 
     if duplicate_feedback_id is not None:
-        is_closed = not desired_satisfied and _close_if_all_menus_disliked(db, rec)
-        if is_closed:
-            record_personal_experiment_reaction(db, rec.id, explicit=True)
         response = RecommendationFeedbackResponse(
             feedback_id=duplicate_feedback_id,
             recommendation_id=rec.id,
@@ -330,7 +285,6 @@ def record_recommendation_feedback(
             updated_weights={},
             selected_menu_id=target_menu_id,
             exposure_rank=exposure_rank,
-            is_closed=is_closed,
         )
         if operation is not None:
             operation.status = "SUCCEEDED"
@@ -391,7 +345,6 @@ def record_recommendation_feedback(
             if prev_satisfied != desired_satisfied:
                 existing_state.updated_at = now
 
-    is_closed = not desired_satisfied and _close_if_all_menus_disliked(db, rec)
     response = RecommendationFeedbackResponse(
         feedback_id=feedback.id,
         recommendation_id=rec.id,
@@ -399,7 +352,6 @@ def record_recommendation_feedback(
         updated_weights={},
         selected_menu_id=target_menu_id,
         exposure_rank=exposure_rank,
-        is_closed=is_closed,
     )
 
     if operation is not None:
@@ -409,7 +361,7 @@ def record_recommendation_feedback(
         operation.response_json = response.model_dump()
         operation.updated_at = utc_now()
 
-    record_personal_experiment_reaction(db, rec.id, explicit=desired_satisfied or is_closed)
+    record_personal_experiment_reaction(db, rec.id, explicit=desired_satisfied)
     db.commit()
     return response
 
@@ -439,7 +391,6 @@ def reject_recommendation_list(
     rec = (
         db.query(Recommendation)
         .filter(Recommendation.id == recommendation_id)
-        .populate_existing()
         .with_for_update()
         .first()
     )
@@ -487,7 +438,8 @@ def reject_recommendation_list(
     now = utc_now()
     if rec.list_rejected_at is None:
         rec.list_rejected_at = now
-        record_personal_experiment_reaction(db, rec.id, explicit=False)
+        enqueue_rejected_initial_list_review(db, rec, now)
+        record_personal_experiment_reaction(db, rec.id, explicit=True)
     if rec.closed_at is None:
         rec.closed_at = rec.list_rejected_at
 
@@ -595,13 +547,9 @@ def _build_outcome_from_loaded(
     first_list_liked = not is_zero and bool(liked or like_events)
 
     rejected_at = rec.list_rejected_at
-    all_disliked_at = rec.all_menus_disliked_at
-    if cutoff_utc is not None:
-        cutoff = as_utc_naive(cutoff_utc)
-        if rejected_at is not None and as_utc_naive(rejected_at) > cutoff:
+    if rejected_at is not None and cutoff_utc is not None:
+        if as_utc_naive(rejected_at) > as_utc_naive(cutoff_utc):
             rejected_at = None
-        if all_disliked_at is not None and as_utc_naive(all_disliked_at) > cutoff:
-            all_disliked_at = None
 
     if is_zero:
         outcome = OUTCOME_ZERO_CANDIDATES
@@ -628,7 +576,6 @@ def _build_outcome_from_loaded(
         is_zero_candidates=is_zero,
         is_first_list_liked=first_list_liked,
         is_list_rejected=not is_zero and rejected_at is not None,
-        is_all_menus_disliked=not is_zero and all_disliked_at is not None,
         is_closed=(rec.closed_at is not None),
         list_rejected_at=rejected_at,
         closed_at=rec.closed_at,

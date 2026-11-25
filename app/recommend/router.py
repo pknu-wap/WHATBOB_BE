@@ -256,8 +256,8 @@ def submit_recommendation_feedback(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     """
-    추천 메뉴별 좋아요·싫어요를 저장합니다.
-    개인 주문서의 첫 추천 메뉴가 모두 싫어요 상태가 되면 해당 주문서를 종료합니다.
+    추천 결과에 대한 사용자의 만족/불만족 피드백을 저장하고,
+    조건 일치 여부별 누적 만족도 통계와 초기 점수를 결합해 질문 중요도를 재계산합니다.
     """
     actor = current_user if isinstance(current_user, User) else None
     raw_idem_key = idempotency_key if isinstance(idempotency_key, str) else None

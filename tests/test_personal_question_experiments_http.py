@@ -6,7 +6,6 @@ from app.core.config import settings
 from app.menus.models import OrderSheetQuestion, UserFoodExclusion
 from app.recommend.question_review import run_pending_question_reviews
 from app.users.models import User
-from tests.test_first_list_reactions_http import dislike_all_recommended_menus as _reject
 from tests.test_order_sheet_issuance import _seed_diverse_menus_and_full_pool
 from tests.test_order_sheet_issuance_http import _make_client, db
 
@@ -51,6 +50,11 @@ def _reject_first_two_lists(client):
 
 def _question_ids(sheet):
     return [question["id"] for question in sheet["questions"]]
+
+
+def _reject(client, recommendation):
+    response = client.post(f"/api/recommendations/{recommendation['recommendation_id']}/reject")
+    assert response.status_code == 200, response.text
 
 
 def test_retries_keep_assignment_and_every_two_new_issuances_get_both_questions(db, user):
@@ -143,11 +147,11 @@ def test_only_the_first_full_submission_of_an_owned_experiment_sheet_is_its_init
         assert run_pending_question_reviews(db) == 1
         sheet = _issue(client)
         with _make_client(db, other_user) as other_client:
-            _reject(other_client, _submit(other_client, sheet), expect_closed=False)
-        _reject(client, _submit(client, sheet, sheet["questions"][:1]), expect_closed=False)
+            _reject(other_client, _submit(other_client, sheet))
+        _reject(client, _submit(client, sheet, sheet["questions"][:1]))
         assert run_pending_question_reviews(db) == 0
 
         _reject(client, _submit(client, sheet))
         assert run_pending_question_reviews(db) == 1
-        _reject(client, _submit(client, sheet), expect_closed=False)
+        _reject(client, _submit(client, sheet))
         assert run_pending_question_reviews(db) == 0

@@ -1,4 +1,4 @@
-"""Observe replacement review through first-list feedback, the worker, and its reader."""
+"""Observe replacement review through first-list rejection, the worker, and its reader."""
 
 from datetime import timedelta
 
@@ -57,17 +57,7 @@ def add_exposure(db, user, created_at, *, menu_ids=(101,), scope="personal_initi
     return row
 
 
-def dislike_all(db, rec):
-    for menu_id in rec.recommended_menu_ids:
-        record_recommendation_feedback(
-            db,
-            rec.id,
-            RecommendationFeedbackRequest(selected_menu_id=menu_id, is_satisfied=False),
-            user_id=rec.user_id,
-        )
-
-
-def test_review_counts_distinct_recent_personal_lists_with_every_menu_disliked(db):
+def test_review_uses_explicit_rejections_of_distinct_recent_shown_personal_lists(db):
     user = User(kakao_id=890001, nickname="reviewer")
     db.add(user)
     db.flush()
@@ -83,13 +73,11 @@ def test_review_counts_distinct_recent_personal_lists_with_every_menu_disliked(d
     db.commit()
 
     for row in ignored[:3]:
-        dislike_all(db, row)
-        assert row.closed_at is None
-    reject_recommendation_list(db, shown[3].id, user_id=user.id)
+        reject_recommendation_list(db, row.id, user_id=user.id)
     assert run_pending_question_reviews(db) == 0
 
-    for row in (shown[0], shown[1], ignored[3]):
-        dislike_all(db, row)
+    for index in (0, 0, 1):
+        reject_recommendation_list(db, shown[index].id, user_id=user.id)
     assert load_question_review(db, user.id) is None
     assert run_pending_question_reviews(db) == 1
     review = load_question_review(db, user.id)
@@ -101,7 +89,7 @@ def test_review_counts_distinct_recent_personal_lists_with_every_menu_disliked(d
     for _ in range(3):
         add_exposure(db, user, now)
     db.commit()
-    dislike_all(db, shown[2])
+    reject_recommendation_list(db, shown[2].id, user_id=user.id)
     assert run_pending_question_reviews(db) == 1
     review = load_question_review(db, user.id)
     assert (review.rejected_count, review.shown_count, review.eligible) == (3, 10, True)
@@ -140,10 +128,7 @@ def test_review_ranks_changes_then_actual_likes_then_neutral_answers(review_db):
     db = review_db
     user = User(kakao_id=890002, nickname="question impact")
     db.add(user)
-    db.add_all([
-        Menu(id=menu_id, food_code=str(menu_id), name=f"Meal {menu_id}", base_name=f"Meal {menu_id}", category_large="meal")
-        for menu_id in (101, 102, 103, 104, 105, 201, 202)
-    ])
+    db.add(Menu(id=102, food_code="102", name="liked meal", base_name="liked meal", category_large="meal"))
     db.flush()
     now = utc_now()
     five_shown = add_replay(
@@ -169,7 +154,7 @@ def test_review_ranks_changes_then_actual_likes_then_neutral_answers(review_db):
             user_id=user.id,
         )
     for rec in (five_shown, two_shown):
-        dislike_all(db, rec)
+        reject_recommendation_list(db, rec.id, user_id=user.id)
     tick = utc_now()
     assert run_pending_question_reviews(db, now=tick) == 1
 
@@ -193,7 +178,7 @@ def test_review_ranks_changes_then_actual_likes_then_neutral_answers(review_db):
     assert long_impacts[20].left_menu_ids == long_impacts[20].liked_original_only_menu_ids == (102,)
 
 
-def test_disliking_all_menus_after_a_zero_candidate_first_list_does_not_start_review(db):
+def test_rejection_after_retrying_a_zero_candidate_personal_list_does_not_start_review(db):
     user = User(kakao_id=890003, nickname="retry")
     question = OrderSheetQuestion(
         question_code="review_soup",
@@ -232,8 +217,6 @@ def test_disliking_all_menus_after_a_zero_candidate_first_list_does_not_start_re
     )
 
     assert (first.candidate_count, retry.candidate_count) == (0, 2)
-    retry_rec = db.get(Recommendation, retry.recommendation_id)
-    dislike_all(db, retry_rec)
-    assert retry_rec.closed_at is None
+    assert reject_recommendation_list(db, retry.recommendation_id, user_id=user.id).is_list_rejected
     assert run_pending_question_reviews(db) == 0
     assert load_question_review(db, user.id) is None

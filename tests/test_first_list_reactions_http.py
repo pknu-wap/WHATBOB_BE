@@ -22,7 +22,6 @@ from app.recommend.feedback import (
     classify_recommendation_outcome,
     summarize_first_list_reactions,
 )
-from app.recommend.experiment_metrics import ArmMetrics
 from app.recommend.router import router as recommend_router
 from app.users.models import User
 from tests.auth_helpers import session_token
@@ -181,59 +180,6 @@ def test_http_feedback_preserves_contract_records_exposure_rank_and_deduplicates
     assert outcome.first_liked_exposure_rank == 1
 
 
-def dislike_all_recommended_menus(client, recommendation, *, expect_closed=True):
-    menus = recommendation["recommended_menus"]
-    assert menus
-    for index, menu in enumerate(menus, start=1):
-        response = client.post(
-            f"/api/recommendations/{recommendation['recommendation_id']}/feedback",
-            json={"selected_menu_id": menu["menu_id"], "is_satisfied": False},
-        )
-        assert response.status_code == 200, response.text
-        assert response.json()["data"]["is_closed"] is (expect_closed and index == len(menus))
-
-
-def test_disliking_each_displayed_menu_closes_sheet_and_blocks_changes(http_env):
-    client = http_env["client"]
-    db = http_env["db"]
-    headers = http_env["user_headers"]
-    question = http_env["question"]
-    created = client.post(
-        "/api/recommendations/order-sheet",
-        headers=headers,
-        json={"answers": [{"question_id": question.id, "option_id": "soup_yes"}], "top_k": 2},
-    )
-    assert created.status_code == 201
-    recommendation = created.json()["data"]
-    menu_a, menu_b = [menu["menu_id"] for menu in recommendation["recommended_menus"]]
-    rec_id = recommendation["recommendation_id"]
-    url = f"/api/recommendations/{rec_id}/feedback"
-
-    for menu_id, satisfied in ((menu_a, False), (menu_a, False), (menu_a, True), (menu_b, False)):
-        response = client.post(url, headers=headers, json={"selected_menu_id": menu_id, "is_satisfied": satisfied})
-        assert response.status_code == 200
-        assert response.json()["data"]["is_closed"] is False
-    assert not classify_recommendation_outcome(db, rec_id).is_all_menus_disliked
-
-    payload = {"selected_menu_id": menu_a, "is_satisfied": False}
-    final_headers = {**headers, "Idempotency-Key": "last-menu-dislike"}
-    final_response = client.post(url, headers=final_headers, json=payload)
-    assert final_response.status_code == 200
-    assert final_response.json()["data"]["is_closed"] is True
-    assert client.post(url, headers=final_headers, json=payload).json() == final_response.json()
-
-    for menu_id in (menu_a, menu_b):
-        changed = client.post(url, headers=headers, json={"selected_menu_id": menu_id, "is_satisfied": True})
-        assert changed.status_code == 409
-        assert "ORDER_SHEET_CLOSED" in changed.text
-
-    outcome = classify_recommendation_outcome(db, rec_id)
-    assert outcome.is_closed and outcome.is_all_menus_disliked
-    assert outcome.disliked_menu_count == 2
-    assert db.query(RecommendationFeedback).filter_by(recommendation_id=rec_id).count() == 4
-    assert ArmMetrics.from_summary(summarize_first_list_reactions(db, recommendation_ids=[rec_id])).rejected_count == 1
-
-
 def test_http_reject_endpoint_auth_idempotency_closes_sheet_and_rejects_zero_candidates(http_env):
     client = http_env["client"]
     db = http_env["db"]
@@ -307,5 +253,4 @@ def test_http_reject_endpoint_auth_idempotency_closes_sheet_and_rejects_zero_can
     assert summary.shown_list_count == 1
     assert summary.list_rejected_count == 1
     assert summary.zero_candidates_count == 1
-    assert ArmMetrics.from_summary(summary).rejected_count == 0
     assert classify_recommendation_outcome(db, zero_rec.id).outcome == OUTCOME_ZERO_CANDIDATES
