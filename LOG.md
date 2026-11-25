@@ -5,6 +5,35 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-25
 
+### #58 / #77 개인 주문서의 첫 추천 메뉴 전체 싫어요를 질문 개선에 반영
+
+#### 변경 이유 및 내용
+
+- 추천 목록에 표시한 실제 메뉴별 최신 평가가 모두 싫어요가 되면 해당 주문서를 종료하고 목록 거절 한 건을 기록한다. 추천과 평가를 잠근 트랜잭션에서 한 번만 기록한다.
+- 기존 질문 검토의 최근 30일 2건 및 30% 기준과 개인·공통 질문 실험의 거절 지표에 이 기록을 반영한다. 기존 목록 거절 요청은 주문서를 닫으며 질문 검토와 실험의 거절에는 집계하지 않는다.
+
+#### 주요 변경 파일
+
+- `app/recommend/feedback.py`, `app/recommend/question_review.py`, `app/recommend/experiment_metrics.py`, `app/recommend/router.py`, `app/recommend/schemas.py`, `docs/USER_EXCLUSIONS_API.md`
+- `app/menus/models.py`, `scripts/migrate_order_sheet.py`, `tests/test_first_list_reactions_http.py`, `tests/test_order_sheet_question_review.py`, `tests/test_hard_filter_audit.py`, 개인 질문 실험 및 마이그레이션 테스트
+
+#### API 변경
+
+- `POST /api/recommendations/{recommendation_id}/feedback`은 마지막 유효한 싫어요를 저장해 주문서를 종료하면 `data.is_closed: true`를 반환한다. 이후 평가 변경은 `409 ORDER_SHEET_CLOSED`로 거절하고 같은 멱등성 키의 재전송에는 완료된 응답을 반환한다.
+
+#### DB 변경
+
+- `recommendations.all_menus_disliked_at`에 메뉴 전체 싫어요로 주문서를 종료한 시각을 저장한다. `scripts/migrate_order_sheet.py`가 기존 데이터에 nullable 컬럼을 추가한다.
+
+#### 검증
+
+- 메뉴 평가, 질문 검토·실험, 하드필터 감사 및 스키마 변경 관련 테스트 37개 통과, 격리 MySQL 테스트 2개 건너뜀.
+- 전체 테스트 708개 통과, 42개 건너뜀, 1개 실패. 카카오 로그인 응답의 `requires_reauth` 필드 불일치는 수정 전 `af5b382`에서도 재현했다.
+
+#### 남은 작업 및 주의 사항
+
+- 기존 DB에 배포할 때 `python -m scripts.migrate_order_sheet --apply`를 실행한다.
+
 ### #58 / #77 (#78–#92) 주문서 하드필터·점수 추천 개편, 첫 목록 반응·가게 만족 분리, 개인/공통 질문 실험 및 리뷰 수정
 
 #### 변경 이유 및 내용

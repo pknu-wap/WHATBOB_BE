@@ -56,7 +56,9 @@
 | `GET /api/recommendations/random` | 무작위 추천 | 본인 제외 조건(`ALLERGY`, `UNABLE`, `DISLIKE`) + `?exclusions=` 쿼리 제외 키워드를 하드 필터로 먼저 제거한 뒤 무작위 선택(`Cache-Control: no-store`) |
 | `GET /api/recommendations/order-sheet/questions` | 주문서 질문 조회 | 인증 사용자 기준(`user:{user_id}`) 주제 노출 상태를 단일 트랜잭션으로 갱신 |
 | `POST /api/recommendations/order-sheet` | 주문서 맞춤 추천 | 제외 조건 하드 필터 적용 후 규칙 점수, 최근 노출 감점, 개인화 로지스틱 보정(`±5%`, 반감기 90일, 수축 `k=5`, 최근 3일 동일 식사 특징 포함) 및 가중 근접 추첨(`beta=0.5`)을 반영해 추천 생성 및 추천 시점 특징 스냅샷(`recommendation_item_snapshots`) 저장 |
-| `POST /api/recommendations/{recommendation_id}/feedback` | 추천 만족/불만족 피드백 | 원본 이력(`recommendation_feedbacks`)은 append-only로 보존하고, `(recommendation_id, menu_key)` 기준 최신 유효 1표 상태(`recommendation_feedback_states`)만 갱신. `Idempotency-Key` 재전송 시 중복 집계 방지 |
+| `POST /api/recommendations/{recommendation_id}/feedback` | 추천 메뉴별 좋아요·싫어요 | `selected_menu_id`와 `is_satisfied`를 전송한다. 개인 주문서의 첫 추천 메뉴 전부가 최신 평가에서 싫어요가 되면 `data.is_closed: true`를 반환한다. 같은 `Idempotency-Key`로 재전송하면 기존 응답을 돌려준다. |
+
+종료된 주문서의 새 평가 요청은 `409 ORDER_SHEET_CLOSED`를 반환한다. 질문 개선은 모든 메뉴에 싫어요가 기록된 첫 추천 목록을 주문서당 한 번 집계한다. `POST /api/recommendations/{recommendation_id}/reject`는 목록을 닫는 기존 요청을 지원한다.
 
 ### 오프라인 개인화 모델 학습 (`M3A`)
 

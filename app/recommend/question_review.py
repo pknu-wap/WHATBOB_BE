@@ -11,12 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.sessions import as_utc_naive, utc_now
 from app.core.config import settings
-from app.menus.models import (
-    PERSONAL_INITIAL_LIST,
-    OrderSheetQuestionReview,
-    Recommendation,
-    RecommendationFeedback,
-)
+from app.menus.models import OrderSheetQuestionReview, Recommendation, RecommendationFeedback
 from app.recommend.replay import initial_personal_list_filter, verify_and_load_recent_replay_snapshots
 
 logger = logging.getLogger(__name__)
@@ -58,7 +53,7 @@ class QuestionReview(BaseModel):
     sheet_impacts: tuple[SheetQuestionImpacts, ...] = ()
 
 
-def _enqueue_question_review(db: Session, user_id: int, now: datetime) -> OrderSheetQuestionReview:
+def enqueue_question_review(db: Session, user_id: int, now: datetime) -> OrderSheetQuestionReview:
     query = (
         db.query(OrderSheetQuestionReview)
         .filter(OrderSheetQuestionReview.user_id == user_id)
@@ -82,29 +77,12 @@ def _enqueue_question_review(db: Session, user_id: int, now: datetime) -> OrderS
     return work
 
 
-def enqueue_rejected_initial_list_review(db: Session, rec: Recommendation, now: datetime) -> None:
-    """Queue the first personal rejection within the caller's feedback transaction."""
-    if rec.user_id is None or not rec.recommended_menu_ids:
-        return
-    if rec.order_sheet_list_scope is None:
-        legacy_personal = (
-            db.query(Recommendation.id)
-            .filter(Recommendation.id == rec.id, initial_personal_list_filter())
-            .first()
-        )
-        if legacy_personal is None:
-            return
-    elif rec.order_sheet_list_scope != PERSONAL_INITIAL_LIST:
-        return
-    _enqueue_question_review(db, rec.user_id, now)
-
-
 def merge_question_review_work(db: Session, origin_id: int, target_id: int, now: datetime) -> None:
     """Recompute review against the combined recommendation history after account linking."""
     origin = db.get(OrderSheetQuestionReview, origin_id)
     if origin is None and db.get(OrderSheetQuestionReview, target_id) is None:
         return
-    target = _enqueue_question_review(db, target_id, now)
+    target = enqueue_question_review(db, target_id, now)
     target.reviewed_at = None
     target.result_json = None
     if origin is not None:
@@ -114,7 +92,7 @@ def merge_question_review_work(db: Session, origin_id: int, target_id: int, now:
 def _review_user(db: Session, user_id: int, now: datetime) -> QuestionReview:
     rejected, shown = (
         db.query(
-            func.count(case((Recommendation.list_rejected_at <= now, Recommendation.id))),
+            func.count(case((Recommendation.all_menus_disliked_at <= now, Recommendation.id))),
             func.count(Recommendation.id),
         )
         .filter(

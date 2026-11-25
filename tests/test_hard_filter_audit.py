@@ -294,7 +294,7 @@ def test_summarize_single_candidate_rejections_groups_by_answer_combination_and_
     r_a1 = _submit(u1, [("has_soup", "soup_yes"), ("cooking_style", "rice"), ("main_ingredient", "meat")])
     reject_recommendation_list(db=db, recommendation_id=r_a1.recommendation_id, user_id=u1.id)
 
-    # 2) 조합 A (u2, 제출 순서 다름): 1종 + 개별 싫어요 후 목록 거절 -> 같은 조합으로 묶여야 함
+    # 2) 조합 A (u2, 제출 순서 다름): 유일한 메뉴에 싫어요를 눌러도 같은 조합으로 묶인다.
     r_a2 = _submit(u2, [("main_ingredient", "meat"), ("has_soup", "soup_yes"), ("cooking_style", "rice")])
     record_recommendation_feedback(
         db=db,
@@ -302,14 +302,12 @@ def test_summarize_single_candidate_rejections_groups_by_answer_combination_and_
         request=RecommendationFeedbackRequest(selected_menu_id=m_beef_soup.id, is_satisfied=False),
         user_id=u2.id,
     )
-    reject_recommendation_list(db=db, recommendation_id=r_a2.recommendation_id, user_id=u2.id)
 
     # 3) 조합 B (u1): 1종 + 목록 거절 (1회) -> 포함
     r_b1 = _submit(u1, [("has_soup", "soup_yes"), ("cooking_style", "noodle"), ("main_ingredient", "non_meat")])
     reject_recommendation_list(db=db, recommendation_id=r_b1.recommendation_id, user_id=u1.id)
 
-    # 4) 제외 케이스들:
-    # - 1종 + 좋아요
+    # 4) 좋아요만 남긴 1종 목록은 집계에서 제외한다.
     r_like = _submit(u1, [("has_soup", "soup_yes"), ("cooking_style", "rice"), ("main_ingredient", "meat")])
     record_recommendation_feedback(
         db=db,
@@ -317,11 +315,11 @@ def test_summarize_single_candidate_rejections_groups_by_answer_combination_and_
         request=RecommendationFeedbackRequest(selected_menu_id=m_beef_soup.id, is_satisfied=True),
         user_id=u1.id,
     )
-    # - 1종 + 개별 싫어요만(목록 거절 없음)
-    r_dislike_only = _submit(u1, [("has_soup", "soup_yes"), ("cooking_style", "rice"), ("main_ingredient", "meat")])
+    # 5) 조합 A (u1): 유일한 메뉴의 싫어요로 목록 거절이 한 건 추가된다.
+    r_all_disliked = _submit(u1, [("has_soup", "soup_yes"), ("cooking_style", "rice"), ("main_ingredient", "meat")])
     record_recommendation_feedback(
         db=db,
-        recommendation_id=r_dislike_only.recommendation_id,
+        recommendation_id=r_all_disliked.recommendation_id,
         request=RecommendationFeedbackRequest(selected_menu_id=m_beef_soup.id, is_satisfied=False),
         user_id=u1.id,
     )
@@ -336,10 +334,10 @@ def test_summarize_single_candidate_rejections_groups_by_answer_combination_and_
     assert r_zero.candidate_count == 0
 
     summary = summarize_single_candidate_rejections(db)
-    assert summary.total_single_candidate_rejections == 3
+    assert summary.total_single_candidate_rejections == 4
     assert summary.unique_combination_count == 2
     assert summary.repeated_combination_count == 1
-    assert len(summary.cases) == 3
+    assert len(summary.cases) == 4
 
     expected_combo_a = tuple(
         sorted([
@@ -358,9 +356,11 @@ def test_summarize_single_candidate_rejections_groups_by_answer_combination_and_
 
     assert [c.answer_combination for c in summary.combinations] == [expected_combo_a, expected_combo_b]
     combo_a, combo_b = summary.combinations
-    assert combo_a.rejection_count == 2
+    assert combo_a.rejection_count == 3
     assert combo_a.distinct_user_count == 2
-    assert set(combo_a.recommendation_ids) == {r_a1.recommendation_id, r_a2.recommendation_id}
+    assert set(combo_a.recommendation_ids) == {
+        r_a1.recommendation_id, r_a2.recommendation_id, r_all_disliked.recommendation_id,
+    }
     assert combo_a.rejected_menu_ids == [m_beef_soup.id]
 
     assert combo_b.rejection_count == 1
@@ -370,7 +370,7 @@ def test_summarize_single_candidate_rejections_groups_by_answer_combination_and_
 
     # min_occurrences=2 -> 반복된 조합 A만 반환
     repeated_only = summarize_single_candidate_rejections(db, min_occurrences=2)
-    assert repeated_only.total_single_candidate_rejections == 2
+    assert repeated_only.total_single_candidate_rejections == 3
     assert repeated_only.unique_combination_count == 1
     assert repeated_only.repeated_combination_count == 1
     assert repeated_only.combinations[0].answer_combination == expected_combo_a
@@ -391,7 +391,7 @@ def test_summarize_single_candidate_rejections_groups_by_answer_combination_and_
         since_utc=datetime(2026, 2, 1, 0, 0, tzinfo=timezone.utc),
     )
     assert r_a1.recommendation_id not in [c.recommendation_id for c in recent_summary.cases]
-    assert recent_summary.total_single_candidate_rejections == 2
+    assert recent_summary.total_single_candidate_rejections == 3
 
 
 def test_single_candidate_likes_and_rejections_included_in_overall_satisfaction_and_never_auto_replace_hard_filters(
@@ -452,7 +452,7 @@ def test_single_candidate_likes_and_rejections_included_in_overall_satisfaction_
         r_rej = _submit(single_answers)
         reject_recommendation_list(db=db, recommendation_id=r_rej.recommendation_id, user_id=user.id)
         rejected_single_ids.append(r_rej.recommendation_id)
-    # 1종 개별 싫어요만 1건
+    # 유일한 메뉴에 싫어요를 눌러 목록 전체를 거절한 경우 1건
     r_dis = _submit(single_answers)
     record_recommendation_feedback(
         db=db,
@@ -483,7 +483,7 @@ def test_single_candidate_likes_and_rejections_included_in_overall_satisfaction_
         audit = get_order_sheet_hard_filter_audit(db, rid)
         assert audit.is_single_candidate_rejection is True
     rej_summary = summarize_single_candidate_rejections(db, user_id=user.id)
-    assert rej_summary.total_single_candidate_rejections == 3
+    assert rej_summary.total_single_candidate_rejections == 4
     assert rej_summary.repeated_combination_count == 1
 
     sat = summarize_overall_satisfaction_with_hard_filter_audit(db, user_id=user.id)
@@ -491,14 +491,14 @@ def test_single_candidate_likes_and_rejections_included_in_overall_satisfaction_
     assert sat.overall.zero_candidates_count == 1
     assert sat.overall.shown_list_count == 9
     assert sat.overall.first_list_liked_count == 3
-    assert sat.overall.list_rejected_count == 4
-    assert sat.overall.individual_disliked_only_count == 1
+    assert sat.overall.list_rejected_count == 5
+    assert sat.overall.individual_disliked_only_count == 0
     assert sat.overall.no_response_count == 1
 
     assert sat.single_candidate_total_count == 6
     assert sat.single_candidate_liked_count == 1
-    assert sat.single_candidate_rejected_count == 3
-    assert sat.single_candidate_disliked_only_count == 1
+    assert sat.single_candidate_rejected_count == 4
+    assert sat.single_candidate_disliked_only_count == 0
     assert sat.single_candidate_no_response_count == 1
 
     assert sat.multi_candidate_total_count == 3
@@ -508,7 +508,7 @@ def test_single_candidate_likes_and_rejections_included_in_overall_satisfaction_
     assert sat.overall.first_list_liked_count == sat.single_candidate_liked_count + sat.multi_candidate_liked_count
     assert sat.overall.list_rejected_count == sat.single_candidate_rejected_count + sat.multi_candidate_rejected_count
     assert sat.overall_like_rate == pytest.approx(3 / 9)
-    assert sat.overall_rejection_rate == pytest.approx(4 / 9)
+    assert sat.overall_rejection_rate == pytest.approx(5 / 9)
 
     # 점검 기록 누적·조회 후에도 하드필터 설정·질문 역할·가중치가 자동 교체/수정되지 않아야 한다.
     assert tuple(settings.ORDER_SHEET_HARD_FILTER_CLUSTERS) == before_hf_clusters

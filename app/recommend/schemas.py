@@ -193,6 +193,7 @@ class RecommendationFeedbackResponse(BaseModel):
     updated_weights: dict[str, float]
     selected_menu_id: Optional[int] = None
     exposure_rank: Optional[int] = None
+    is_closed: bool = False
 
 
 class RecommendationRejectResponse(BaseModel):

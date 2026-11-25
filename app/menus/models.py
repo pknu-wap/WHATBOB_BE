@@ -258,6 +258,7 @@ class Recommendation(Base):
     initial_candidate_count = Column(Integer, nullable=True)
     order_sheet_list_scope = Column(String(20), nullable=True)
     list_rejected_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True, index=True)
+    all_menus_disliked_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
     closed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True, index=True)
     created_at = Column(ORDER_SHEET_TIMESTAMP, default=lambda: datetime.now(timezone.utc))
 
