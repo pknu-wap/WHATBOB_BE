@@ -133,10 +133,12 @@ def find_user_meals_with_menu(
     user_id: int,
     limit: int,
     offset: int,
-) -> list[tuple[UserMeal, Menu | None]]:
+) -> list[tuple[UserMeal, Menu | None, str | None, int | None]]:
     return (
-        db.query(UserMeal, Menu)
+        db.query(UserMeal, Menu, FoodKind.representative_image_url, MenuIllustrationException.menu_id)
         .outerjoin(Menu, UserMeal.menu_id == Menu.id)
+        .outerjoin(FoodKind, Menu.food_kind_id == FoodKind.id)
+        .outerjoin(MenuIllustrationException, Menu.id == MenuIllustrationException.menu_id)
         .filter(UserMeal.user_id == user_id)
         .order_by(UserMeal.eaten_at.desc(), UserMeal.id.desc())
         .offset(offset)

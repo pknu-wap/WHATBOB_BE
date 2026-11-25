@@ -9,7 +9,8 @@ from sqlalchemy.pool import StaticPool
 
 from app.auth.dependencies import get_current_user
 from app.core.database import Base, get_db
-from app.menus.models import Menu, UserFoodExclusion
+from app.menus.food_kinds import DEFAULT_MENU_ILLUSTRATION_URL
+from app.menus.models import Menu, MenuIllustrationException, UserFoodExclusion
 from app.recommend.common import NoAvailableFoodException
 from app.recommend.random_pick import pick_random_menu
 from app.recommend.router import router
@@ -133,7 +134,16 @@ def test_random_pick_does_not_relax_exclusions_when_no_candidate_remains(db):
         pick_random_menu(db, extra_exclusions=["국수"])
 
 
-def test_random_api_uses_authenticated_users_exclusions(db):
+@pytest.mark.parametrize(
+    ("representative_url", "has_exception", "expected_url"),
+    [
+        ("/static/menu-illustrations/bibimbap.png", False, "/static/menu-illustrations/bibimbap.png"),
+        ("/static/menu-illustrations/bibimbap.png", True, DEFAULT_MENU_ILLUSTRATION_URL),
+        ("/static/menu-illustrations/missing.png", False, DEFAULT_MENU_ILLUSTRATION_URL),
+        (None, False, DEFAULT_MENU_ILLUSTRATION_URL),
+    ],
+)
+def test_random_api_uses_authenticated_users_exclusions(db, representative_url, has_exception, expected_url):
     user = User(kakao_id=777002, nickname="로그인 사용자")
     db.add(user)
     db.flush()
@@ -142,11 +152,16 @@ def test_random_api_uses_authenticated_users_exclusions(db):
         exclusion_type="DISLIKE",
         keyword="피자",
     ))
+    selected_menu = make_menu("rice-1", "비빔밥_전주", "비빔밥", kcal=500.0)
     db.add_all([
         make_menu("pizza-1", "피자_치즈", "피자"),
-        make_menu("rice-1", "비빔밥_전주", "비빔밥", kcal=500.0),
+        selected_menu,
         make_menu("noodle-1", "국수_잔치국수", "국수"),
     ])
+    db.flush()
+    selected_menu.food_kind.representative_image_url = representative_url
+    if has_exception:
+        db.add(MenuIllustrationException(menu_id=selected_menu.id))
     db.commit()
 
     app = FastAPI()
@@ -171,6 +186,7 @@ def test_random_api_uses_authenticated_users_exclusions(db):
             "food_code": "rice-1",
             "name": "전주비빔밥",
             "base_name": "비빔밥",
+            "image_url": expected_url,
         },
     }
     assert old_method_response.status_code == 405
