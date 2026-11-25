@@ -45,19 +45,23 @@
 
 | 메서드·경로 | 헤더 / 요청 | 응답 및 동작 |
 | --- | --- | --- |
-| `GET /api/users/me/meals` | `limit` (1~200, 기본 50), `offset` (기본 0) | `eaten_at DESC, id DESC` 정렬된 식사 기록 목록 (`items`, `total_count`) |
+| `GET /api/users/me/meals` | `limit` (1~200, 기본 50), `offset` (기본 0) | `eaten_at DESC, id DESC` 정렬된 식사 기록 목록 (`items`, `total_count`). 각 `data.items[]`에 `image_url`을 반환한다. |
 | `POST /api/users/me/meals` | 선택 헤더 `Idempotency-Key` (`1~64자`), 본문 `{"menu_id": 1, "eaten_at": "..."}` | `201 Created`. 동일 `Idempotency-Key` + 동일 본문 재전송 시 기존 생성 결과를 멱등 반환하며, 다른 본문으로 재사용 시 `409 IDEMPOTENCY_KEY_REUSED` 반환 |
 | `DELETE /api/users/me/meals/{meal_id}` | 없음 | 본인 식사 기록 단건 삭제 (`204 No Content`) |
+
+식사 기록의 `image_url`은 조회 시점의 메뉴 일러스트를 가리킨다. 연결된 메뉴가 삭제된 기록은 저장된 `menu_name`, `menu: null`, 공통 이미지 경로를 반환한다.
 
 ## 5. 추천 및 피드백 API (`M1A`, `M3A`)
 
 | 메서드·경로 | 설명 | 주요 동작 |
 | --- | --- | --- |
-| `GET /api/recommendations/random` | 무작위 추천 | 본인 제외 조건(`ALLERGY`, `UNABLE`, `DISLIKE`) + `?exclusions=` 쿼리 제외 키워드를 하드 필터로 먼저 제거한 뒤 무작위 선택(`Cache-Control: no-store`) |
+| `GET /api/recommendations/random` | 무작위 추천 | 본인 제외 조건(`ALLERGY`, `UNABLE`, `DISLIKE`) + `?exclusions=` 쿼리 제외 키워드를 하드 필터로 먼저 제거한 뒤 무작위 선택(`Cache-Control: no-store`). `data.selected_menu.image_url`에 선택된 메뉴의 일러스트 경로를 반환한다. |
 | `GET /api/recommendations/order-sheet/questions` | 주문서 질문 조회 | 인증 사용자 기준(`user:{user_id}`) 주제 노출 상태를 단일 트랜잭션으로 갱신 |
 | `POST /api/recommendations/order-sheet` | 주문서 맞춤 추천 | 제외 조건 하드 필터 적용 후 규칙 점수, 최근 노출 감점, 개인화 로지스틱 보정(`±5%`, 반감기 90일, 수축 `k=5`, 최근 3일 동일 식사 특징 포함) 및 가중 근접 추첨(`beta=0.5`)을 반영해 추천 생성 및 추천 시점 특징 스냅샷(`recommendation_item_snapshots`) 저장 |
 | `POST /api/recommendations/{recommendation_id}/feedback` | 추천 만족/불만족 피드백 | 원본 이력(`recommendation_feedbacks`)은 append-only로 보존하고, `(recommendation_id, menu_key)` 기준 최신 유효 1표 상태(`recommendation_feedback_states`)만 갱신. `Idempotency-Key` 재전송 시 중복 집계 방지 |
 | `POST /api/recommendations/{recommendation_id}/all-menu-reject` | 첫 추천 목록 전체 거절 | ‘이 중엔 먹고 싶은 게 없어요’를 선택하면 주문서를 종료하고 목록 거절 한 건을 기록한다. `Idempotency-Key`로 같은 요청을 재전송하면 기존 응답을 돌려주며, 추천 메뉴가 0개인 주문서는 `409 ZERO_CANDIDATES_RECOMMENDATION`을 반환한다. |
+
+랜덤 추천과 식사 기록 조회의 `image_url`은 백엔드 기준 상대 경로 문자열이다. 음식 종류의 대표 일러스트를 쓰며, 메뉴별 예외에 해당하거나 사용할 수 있는 대표 파일이 없으면 공통 이미지 `/static/menu-illustrations/default.svg`를 반환한다.
 
 ### 오프라인 개인화 모델 학습 (`M3A`)
 

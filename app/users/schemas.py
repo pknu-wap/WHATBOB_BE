@@ -146,8 +146,12 @@ class UserMealItemResponse(BaseModel):
     menu: UserMealMenuDTO | None = None
 
 
+class UserMealHistoryItemResponse(UserMealItemResponse):
+    image_url: str
+
+
 class UserMealsResponse(BaseModel):
-    items: list[UserMealItemResponse]
+    items: list[UserMealHistoryItemResponse]
     total_count: int
 
 

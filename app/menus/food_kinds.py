@@ -105,6 +105,28 @@ def resolve_menu_illustration_url(
     return DEFAULT_MENU_ILLUSTRATION_URL
 
 
+def get_menu_illustration_url(db: Session, menu_id: int) -> str:
+    """메뉴 한 건의 대표 일러스트와 메뉴별 예외를 조회한다."""
+    from app.menus.models import FoodKind, Menu, MenuIllustrationException
+
+    illustration = (
+        db.query(FoodKind.representative_image_url, MenuIllustrationException.menu_id)
+        .select_from(Menu)
+        .outerjoin(FoodKind, Menu.food_kind_id == FoodKind.id)
+        .outerjoin(MenuIllustrationException, Menu.id == MenuIllustrationException.menu_id)
+        .filter(Menu.id == menu_id)
+        .one_or_none()
+    )
+    if illustration is None:
+        return DEFAULT_MENU_ILLUSTRATION_URL
+
+    representative_image_url, exception_menu_id = illustration
+    return resolve_menu_illustration_url(
+        representative_image_url,
+        use_common_fallback=exception_menu_id is not None,
+    )
+
+
 def _ensure_new_menu_food_kind_on_flush(
     session: Session,
     _flush_context,
