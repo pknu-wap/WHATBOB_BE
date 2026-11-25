@@ -5,6 +5,7 @@ from app.auth.dependencies import get_current_user
 from app.auth.operations import lock_user_and_verify_session
 from app.core.database import get_db
 from app.menus.display import format_menu_name
+from app.menus.food_kinds import get_menu_illustration_url
 from app.menus.models import Menu
 from app.recommend.common import (
     ALLERGEN_CATALOG_VERSION,
@@ -42,12 +43,13 @@ from app.users.models import User
 router = APIRouter(prefix="/api/recommendations", tags=["Recommendations"])
 
 
-def _to_random_menu_dto(menu: Menu) -> RandomMenuDTO:
+def _to_random_menu_dto(menu: Menu, image_url: str) -> RandomMenuDTO:
     return RandomMenuDTO(
         menu_id=menu.id,
         food_code=menu.food_code,
         name=format_menu_name(menu.name),
         base_name=menu.base_name,
+        image_url=image_url,
     )
 
 
@@ -127,10 +129,11 @@ def get_random_recommendation(
         user_id=user_id,
         extra_exclusions=exclusions,
     )
+    image_url = get_menu_illustration_url(db, result.menu.id)
     return ApiResponse(
         success=True,
         data=RandomRecommendResponse(
-            selected_menu=_to_random_menu_dto(result.menu),
+            selected_menu=_to_random_menu_dto(result.menu, image_url),
         ),
         message=None,
     )

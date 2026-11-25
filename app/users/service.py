@@ -41,6 +41,7 @@ from app.users.schemas import (
     MAX_DISLIKED_FOODS,
     NicknameUpdateRequest,
     UserMealCreateRequest,
+    UserMealHistoryItemResponse,
     UserMealItemResponse,
     UserMealMenuDTO,
     UserMealsResponse,
@@ -469,7 +470,16 @@ def get_my_meals(
     """로그인한 사용자가 먹은 음식 기록을 식사 일시 최신순으로 조회한다."""
     total_count = repository.count_user_meals(db, user_id)
     rows = repository.find_user_meals_with_menu(db, user_id, limit=limit, offset=offset)
-    items = [_to_user_meal_item_response(meal, menu) for meal, menu in rows]
+    items = [
+        UserMealHistoryItemResponse(
+            **_to_user_meal_item_response(meal, menu).model_dump(),
+            image_url=resolve_menu_illustration_url(
+                representative_image_url,
+                use_common_fallback=exception_menu_id is not None,
+            ),
+        )
+        for meal, menu, representative_image_url, exception_menu_id in rows
+    ]
     return UserMealsResponse(items=items, total_count=total_count)
 
 

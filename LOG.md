@@ -24,6 +24,21 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 #### API 변경
 
 - 수정: `GET /api/places/nearby`의 각 `places[]` 항목에 `google_place_id: string | null`을 추가했다. 기존 요청 형식, 카카오 장소 정보, 정렬·반경·개수 정책과 카카오 장애 시 503 동작은 유지한다.
+### #76 랜덤 메뉴 추천과 식사 기록 조회에 메뉴 일러스트 추가
+
+#### 변경 이유 및 내용
+
+- 랜덤 추천 결과와 식사 기록에서 홈과 같은 메뉴 일러스트를 표시할 수 있도록 음식 종류의 대표 그림 경로를 반환한다. 등록된 메뉴별 예외에 해당하거나 대표 파일을 사용할 수 없으면 공통 이미지를 반환한다.
+- 식사 기록은 조회 시점의 일러스트를 사용한다. 연결된 메뉴가 삭제된 기록은 저장된 메뉴 이름과 공통 이미지 경로를 반환한다. 기록 페이지와 일러스트 데이터는 한 SQL 쿼리로 함께 조회한다.
+
+#### 주요 변경 파일
+
+- `app/menus/food_kinds.py`, `app/recommend/router.py`, `app/recommend/schemas.py`, `app/users/repository.py`, `app/users/schemas.py`, `app/users/service.py`
+- `tests/test_random_pick.py`, `tests/test_user_meals.py`, `docs/USER_EXCLUSIONS_API.md`, `GLOSSARY.md`
+
+#### API 변경
+
+- `GET /api/recommendations/random`의 `data.selected_menu.image_url`과 `GET /api/users/me/meals`의 `data.items[].image_url`에 백엔드 상대 경로 문자열을 추가했다. `POST /api/users/me/meals`는 기존 응답 모델을 사용한다.
 
 #### DB 변경
 
@@ -40,6 +55,12 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 - Google Cloud에서 Places API (New)를 활성화하고 운영 서버의 고정 외부 IP 및 Places API (New)로 제한한 서버 키를 `GOOGLE_PLACES_API_KEY`에 설정한다. 고정 egress IP가 없으면 먼저 배포 네트워크를 준비해야 한다.
 - 프런트의 Places UI Kit에는 서버 키를 전달하지 말고 플랫폼별 제한을 적용한 별도 클라이언트 키를 사용한다.
+- 랜덤 추천, 식사 기록, 홈 카드와 일러스트 관련 테스트 104개 통과, 5개 건너뜀.
+- 전체 테스트 531개 통과, 40개 건너뜀, 1개 실패. 실패한 카카오 로그인 응답 테스트는 작업 전 `HEAD`에서도 `requires_reauth` 필드 불일치로 동일하게 실패했다.
+
+#### 남은 작업 및 주의 사항
+
+- 기존 카카오 로그인 응답 테스트의 예상 필드 집합을 별도로 확인해야 한다.
 
 ## 2026-11-23
 

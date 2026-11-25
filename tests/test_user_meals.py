@@ -13,7 +13,8 @@ from app.core.security import create_access_token
 from app.auth.models import AuthSession
 from tests.auth_helpers import session_token
 from app.main import app
-from app.menus.models import Menu, UserMeal
+from app.menus.food_kinds import DEFAULT_MENU_ILLUSTRATION_URL
+from app.menus.models import Menu, MenuIllustrationException, UserMeal
 from app.users import repository
 from app.users.models import User
 from app.users.schemas import UserMealCreateRequest
@@ -152,6 +153,7 @@ def test_record_meal_saves_to_user_meals_and_returns_formatted_menu_details(api)
     data = payload["data"]
     assert data["menu_id"] == gukbap.id
     assert data["menu_name"] == "콩나물국밥"
+    assert "image_url" not in data
     assert data["eaten_at"].endswith("Z") or data["eaten_at"].endswith("+00:00")
     assert data["created_at"].endswith("Z") or data["created_at"].endswith("+00:00")
     assert data["menu"] == {
@@ -307,6 +309,7 @@ def test_referential_integrity_preserves_meal_snapshot_on_menu_delete_and_cascad
     assert items[0]["menu_id"] is None
     assert items[0]["menu_name"] == resp.json()["data"]["menu_name"]
     assert items[0]["menu"] is None
+    assert items[0]["image_url"] == DEFAULT_MENU_ILLUSTRATION_URL
 
     # Authentication references must be explicitly removed before deleting a user.
     api.db.query(AuthSession).filter(AuthSession.user_id == api.user.id).delete()
@@ -319,7 +322,40 @@ def test_referential_integrity_preserves_meal_snapshot_on_menu_delete_and_cascad
     assert [row.user_id for row in remaining] == [api.other.id]
 
 
-def test_get_my_meals_uses_single_outer_join_without_n_plus_one(api):
+def test_get_my_meals_returns_current_illustration_for_each_record(api):
+    meal_ids = {}
+    for name, menu in api.menus.items():
+        response = api.client.post(URL, headers=api.headers, json={"menu_id": menu.id})
+        assert response.status_code == 201
+        meal_ids[name] = response.json()["data"]["id"]
+
+    gukbap_illustration_url = "/static/menu-illustrations/gukbap.png"
+    gukbap_kind = api.menus["gukbap"].food_kind
+    gukbap_kind.representative_image_url = gukbap_illustration_url
+    pasta = api.menus["pasta"]
+    pasta.food_kind.representative_image_url = "/static/menu-illustrations/pasta.png"
+    api.db.add(MenuIllustrationException(menu_id=pasta.id))
+    api.db.commit()
+
+    response = api.client.get(URL, headers=api.headers)
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert {item["id"]: item["image_url"] for item in items} == {
+        meal_ids["gukbap"]: gukbap_illustration_url,
+        meal_ids["chicken"]: DEFAULT_MENU_ILLUSTRATION_URL,
+        meal_ids["pasta"]: DEFAULT_MENU_ILLUSTRATION_URL,
+    }
+
+    gukbap_kind.representative_image_url = "/static/menu-illustrations/missing.png"
+    api.db.commit()
+
+    response = api.client.get(URL, headers=api.headers)
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    assert {item["image_url"] for item in items} == {DEFAULT_MENU_ILLUSTRATION_URL}
+
+
+def test_get_my_meals_loads_history_and_illustrations_without_n_plus_one(api):
     menus = list(api.menus.values())
     for idx in range(9):
         menu = menus[idx % len(menus)]
@@ -344,7 +380,7 @@ def test_get_my_meals_uses_single_outer_join_without_n_plus_one(api):
     assert response.status_code == 200
     assert len(response.json()["data"]["items"]) == 9
     select_statements = [stmt for stmt in statements if stmt.lstrip().upper().startswith("SELECT")]
-    # 1) users 인증 조회, 2) user_meals count 조회, 3) user_meals LEFT OUTER JOIN menus 조회
+    # 인증, 전체 건수, 페이지의 식사 기록과 일러스트 정보를 각각 한 번 조회한다.
     assert len(select_statements) <= 3
 
 

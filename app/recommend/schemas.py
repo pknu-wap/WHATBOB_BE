@@ -146,6 +146,7 @@ class RandomMenuDTO(BaseModel):
     food_code: str
     name: str
     base_name: str
+    image_url: str
 
 
 class RandomRecommendResponse(BaseModel):
