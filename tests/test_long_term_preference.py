@@ -45,7 +45,7 @@ def test_long_term_preference_default_settings():
     assert settings.ORDER_SHEET_LONG_TERM_MAX_SCORE == 0.25
 
 
-def test_activation_gate_same_day_multiple_likes_and_mixed_single_days_stay_zero():
+def test_positive_scores_require_repeated_reactions_on_different_days():
     ref = datetime(2026, 11, 24, 18, 0, tzinfo=KST)
 
     # 같은 한국 날짜에 우동 메뉴 3건 좋아요 -> 날짜는 1일뿐이므로 보정 0점
@@ -57,13 +57,34 @@ def test_activation_gate_same_day_multiple_likes_and_mixed_single_days_stay_zero
     scores_same_day = calculate_long_term_preference_scores(same_day_likes, reference_time=ref)
     assert scores_same_day.get("우동", 0.0) == 0.0
 
-    # 서로 다른 날에 좋아요 1일 + 싫어요 1일 -> 어느 방향도 2일 미만이라 보정 0점
+    # 가중합이 양수여도 어느 방향도 2일에 못 미치면 가점은 0점
     mixed_single_days = [
-        FoodKindReaction(food_kind_key="우동", is_satisfied=True, reacted_at=ref - timedelta(days=2)),
-        FoodKindReaction(food_kind_key="우동", is_satisfied=False, reacted_at=ref - timedelta(days=1)),
+        FoodKindReaction("우동", True, ref - timedelta(days=1)),
+        FoodKindReaction("우동", False, ref - timedelta(days=2)),
     ]
     scores_mixed = calculate_long_term_preference_scores(mixed_single_days, reference_time=ref)
     assert scores_mixed.get("우동", 0.0) == 0.0
+
+
+def test_first_dislike_applies_immediately_and_repeated_dislike_restores_the_cap():
+    ref = datetime(2026, 11, 24, 12, 0, tzinfo=KST)
+    first_dislike = FoodKindReaction("우동", False, ref)
+    tomorrow = ref + timedelta(days=1)
+    second_dislike = FoodKindReaction("우동", False, tomorrow)
+
+    assert calculate_long_term_preference_scores([first_dislike], reference_time=ref)["우동"] == -0.25
+    assert calculate_long_term_preference_scores([first_dislike], reference_time=tomorrow)["우동"] == pytest.approx(
+        -0.25 * 0.5 ** (1 / 42), abs=1e-6,
+    )
+    assert calculate_long_term_preference_scores(
+        [first_dislike], reference_time=ref + timedelta(days=42),
+    )["우동"] == -0.125
+    assert calculate_long_term_preference_scores(
+        [first_dislike, second_dislike], reference_time=tomorrow,
+    )["우동"] == -0.25
+
+    previous_like = FoodKindReaction("우동", True, ref - timedelta(days=42))
+    assert calculate_long_term_preference_scores([previous_like, first_dislike], reference_time=ref)["우동"] == -0.125
 
 
 def test_two_consecutive_kst_days_likes_yield_max_boost_and_respect_kst_midnight():
@@ -442,9 +463,9 @@ def test_single_dislike_keeps_menu_as_candidate_and_does_not_leak_to_question_we
         user_id=user.id,
     )
 
-    # 다음 주문서에서도 우동은 후보에서 제외되지 않고, 1일 반응뿐이므로 보정 0점으로 순위 유지
+    # 같은 날 다음 주문서에서 우동이 비빔밥 뒤로 내려간다.
     second = create_order_sheet_recommendation(db, _neutral_request(q_map), user_id=user.id)
-    assert [m.base_name for m in second.recommended_menus] == ["우동", "비빔밥"]
+    assert [m.base_name for m in second.recommended_menus] == ["비빔밥", "우동"]
 
     # 질문 가중치로 전파되지 않음
     for cluster, q in q_map.items():

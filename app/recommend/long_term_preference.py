@@ -1,4 +1,4 @@
-"""Spec #77 / Ticket #83: 반복된 메뉴 평가를 음식 종류별 장기 취향 점수로 계산·조회하는 모듈."""
+"""Spec #77 / Ticket #83: 메뉴 평가를 음식 종류별 장기 취향 점수로 계산·조회하는 모듈."""
 
 from __future__ import annotations
 
@@ -43,11 +43,11 @@ def calculate_long_term_preference_scores(
     exclude_recommendation_id: int | None = None,
 ) -> dict[str, float]:
     """
-    음식 종류별 반복 좋아요·싫어요 반응으로부터 장기 취향 보정 점수([-max_score, +max_score])를 계산한다.
+    음식 종류별 좋아요·싫어요 반응으로부터 장기 취향 보정 점수([-max_score, +max_score])를 계산한다.
 
-    Spec #77 §3·§6(#83):
-    - 한국 날짜(Asia/Seoul) 기준으로 같은 종류에 좋아요를 남긴 서로 다른 날짜 수 또는
-      싫어요를 남긴 서로 다른 날짜 수가 min_days(초기 2) 이상일 때만 활성화한다.
+    - 가중합이 음수면 싫어요 한 건부터 감점한다.
+    - 가중합이 0 이상이면 한국 날짜(Asia/Seoul) 기준으로 같은 방향의 반응이 서로 다른
+      min_days(초기 2)일 이상 쌓였을 때 활성화한다.
     - 같은 날 서로 다른 메뉴에 남긴 반응은 각각 가중치를 합산하되 날짜는 하루로 센다.
     - 반응 한 건의 가중치는 0.5 ** (경과 한국 일수 / half_life_days)이며,
       좋아요는 양수, 싫어요는 음수로 합산한 뒤 [-1.0, +1.0]로 제한하고 max_score(초기 0.25)를 곱한다.
@@ -107,7 +107,7 @@ def calculate_long_term_preference_scores(
                 dislike_days.add(reaction_kst_date)
                 net_weight -= weight
 
-        if len(like_days) < effective_min_days and len(dislike_days) < effective_min_days:
+        if net_weight >= 0.0 and max(len(like_days), len(dislike_days)) < effective_min_days:
             continue
 
         clamped = max(-1.0, min(1.0, net_weight))

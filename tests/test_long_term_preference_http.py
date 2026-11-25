@@ -145,7 +145,7 @@ def test_http_single_dislike_same_day_likes_consecutive_days_and_excludes_reject
         d1 = r1.json()["data"]
         assert [m["base_name"] for m in d1["recommended_menus"]] == ["비빔밥", "라면", "짜장면", "우동"]
 
-        # 2. 우동에 한 번 싫어요 -> 다음 주문서에서도 후보에서 제외되지 않는다
+        # 2. 우동에 한 번 싫어요 -> 같은 날 다음 주문서에 -0.25점이 적용된다.
         fb1 = client.post(
             f"/api/recommendations/{d1['recommendation_id']}/feedback",
             json={"selected_menu_id": udon_a.id, "is_satisfied": False},
@@ -157,8 +157,17 @@ def test_http_single_dislike_same_day_likes_consecutive_days_and_excludes_reject
         assert r2.status_code == 201
         d2 = r2.json()["data"]
         assert [m["base_name"] for m in d2["recommended_menus"]] == ["비빔밥", "라면", "짜장면", "우동"]
+        udon_adjustment = (
+            db.query(RecommendationItemSnapshot.personal_adjustment)
+            .filter(
+                RecommendationItemSnapshot.recommendation_id == d2["recommendation_id"],
+                RecommendationItemSnapshot.menu_id == udon_a.id,
+            )
+            .scalar()
+        )
+        assert udon_adjustment == -0.25
 
-        # 3. 같은 날 우동 좋아요 2건 (서로 다른 주문서) -> 같은 날짜 1일이므로 다음 주문서 보정 0점
+        # 3. 같은 날 우동 좋아요 2건으로 가중합이 양수가 되어도 가점 조건은 아직 충족하지 않는다.
         r3 = client.post("/api/recommendations/order-sheet", json=_answers_payload(q_map))
         assert r3.status_code == 201
         d3 = r3.json()["data"]
