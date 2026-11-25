@@ -13,8 +13,12 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.mysql import DATETIME
 from sqlalchemy.orm import relationship
 from app.core.database import Base
+
+
+ORDER_SHEET_TIMESTAMP = DateTime().with_variant(DATETIME(fsp=6), "mysql")
 
 
 class FoodKind(Base):
@@ -234,16 +238,161 @@ class QuestionSelectionState(Base):
                         onupdate=lambda: datetime.now(timezone.utc))
 
 
+PERSONAL_INITIAL_LIST = "personal_initial"
+PERSONAL_RETRY_LIST = "personal_retry"
+GROUP_ORDER_SHEET_LIST = "group"
+
+
 class Recommendation(Base):
     """주문서 추천 요청 및 결과 이력 테이블"""
     __tablename__ = "recommendations"
+    __table_args__ = (
+        Index("ix_recommendations_user_sheet_scope_created", "user_id", "order_sheet_list_scope", "created_at"),
+    )
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True)
     shown_question_ids = Column(JSON, nullable=False, default=list)
     answers_json = Column(JSON, nullable=False, default=list)
     recommended_menu_ids = Column(JSON, nullable=False, default=list)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    initial_candidate_count = Column(Integer, nullable=True)
+    order_sheet_list_scope = Column(String(20), nullable=True)
+    list_rejected_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True, index=True)
+    closed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True, index=True)
+    created_at = Column(ORDER_SHEET_TIMESTAMP, default=lambda: datetime.now(timezone.utc))
+
+
+class OrderSheetIssuance(Base):
+    """개인 주문서 발급 이력 및 동일 발급 재전송 멱등성 테이블"""
+    __tablename__ = "order_sheet_issuances"
+    __table_args__ = (
+        UniqueConstraint("user_id", "issuance_key", name="uq_order_sheet_issuances_user_key"),
+        Index("ix_order_sheet_issuances_user_created", "user_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    order_sheet_id = Column(String(64), unique=True, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=True)
+    issuance_key = Column(String(128), nullable=True, index=True)
+    question_ids_json = Column(JSON, nullable=False, default=list)
+    questions_snapshot_json = Column(JSON, nullable=False, default=list)
+    question_roles_json = Column(JSON, nullable=False, default=dict)
+    total_count = Column(Integer, nullable=False, default=9)
+    exploitation_count = Column(Integer, nullable=False, default=9)
+    exploration_count = Column(Integer, nullable=False, default=0)
+    status = Column(String(20), nullable=False, default="ISSUED", index=True)
+    recommendation_id = Column(
+        Integer,
+        ForeignKey("recommendations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    created_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False, default=lambda: datetime.now(timezone.utc))
+    completed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
+
+
+class PersonalOrderSheetQuestionExperiment(Base):
+    """One user's comparison of two questions in the same score slot."""
+
+    __tablename__ = "personal_order_sheet_question_experiments"
+    __table_args__ = (
+        UniqueConstraint("user_id", "active", name="uq_personal_sheet_experiment_active"),
+        CheckConstraint("active IS NULL OR active = 1", name="ck_personal_sheet_experiment_active"),
+        Index("ix_personal_sheet_experiment_pending", "decision_requested_at", "id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    slot_key = Column(String(50), nullable=False)
+    control_question_id = Column(Integer, nullable=False)
+    variant_question_id = Column(Integer, nullable=False)
+    control_questions_json = Column(JSON, nullable=False)
+    variant_questions_json = Column(JSON, nullable=False)
+    question_roles_json = Column(JSON, nullable=False)
+    active = Column(Boolean, nullable=True, default=True)
+    created_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False, default=lambda: datetime.now(timezone.utc))
+    completed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
+    adopted = Column(Boolean, nullable=True)
+    decision_requested_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
+    decision_revision = Column(Integer, nullable=False, default=0, server_default="0")
+    decision_metrics_json = Column(JSON, nullable=True)
+
+
+class PersonalOrderSheetQuestionAssignment(Base):
+    """The question arm assigned to one distinct issuance."""
+
+    __tablename__ = "personal_order_sheet_question_assignments"
+    __table_args__ = (
+        UniqueConstraint("experiment_id", "pair_number", "arm", name="uq_personal_sheet_assignment_arm"),
+        CheckConstraint("arm IN ('control', 'variant')", name="ck_personal_sheet_assignment_arm"),
+    )
+
+    issuance_id = Column(Integer, ForeignKey("order_sheet_issuances.id", ondelete="CASCADE"), primary_key=True)
+    experiment_id = Column(
+        Integer,
+        ForeignKey("personal_order_sheet_question_experiments.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    pair_number = Column(Integer, nullable=False)
+    arm = Column(String(7), nullable=False)
+
+
+class PersonalOrderSheetQuestionOverride(Base):
+    """An adopted personal question, keyed by the original score slot."""
+
+    __tablename__ = "personal_order_sheet_question_overrides"
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    slot_key = Column(String(50), primary_key=True)
+    question_id = Column(Integer, nullable=False)
+    adopted_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class CommonOrderSheetQuestionExperiment(Base):
+    """A shared comparison of two first-order-sheet forms and its final decision."""
+
+    __tablename__ = "common_order_sheet_question_experiments"
+    __table_args__ = (
+        UniqueConstraint("active", name="uq_common_sheet_experiment_active"),
+        UniqueConstraint("slot_key", "variant_question_id", name="uq_common_sheet_experiment_variant"),
+        CheckConstraint("active IS NULL OR active = 1", name="ck_common_sheet_experiment_active"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    slot_key = Column(String(50), nullable=False)
+    control_question_id = Column(Integer, nullable=False)
+    variant_question_id = Column(Integer, nullable=False)
+    control_questions_json = Column(JSON, nullable=False)
+    variant_questions_json = Column(JSON, nullable=False)
+    question_roles_json = Column(JSON, nullable=False)
+    score_weights_json = Column(JSON, nullable=False)
+    ranking_rule_version = Column(String(50), nullable=False)
+    submissions_per_arm = Column(Integer, nullable=False)
+    reaction_window_hours = Column(Integer, nullable=False)
+    active = Column(Boolean, nullable=True, default=True)
+    created_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False)
+    completed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
+    adopted = Column(Boolean, nullable=True)
+    cohorts_json = Column(JSON, nullable=False, default=dict)
+    decision_metrics_json = Column(JSON, nullable=True)
+
+
+class CommonOrderSheetQuestionAssignment(Base):
+    """A randomized assignment attached to the user's first order-sheet issuance."""
+
+    __tablename__ = "common_order_sheet_question_assignments"
+    __table_args__ = (
+        Index("ix_common_sheet_assignment_experiment_arm", "experiment_id", "arm"),
+        CheckConstraint("arm IN ('control', 'variant')", name="ck_common_sheet_assignment_arm"),
+    )
+
+    issuance_id = Column(Integer, ForeignKey("order_sheet_issuances.id", ondelete="CASCADE"), primary_key=True)
+    experiment_id = Column(
+        Integer,
+        ForeignKey("common_order_sheet_question_experiments.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    arm = Column(String(7), nullable=False)
 
 
 class RecommendationFeedback(Base):
@@ -261,6 +410,8 @@ class RecommendationFeedback(Base):
     )
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True)
     selected_menu_id = Column(Integer, ForeignKey("menus.id", ondelete="SET NULL"), nullable=True)
+    food_kind_id = Column(Integer, ForeignKey("food_kinds.id", ondelete="SET NULL"), index=True, nullable=True)
+    exposure_rank = Column(Integer, nullable=True)
     menu_key = Column(String(100), nullable=True, index=True)
     menu_base_name = Column(String(100), nullable=True)
     menu_main_ingredient = Column(String(30), nullable=True)
@@ -269,7 +420,7 @@ class RecommendationFeedback(Base):
 
     # 질문별 조건 일치 여부: {질문 ID 문자열: 1.0(일치) 또는 0.0(불일치)}.
     answer_match_results = Column("feature_match_vector", JSON, nullable=False, default=dict)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(ORDER_SHEET_TIMESTAMP, default=lambda: datetime.now(timezone.utc))
 
 
 class RecommendationFeedbackState(Base):
@@ -289,6 +440,8 @@ class RecommendationFeedbackState(Base):
     )
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     selected_menu_id = Column(Integer, ForeignKey("menus.id", ondelete="SET NULL"), nullable=True)
+    food_kind_id = Column(Integer, ForeignKey("food_kinds.id", ondelete="SET NULL"), index=True, nullable=True)
+    exposure_rank = Column(Integer, nullable=True)
     menu_key = Column(String(100), nullable=False)
     menu_base_name = Column(String(100), nullable=False)
     menu_main_ingredient = Column(String(30), nullable=False, default="other")
@@ -336,3 +489,104 @@ class RecommendationItemSnapshot(Base):
     feature_schema_version = Column(Integer, nullable=False, default=1)
     features_json = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class OrderSheetHardFilterTrace(Base):
+    """주문서별 하드필터 적용 순서·질문·답변 및 단계별 전후 후보 수 점검 기록 테이블 (Spec #77 / #87)"""
+    __tablename__ = "order_sheet_hard_filter_traces"
+    __table_args__ = (
+        CheckConstraint("step_order >= 1", name="ck_order_sheet_hf_traces_step_order_positive"),
+        UniqueConstraint("recommendation_id", "step_order", name="uq_order_sheet_hf_traces_rec_step"),
+        Index("ix_order_sheet_hf_traces_user_created", "user_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    recommendation_id = Column(
+        Integer,
+        ForeignKey("recommendations.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    step_order = Column(Integer, nullable=False)
+    question_id = Column(Integer, index=True, nullable=False)
+    question_code = Column(String(80), index=True, nullable=False)
+    cluster_key = Column(String(50), index=True, nullable=False)
+    option_id = Column(String(80), nullable=False)
+    before_count = Column(Integer, nullable=False)
+    after_count = Column(Integer, nullable=False)
+    before_kind_count = Column(Integer, nullable=False)
+    after_kind_count = Column(Integer, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class OrderSheetReplaySnapshot(Base):
+    """과거 개인 주문서의 첫 추천 순위 재현용 불변 스냅샷 테이블 (Spec #77 §4 / #88)"""
+    __tablename__ = "order_sheet_replay_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "recommendation_id",
+            name="uq_order_sheet_replay_snapshots_recommendation_id",
+        ),
+        UniqueConstraint(
+            "order_sheet_id",
+            name="uq_order_sheet_replay_snapshots_order_sheet_id",
+        ),
+        Index(
+            "ix_order_sheet_replay_snapshots_user_completed",
+            "user_id",
+            "completed_at",
+        ),
+        Index(
+            "ix_order_sheet_replay_snapshots_expires_at",
+            "expires_at",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    recommendation_id = Column(
+        Integer,
+        ForeignKey("recommendations.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    order_sheet_id = Column(
+        Integer,
+        ForeignKey("order_sheet_issuances.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    completed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False)
+    expires_at = Column(ORDER_SHEET_TIMESTAMP, nullable=False)
+    question_answer_version = Column(String(64), nullable=False, default="spec77_qa_v1")
+    ranking_rule_version = Column(String(64), nullable=False, default="spec77_v1")
+    max_display_count = Column(Integer, nullable=False, default=5)
+    shown_menu_ids_json = Column(JSON, nullable=False, default=list)
+    score_question_ids_json = Column(JSON, nullable=False, default=list)
+    answers_json = Column(JSON, nullable=False, default=list)
+    candidates_json = Column(JSON, nullable=False, default=list)
+    tie_break_inputs_json = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class OrderSheetQuestionReview(Base):
+    """Coalesced replacement review work and the latest published result for a user."""
+
+    __tablename__ = "order_sheet_question_reviews"
+    __table_args__ = (Index("ix_order_sheet_question_reviews_pending", "pending_at", "user_id"),)
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    pending_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
+    revision = Column(Integer, nullable=False, default=1)
+    reviewed_at = Column(ORDER_SHEET_TIMESTAMP, nullable=True)
+    result_json = Column(JSON, nullable=True)

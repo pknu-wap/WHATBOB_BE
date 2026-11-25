@@ -265,19 +265,34 @@ OFFICIAL_ALLERGEN_RULES: dict[str, tuple[str, ...]] = {
     "잣": ("잣",),
     # 기존 도메인 상위 호환 유지
     "해산물": (
-        "해물", "새우", "오징어", "조개", "홍합", "바지락", "굴", "전복", "게", "생선", "참치",
-        "고등어", "갈치", "황태", "어묵", "회", "홍어", "가오리", "연어", "낙지", "쭈꾸미",
-        "주꾸미", "아귀", "코다리", "명태", "동태", "조기", "장어"
+        "해물", "새우", "쉬림프", "감바스", "감베로니", "오징어", "조개", "홍합", "바지락",
+        "굴", "전복", "꽃게", "대게", "홍게", "털게", "참게", "킹크랩", "크랩", "게살",
+        "간장게장", "양념게장", "게장", "게국지", "게맛살", "멍게", "랍스타", "랍스터",
+        "생선", "참치", "고등어", "갈치", "황태", "어묵", "홍어", "가오리", "연어",
+        "낙지", "쭈꾸미", "주꾸미", "아귀", "코다리", "명태", "명란", "동태", "조기", "장어",
+        "회덮밥", "회냉면", "물회", "모듬회", "생선회", "활어회",
     ),
 }
+
+NON_DUCK_ORI_TERMS: tuple[str, ...] = (
+    "오리지널", "오리지날", "오리진", "오리엔탈", "오리엔테", "가오리", "회오리", "칼로리",
+)
+
+
+def strip_non_duck_ori(text: str) -> str:
+    """'오리' 부분 문자열이 오리고기와 무관한 단어(오리지널·가오리 등)에 오탐되지 않도록 제거한다."""
+    cleaned = text
+    for term in NON_DUCK_ORI_TERMS:
+        cleaned = cleaned.replace(term, "")
+    return cleaned
 
 
 def derive_allergens_from_text(text: str) -> list[str]:
     """식약처 고시 19대 기준 및 주요 식품 키워드 기반으로 알레르기 태그를 추출합니다."""
-    text_no_stingray = text.replace("가오리", "")
+    text_no_ori = strip_non_duck_ori(text)
     tags: list[str] = []
     for allergen_name, keywords in OFFICIAL_ALLERGEN_RULES.items():
-        target = text_no_stingray if allergen_name == "닭고기" else text
+        target = text_no_ori if allergen_name == "닭고기" else text
         if any(kw in target for kw in keywords):
             tags.append(allergen_name)
     return tags
@@ -294,8 +309,8 @@ def _menu_search_blob(menu: Menu) -> tuple[str, str, set[str]]:
     allergen_list = menu.allergen_tags if isinstance(menu.allergen_tags, list) else []
     allergen_set = {str(t).strip() for t in allergen_list if str(t).strip()}
     raw_text = " ".join(fields + list(allergen_set)).lower()
-    no_stingray = raw_text.replace("가오리", "")
-    return raw_text, no_stingray, allergen_set
+    no_non_duck_ori = strip_non_duck_ori(raw_text)
+    return raw_text, no_non_duck_ori, allergen_set
 
 
 ALLERGEN_MAIN_INGREDIENT_MAP: dict[str, set[str]] = {
@@ -317,7 +332,7 @@ UNABLE_RULE_SPEC: dict[str, dict[str, Any]] = {
         "keywords": OFFICIAL_ALLERGEN_RULES["쇠고기(소고기)"] + ("쇠고기", "스테이크", "사골"),
     },
     "poultry": {
-        "main_ingredients": {"chicken"},
+        "main_ingredients": {"chicken", "poultry"},
         "allergen_tags": {"닭고기"},
         "keywords": OFFICIAL_ALLERGEN_RULES["닭고기"] + ("오리고기", "오리", "가금류"),
         "strip_stingray": True,

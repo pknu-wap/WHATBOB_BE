@@ -7,8 +7,10 @@ from starlette.concurrency import run_in_threadpool
 
 from app.auth.dependencies import get_current_user
 from app.core.database import get_db
+from app.recommend.schemas import ApiResponse, OrderSheetNoResultsResponse
 from app.rooms.rounds import (
     decide_room_round_departure,
+    get_room_round_no_results_suggestions,
     get_room_round_questions,
     start_room_round,
     submit_room_round_order_sheet,
@@ -24,6 +26,7 @@ from app.rooms.schemas import (
     RoomMemberLeaveResponse,
     RoomOperationResponse,
     RoomOrderSheetCompleteResponse,
+    RoomOrderSheetNoResultsRequest,
     RoomOrderSheetSubmitRequest,
     RoomRoundCommandResponse,
     RoomRoundOrderSheetSubmitResponse,
@@ -260,6 +263,21 @@ def get_room_round_questions_endpoint(
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     return get_room_round_questions(db=db, room_public_id=room_id, user=current_user)
+
+
+@router.post(
+    "/{room_id}/rounds/current/order-sheet/no-results",
+    response_model=ApiResponse[OrderSheetNoResultsResponse],
+    status_code=status.HTTP_200_OK,
+)
+def get_room_round_no_results_suggestions_endpoint(
+    room_id: str,
+    request: RoomOrderSheetNoResultsRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    result = get_room_round_no_results_suggestions(db, room_id, current_user, request)
+    return ApiResponse(success=True, data=result)
 
 
 @router.post(

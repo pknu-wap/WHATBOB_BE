@@ -21,7 +21,7 @@ from app.menus.illustrations import (
 )
 from app.menus.models import FoodKind, Menu, OrderSheetQuestion
 from app.menus.popular import ensure_initial_popular_food_kinds
-from app.recommend.common import derive_allergens_from_text
+from app.recommend.common import derive_allergens_from_text, strip_non_duck_ori
 from app.recommend.order_sheet import rank_and_score_question_pool
 from app.recommend.question_pool import (
     MAX_QUESTION_TEXT_LENGTH,
@@ -87,16 +87,40 @@ def _derive_meal_type(cat_large: str, name: str = "") -> str:
     return "main_meal"
 
 
+DUMPLING_AND_RICE_CAKE_SOUPS = {"떡국", "만두국", "만둣국", "떡만두국", "떡만둣국"}
+
+
 def _derive_has_soup(cat_large: str, name: str) -> bool:
+    base_name = name.partition("_")[0].strip()
+    if base_name in DUMPLING_AND_RICE_CAKE_SOUPS:
+        return True
+    if base_name in {"닭볶음탕", "닭도리탕", "닭찜", "떡볶이", "라볶이"}:
+        return True
+    if base_name == "닭튀김":
+        return False
     if cat_large in ("국 및 탕류", "찌개 및 전골류", "죽 및 스프류"):
         return True
-    soup_keywords = ("국밥", "해장국", "설렁탕", "곰탕", "갈비탕", "삼계탕", "라면", "칼국수", "짬뽕", "우동", "쌀국수", "전골", "훠궈", "마라탕", "수제비", "냉면", "물냉면")
+    soup_keywords = (
+        "국밥", "해장국", "설렁탕", "곰탕", "갈비탕", "삼계탕",
+        "라면", "라멘", "탄탄면", "칼국수", "짬뽕", "우동", "쌀국수",
+        "전골", "훠궈", "마라탕", "수제비", "냉면", "물냉면",
+        "물회", "잔치국수", "김치말이국수", "온면", "물밀면",
+        "콩국수", "올갱이국수", "장국국수", "기스면", "울면",
+    )
     if "비빔냉면" in name or "회냉면" in name or "볶음" in name:
         return False
     return any(kw in name for kw in soup_keywords)
 
 
-def _derive_cooking_style(cat_large: str) -> str:
+def _derive_cooking_style(cat_large: str, name: str = "") -> str:
+    if cat_large == "면 및 만두류":
+        base_name = name.partition("_")[0].strip()
+        if base_name in DUMPLING_AND_RICE_CAKE_SOUPS:
+            return "soup_stew"
+        if name == "만두_군만두" or base_name in {"군만두", "만두탕수"}:
+            return "fried_pan"
+        if base_name.endswith("만두"):
+            return "other"
     mapping = {
         "밥류": "rice",
         "죽 및 스프류": "rice",
@@ -120,13 +144,30 @@ def _derive_cooking_style(cat_large: str) -> str:
 
 def _derive_main_ingredient(cat_medium: str, cat_small: str, name: str) -> str:
     combined = f"{cat_medium} {cat_small} {name}"
-    if any(k in combined for k in ("해물", "참치", "바지락", "오징어", "낙지", "쭈꾸미", "주꾸미", "새우", "홍합", "황태", "동태", "생선", "고등어", "갈치", "조기", "장어", "어묵", "회", "게", "굴", "조개", "전복", "아귀", "코다리", "연어", "홍어", "가오리", "서대", "멸치", "북어", "명태", "꽁치", "삼치", "다슬기", "재첩", "골뱅이", "문어", "꽃게", "대하", "바닷가재")):
+    if any(k in combined for k in (
+        "해물", "참치", "바지락", "오징어", "낙지", "쭈꾸미", "주꾸미", "새우", "쉬림프",
+        "감바스", "감베로니", "홍합", "황태", "동태", "생선", "고등어", "갈치", "조기",
+        "장어", "어묵", "굴", "조개", "전복", "아귀", "코다리", "연어", "홍어", "가오리",
+        "서대", "멸치", "북어", "명태", "명란", "꽁치", "삼치", "다슬기", "재첩", "골뱅이",
+        "문어", "꽃게", "대게", "홍게", "털게", "참게", "킹크랩", "크랩", "게살", "게장",
+        "게국지", "게맛살", "멍게", "대하", "바닷가재", "랍스타", "랍스터",
+        "회덮밥", "회냉면", "물회", "모듬회", "생선회", "활어회",
+    )):
         return "seafood"
-    if any(k in combined for k in ("소고기", "한우", "차돌", "불고기", "갈비", "육회", "스테이크", "설렁탕", "곰탕", "도가니", "꼬리", "육개장", "선지", "곱창")):
+    beef_text = combined.replace("런천미트", "")
+    if any(k in beef_text for k in (
+        "소고기", "한우", "차돌", "불고기", "갈비", "육회", "스테이크",
+        "설렁탕", "곰탕", "도가니", "꼬리", "육개장", "선지", "곱창",
+        "비프", "미트", "볼로네제", "라구",
+    )):
         return "beef"
-    if any(k in combined for k in ("돼지", "삼겹", "제육", "돈까스", "돈가스", "족발", "보쌈", "탕수육", "햄", "베이컨", "소시지", "페퍼로니", "순대", "감자탕", "뼈해장국", "부대찌개", "폭찹", "수육")):
+    if any(k in combined for k in (
+        "돼지", "삼겹", "제육", "돈까스", "돈가스", "족발", "보쌈", "탕수육",
+        "햄", "베이컨", "소시지", "소세지", "페퍼로니", "살라미", "잠봉",
+        "런천미트", "돈코츠", "포크", "순대", "감자탕", "뼈해장국", "부대찌개", "폭찹", "수육",
+    )):
         return "pork"
-    if any(k in combined.replace("가오리", "") for k in ("닭", "치킨", "오리", "삼계", "백숙", "칠면조", "윙", "봉")):
+    if any(k in strip_non_duck_ori(combined) for k in ("닭", "치킨", "오리", "삼계", "백숙", "칠면조", "치킨윙", "치킨봉", "윙봉")):
         return "poultry"
     if any(k in combined for k in ("채소", "두부", "콩나물", "버섯", "호박", "무", "감자", "나물", "비빔", "시금치", "미역", "부추", "오이", "당근", "연근", "우엉", "가지", "팥", "흑임자", "현미", "흑미", "고구마", "옥수수", "양배추", "브로콜리", "토마토", "샐러드")):
         return "veggie_tofu"
@@ -135,8 +176,18 @@ def _derive_main_ingredient(cat_medium: str, cat_small: str, name: str) -> str:
     return "other"
 
 
+SWEET_TTEOKBOKKI_KEYWORDS = ("궁중", "달콤", "간장", "짜장", "까르보", "로제", "순한맛")
+
+
 def _derive_flavor_intensity(cat_medium: str, name: str, sodium_mg: Optional[float], sugar_g: Optional[float]) -> str:
     combined = f"{cat_medium} {name}"
+    base_name = name.partition("_")[0].strip()
+    if (
+        base_name == "떡볶이"
+        and any(k in name for k in SWEET_TTEOKBOKKI_KEYWORDS)
+        and not any(k in name for k in ("매운", "매콤", "마라", "맵"))
+    ):
+        return "sweet_savory"
     spicy_keywords = ("고추장", "고춧가루", "김치", "배추김치", "매운", "짬뽕", "훠궈", "마라", "탄탄면", "쫄면", "떡볶이", "불닭", "육개장", "해물찜", "아귀찜", "양념", "비빔", "회무침", "제육", "닭발", "쭈꾸미")
     if any(k in combined for k in spicy_keywords) or (sodium_mg is not None and sodium_mg >= 450):
         return "spicy_bold"
@@ -282,7 +333,7 @@ def parse_and_clean_csv(
                 "origin_type": _derive_origin_type(origin_raw, company),
                 "meal_type": _derive_meal_type(cat_large, name),
                 "has_soup": _derive_has_soup(cat_large, name),
-                "cooking_style": _derive_cooking_style(cat_large),
+                "cooking_style": _derive_cooking_style(cat_large, name),
                 "main_ingredient": _derive_main_ingredient(cat_medium, cat_small, name),
                 "flavor_intensity": _derive_flavor_intensity(cat_medium, name, sodium_mg, sugar_g),
                 "temperature": "hot" if _is_meal_bread(cat_large, name) else _derive_temperature(cat_large, name),

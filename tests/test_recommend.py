@@ -93,7 +93,8 @@ def test_csv_parser_and_large_question_pool_generation():
     for q in pool:
         assert "question_code" in q
         assert "cluster_key" in q
-        assert len(q["options"]) == 3
+        expected_opt_count = 4 if q["cluster_key"] == "cooking_style" else 3
+        assert len(q["options"]) == expected_opt_count
         assert 1 <= len(q["question_text"]) <= 24
 
 
@@ -198,7 +199,7 @@ def test_order_sheet_raises_when_no_candidates_remain(seeded_db):
 
 
 def test_feedback_accumulation_and_weight_recalculation(seeded_db):
-    """4~5단계: 누적 사용자 피드백 통계로 질문 중요도가 재계산되는지 검증"""
+    """Spec #77 (#79): 단일 메뉴 피드백은 노출 위치와 함께 멱등 기록되며 질문 전역 가중치로 전파되지 않는다."""
     q_soup = (
         seeded_db.query(OrderSheetQuestion)
         .filter(OrderSheetQuestion.cluster_key == "has_soup")
@@ -212,6 +213,7 @@ def test_feedback_accumulation_and_weight_recalculation(seeded_db):
         .first()
     )
     initial_soup_weight = float(q_soup.importance_weight)
+    initial_soup_positive = int(q_soup.positive_count or 0)
 
     rec_resp = submit_order_sheet(
         request=OrderSheetRecommendRequest(
@@ -227,6 +229,7 @@ def test_feedback_accumulation_and_weight_recalculation(seeded_db):
     rec_id = rec_resp.data.recommendation_id
     top_menu_id = rec_resp.data.recommended_menus[0].menu_id
 
+    feedback_ids = []
     for _ in range(4):
         fb_resp = submit_recommendation_feedback(
             recommendation_id=rec_id,
@@ -237,12 +240,22 @@ def test_feedback_accumulation_and_weight_recalculation(seeded_db):
             db=seeded_db,
         )
         assert fb_resp.success is True
+        assert fb_resp.data.updated_weights == {}
+        assert fb_resp.data.exposure_rank == 1
+        feedback_ids.append(fb_resp.data.feedback_id)
 
+    # 동일 클릭 재전송은 단일 반응으로 집계되며 질문 가중치·긍정 카운트를 변경하지 않는다.
+    assert len(set(feedback_ids)) == 1
     seeded_db.refresh(q_soup)
-    assert q_soup.positive_count >= 4
-    assert float(q_soup.importance_weight) != initial_soup_weight
+    assert int(q_soup.positive_count or 0) == initial_soup_positive
+    assert float(q_soup.importance_weight) == initial_soup_weight
     assert seeded_db.query(Recommendation).count() >= 1
-    assert seeded_db.query(RecommendationFeedback).count() >= 4
+    assert (
+        seeded_db.query(RecommendationFeedback)
+        .filter(RecommendationFeedback.recommendation_id == rec_id)
+        .count()
+        == 1
+    )
 
 
 def test_developer_weight_tuning_endpoint(seeded_db):

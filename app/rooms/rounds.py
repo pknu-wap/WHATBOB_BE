@@ -8,6 +8,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.auth.operations import lock_user_and_verify_session
+from app.core.config import settings
 from app.menus.display import format_menu_name
 from app.menus.models import Menu
 from app.recommend.common import (
@@ -17,13 +18,20 @@ from app.recommend.common import (
     collect_user_exclusion_keywords,
     filter_available_menus,
 )
+from app.recommend.common_question_experiments import load_common_question_overrides
+from app.recommend.no_results import suggest_no_result_answer_changes
 from app.recommend.order_sheet import (
-    DEFAULT_EXPLOITATION_COUNT,
-    DEFAULT_TOTAL_QUESTIONS,
     create_order_sheet_recommendation,
+    load_order_sheet_question_pool,
     select_order_sheet_questions,
 )
-from app.recommend.schemas import AnswerItemRequest, OrderSheetQuestionDTO, OrderSheetRecommendRequest
+from app.recommend.question_experiments import apply_question_overrides
+from app.recommend.schemas import (
+    AnswerItemRequest,
+    OrderSheetNoResultsResponse,
+    OrderSheetQuestionDTO,
+    OrderSheetRecommendRequest,
+)
 from app.rooms.departures import lock_order_sheets, lock_room, lock_room_members
 from app.rooms.models import (
     Room,
@@ -36,6 +44,7 @@ from app.rooms.models import (
 )
 from app.rooms.schemas import (
     RoomDepartureDecisionRequest,
+    RoomOrderSheetNoResultsRequest,
     RoomOrderSheetSubmitRequest,
     RoomRoundCommandResponse,
     RoomRoundOrderSheetSubmitResponse,
@@ -566,7 +575,7 @@ def start_room_round(
         all_menus = db.query(Menu).all()
         now = now_utc()
         try:
-            filter_available_menus(all_menus, shared_exclusions_set)
+            available_menus, _ = filter_available_menus(all_menus, shared_exclusions_set)
         except NoAvailableFoodException:
             cancelled_round = RoomRound(
                 room_id=room.id,
@@ -595,15 +604,36 @@ def start_room_round(
                 },
             ) from None
 
+        target_question_count = int(settings.ORDER_SHEET_QUESTION_COUNT)
+        try:
+            shared_question_pool = load_order_sheet_question_pool(
+                db=db,
+                exclusion_keywords=shared_exclusions_set,
+                available_menus=available_menus,
+            )
+        except QuestionPoolEmptyException as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "QUESTION_POOL_EMPTY",
+                    "message": exc.message,
+                },
+            ) from exc
+        common_overrides = load_common_question_overrides(db)
+
         allocated_by_user: dict[int, list[dict[str, Any]]] = {}
         for m in ordered_members:
             try:
                 q_resp = select_order_sheet_questions(
                     db=db,
-                    total_count=DEFAULT_TOTAL_QUESTIONS,
-                    exploitation_count=DEFAULT_EXPLOITATION_COUNT,
+                    total_count=target_question_count,
+                    exploitation_count=None,
                     scope_key=f"user:{m.user_id}",
+                    exclusion_keywords=shared_exclusions_set,
+                    available_menus=available_menus,
+                    fill_question_count=True,
                     commit=False,
+                    question_pool=shared_question_pool,
                 )
             except QuestionPoolEmptyException as exc:
                 raise HTTPException(
@@ -613,12 +643,19 @@ def start_room_round(
                         "message": exc.message,
                     },
                 ) from exc
-            if len(q_resp.questions) < DEFAULT_TOTAL_QUESTIONS:
+            slot_keys = tuple(q.cluster_key for q in q_resp.questions)
+            q_resp = apply_question_overrides(
+                q_resp,
+                slot_keys,
+                shared_question_pool,
+                common_overrides,
+            )
+            if len(q_resp.questions) < target_question_count:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail={
                         "code": "INSUFFICIENT_QUESTION_POOL",
-                        "message": "그룹 주문서를 구성할 9개 질문 주제가 부족합니다.",
+                        "message": f"그룹 주문서를 구성할 {target_question_count}개 질문 주제가 부족합니다.",
                     },
                 )
             allocated_by_user[m.user_id] = [
@@ -688,14 +725,12 @@ def start_room_round(
         raise
 
 
-def get_room_round_questions(
+def _get_room_round_question_context(
     db: Session,
     room_public_id: str,
     user: User,
-) -> RoomRoundQuestionsResponse:
-    """T02-D03: Pure read-only retrieval of pre-generated personal order-sheet questions for the current round."""
+) -> tuple[Room, RoomRound, RoomRoundMember]:
     from app.rooms.service import _as_utc, utcnow
-    from app.core.config import settings
     from datetime import timedelta
 
     now = utcnow()
@@ -756,6 +791,16 @@ def get_room_round_questions(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User is not an active participant of this round",
         )
+    return room, current_round, rm
+
+
+def get_room_round_questions(
+    db: Session,
+    room_public_id: str,
+    user: User,
+) -> RoomRoundQuestionsResponse:
+    """Read the caller's assigned order-sheet questions for the current round."""
+    room, current_round, rm = _get_room_round_question_context(db, room_public_id, user)
 
     q_dtos = [OrderSheetQuestionDTO.model_validate(q) for q in (rm.assigned_questions_json or [])]
     exploit_cnt = sum(1 for q in q_dtos if not q.is_exploration)
@@ -772,6 +817,67 @@ def get_room_round_questions(
         has_submitted=rm.submitted_at is not None,
         submitted_at=rm.submitted_at,
     )
+
+
+def _validate_order_sheet_round_fence(
+    current_round: RoomRound,
+    request: RoomOrderSheetSubmitRequest,
+) -> None:
+    if request.round_id is not None and request.round_id != current_round.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "STALE_ROUND_ID",
+                "message": "이전 라운드에 대한 주문서 제출 요청입니다.",
+            },
+        )
+    if request.round_no is not None and request.round_no != current_round.round_no:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "STALE_ROUND_NO",
+                "message": "이전 라운드에 대한 주문서 제출 요청입니다.",
+            },
+        )
+
+
+def _order_assigned_answers(
+    member: RoomRoundMember,
+    answers: list[AnswerItemRequest],
+) -> list[AnswerItemRequest]:
+    answers_by_question_id = {answer.question_id: answer for answer in answers}
+    if len(answers_by_question_id) != len(answers):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="동일한 질문에 중복 응답할 수 없습니다.",
+        )
+    assigned_qids = [int(qid) for qid in (member.assigned_question_ids or [])]
+    if set(answers_by_question_id) != set(assigned_qids) or len(answers) != len(assigned_qids):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"배정된 {len(assigned_qids)}개 주문서 질문 전체에 정확히 응답해야 합니다.",
+        )
+    return [answers_by_question_id[qid] for qid in assigned_qids]
+
+
+def get_room_round_no_results_suggestions(
+    db: Session,
+    room_public_id: str,
+    user: User,
+    request: RoomOrderSheetNoResultsRequest,
+) -> OrderSheetNoResultsResponse:
+    _, current_round, member = _get_room_round_question_context(db, room_public_id, user)
+    _validate_order_sheet_round_fence(current_round, request)
+    answers = _order_assigned_answers(member, request.answers)
+    try:
+        return suggest_no_result_answer_changes(
+            db=db,
+            request_answers=answers,
+            exclusion_keywords=current_round.exclusion_snapshot_json or [],
+            max_display_count=min(5, int(settings.ORDER_SHEET_MAX_RECOMMENDATIONS)),
+        )
+    except InvalidOrderSheetException as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message) from exc
 
 
 @room_transaction(http=True)
@@ -812,22 +918,7 @@ def submit_room_round_order_sheet(
                     "message": "현재 진행 중인 라운드가 없습니다.",
                 },
             )
-        if request.round_id is not None and request.round_id != current_round.id:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "STALE_ROUND_ID",
-                    "message": "이전 라운드에 대한 주문서 제출 요청입니다.",
-                },
-            )
-        if request.round_no is not None and request.round_no != current_round.round_no:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "STALE_ROUND_NO",
-                    "message": "이전 라운드에 대한 주문서 제출 요청입니다.",
-                },
-            )
+        _validate_order_sheet_round_fence(current_round, request)
 
         round_members = lock_round_members(db, current_round.id)
         my_rm = next(
@@ -844,18 +935,7 @@ def submit_room_round_order_sheet(
                 detail="User is not an active participant of this round",
             )
 
-        raw_qids = [int(a.question_id) for a in request.answers]
-        if len(set(raw_qids)) != len(raw_qids):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="동일한 질문에 중복 응답할 수 없습니다.",
-            )
-        assigned_qids = [int(qid) for qid in (my_rm.assigned_question_ids or [])]
-        if set(raw_qids) != set(assigned_qids) or len(raw_qids) != len(assigned_qids):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="배정된 9개 주문서 질문 전체에 정확히 응답해야 합니다.",
-            )
+        ordered_answer_items = _order_assigned_answers(my_rm, request.answers)
 
         canonical_answers = [
             {"question_id": int(a.question_id), "option_id": str(a.option_id)}
@@ -926,19 +1006,13 @@ def submit_room_round_order_sheet(
                 },
             )
 
-        # Preserve original assignment order when evaluating
-        ans_by_qid = {int(a.question_id): str(a.option_id) for a in request.answers}
-        ordered_answer_items = [
-            AnswerItemRequest(question_id=qid, option_id=ans_by_qid[qid])
-            for qid in assigned_qids
-        ]
         try:
             rec_resp = create_order_sheet_recommendation(
                 db=db,
                 request=OrderSheetRecommendRequest(
                     answers=ordered_answer_items,
                     exclusions=[],
-                    top_k=5,
+                    top_k=int(settings.ORDER_SHEET_MAX_RECOMMENDATIONS),
                 ),
                 user_id=locked_user.id,
                 current_user=locked_user,
@@ -971,21 +1045,11 @@ def submit_room_round_order_sheet(
             ) from None
 
         if not rec_resp.recommended_menus:
-            now = now_utc()
-            current_round.status = "CANCELLED"
-            current_round.cancel_reason = "NO_AVAILABLE_MENUS"
-            current_round.cancelled_at = now
-            room.status = "WAITING"
-            _reset_room_order_sheet_flags(db, room.id)
-            db.flush()
-            mark_room_changed(db, room, "ROUND_CANCELLED_NO_MENUS", locked_user.id)
-            commit_room_transaction(db)
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
-                    "code": "NO_AVAILABLE_MENUS",
-                    "message": "공통 제외 조건을 만족하는 추천 가능한 메뉴가 없습니다.",
-                    "cancel_reason": "NO_AVAILABLE_MENUS",
+                    "code": "NO_MATCHING_MENUS_FOR_ANSWERS",
+                    "message": "선택한 답변에 맞는 메뉴가 없습니다.",
                 },
             )
 

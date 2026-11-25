@@ -23,6 +23,53 @@ class Settings(BaseSettings):
     PROFILE_IMAGE_MAX_SIDE: int = 512
     PROFILE_IMAGE_ORPHAN_GRACE_SECONDS: int = 300
     PERSONAL_MODEL_ARTIFACT_PATH: str = ".data/models/personal_logistic_active.json"
+    ORDER_SHEET_QUESTION_COUNT: int = Field(default=9, ge=1, le=20)
+    ORDER_SHEET_ENTROPY_WEIGHT: float = Field(default=0.75, ge=0.0, le=1.0)
+    ORDER_SHEET_COVERAGE_WEIGHT: float = Field(default=0.25, ge=0.0, le=1.0)
+    ORDER_SHEET_MAX_RECOMMENDATIONS: int = Field(default=5, ge=1, le=20)
+    ORDER_SHEET_INITIAL_CLUSTERS: tuple[str, ...] = (
+        "sodium_level",
+        "heaviness",
+        "has_soup",
+        "flavor_intensity",
+        "origin_type",
+        "carb_level",
+        "protein_level",
+        "cooking_style",
+        "main_ingredient",
+    )
+    ORDER_SHEET_HARD_FILTER_CLUSTERS: tuple[str, ...] = (
+        "has_soup",
+        "cooking_style",
+        "main_ingredient",
+    )
+    ORDER_SHEET_SCORE_CLUSTERS: tuple[str, ...] = (
+        "sodium_level",
+        "heaviness",
+        "flavor_intensity",
+        "origin_type",
+        "carb_level",
+        "protein_level",
+    )
+    ORDER_SHEET_QUESTION_ROLE_OVERRIDES: dict[int, str] = Field(default_factory=dict)
+    ORDER_SHEET_DEFAULT_SCORE_WEIGHT: float = Field(default=1.0, ge=0.0)
+    ORDER_SHEET_SCORE_WEIGHTS: dict[str, float] = Field(default_factory=dict)
+    ORDER_SHEET_RECENT_MEAL_PENALTY_SAME_DAY: float = Field(default=-2.0, le=0.0)
+    ORDER_SHEET_RECENT_MEAL_PENALTY_NEXT_DAY: float = Field(default=-1.0, le=0.0)
+    ORDER_SHEET_RECENT_MEAL_PENALTY_TWO_DAYS_AGO: float = Field(default=-0.5, le=0.0)
+    ORDER_SHEET_LONG_TERM_HALF_LIFE_DAYS: float = Field(default=42.0, gt=0.0)
+    ORDER_SHEET_LONG_TERM_MAX_SCORE: float = Field(default=0.25, ge=0.0)
+    ORDER_SHEET_RANKING_RULE_VERSION: str = "spec77_v1"
+    ORDER_SHEET_PERSONAL_MIN_EXPLICIT: int = Field(default=15, ge=1)
+    ORDER_SHEET_PERSONAL_MIN_LIKE_GAIN: float = Field(default=0.20, ge=0, le=1)
+    ORDER_SHEET_COMMON_SUBMISSIONS_PER_ARM: int = Field(default=100, ge=1)
+    ORDER_SHEET_COMMON_REACTION_WINDOW_HOURS: int = Field(default=24, ge=1)
+    ORDER_SHEET_COMMON_MIN_LIKE_GAIN: float = Field(default=0.10, ge=0, le=1)
+    ORDER_SHEET_COMMON_MAX_ZERO_GAIN: float = Field(default=0.01, ge=0, le=1)
+    ORDER_SHEET_COMMON_MAX_P_VALUE: float = Field(default=0.05, gt=0, le=1)
+    ORDER_SHEET_QUESTION_ANSWER_VERSION: str = "spec77_qa_v1"
+    ORDER_SHEET_REPLAY_RETENTION_DAYS: int = Field(default=30, ge=1, le=365)
+    ORDER_SHEET_REPLAY_MAX_SHEETS: int = Field(default=20, ge=1, le=100)
     TRANSITION_PREPARE_COOKIE_NAME: str = Field(
         default="__Secure-whatbob_transition",
         pattern=r"^__Secure-[A-Za-z0-9_-]+$",

@@ -5,6 +5,20 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-25
 
+### #58 / #77 첫 메뉴 좋아요부터 주문서 순위에 반영
+
+#### 변경 이유 및 내용
+
+- 좋아요도 첫 반응부터 당일 다음 주문서의 음식 종류별 취향 점수에 반영한다. 적용에 필요한 최소 평가 일수 설정을 제거했다.
+- 기존 평가가 없는 음식 종류는 첫 좋아요에 +0.25점, 첫 싫어요에 −0.25점을 적용한다. 기존 평가도 함께 합산하며 평가별 42일 반감기와 ±0.25점 상한을 적용한다.
+
+#### 주요 변경 파일
+
+- `app/core/config.py`, `app/recommend/long_term_preference.py`, `tests/test_long_term_preference.py`, `tests/test_long_term_preference_http.py`
+
+#### API 변경
+
+- `POST /api/recommendations/order-sheet`에서 첫 좋아요가 저장된 직후부터 가점을 추천 순위에 반영한다.
 ### #76 랜덤 메뉴 추천과 식사 기록 조회에 메뉴 일러스트 추가
 
 #### 변경 이유 및 내용
@@ -27,6 +41,200 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 #### 검증
 
+- 장기 취향·추천 순위·최근 식사 감점·순위 재현 테스트 46개 통과. 중립 답변의 HTTP 테스트에서 우동의 첫 좋아요 직후 당일 다음 주문서의 우동 순위가 3위에서 1위로 올랐고, +0.25점이 스냅샷에 저장됐다.
+- 전체 테스트 708개 통과, 42개 건너뜀, 1개 실패. 기존 카카오 로그인 응답 테스트는 `requires_reauth` 필드 불일치로 실패했다.
+
+#### 남은 작업 및 주의 사항
+
+- 없음.
+
+### #58 / #77 첫 메뉴 싫어요부터 주문서 순위에 반영
+
+#### 변경 이유 및 내용
+
+- 첫 싫어요를 남긴 날의 다음 주문서부터 음식 종류별 취향 가중합이 음수면 감점한다.
+- 이전 좋아요가 없는 음식 종류는 당일 첫 싫어요에 −0.25점이 적용된다. 추가 평가가 없으면 42일 반감기로 감점이 줄고, 다음 날 다시 싫어요를 눌러도 최대 감점은 −0.25점이다.
+- 가점은 기존처럼 같은 방향의 평가가 한국 날짜 기준 서로 다른 이틀 이상 쌓일 때 적용한다.
+
+#### 주요 변경 파일
+
+- `app/recommend/long_term_preference.py`, `tests/test_long_term_preference.py`, `tests/test_long_term_preference_http.py`
+
+#### API 변경
+
+- `POST /api/recommendations/order-sheet`에서 첫 싫어요가 저장된 직후부터 취향 감점을 추천 순위에 반영한다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 장기 취향·주문서 순위·최근 식사 감점·순위 재현 관련 테스트 46개 통과.
+- 전체 테스트 708개 통과, 42개 건너뜀, 1개 실패. 기존 카카오 로그인 응답 테스트가 `requires_reauth` 필드를 예상하지 않아 실패했다.
+
+#### 남은 작업 및 주의 사항
+
+- 없음.
+
+### #58 / #77 첫 추천 목록 전체 거절 API 경로 변경
+
+#### 변경 이유 및 내용
+
+- 메뉴별 피드백과 첫 추천 목록 전체 거절을 경로에서 구분할 수 있도록 전체 거절의 경로를 `all-menu-reject`로 변경했다.
+
+#### 주요 변경 파일
+
+- `app/recommend/router.py`, `docs/USER_EXCLUSIONS_API.md`, 전체 거절을 호출하는 HTTP 테스트
+
+#### API 변경
+
+- 전체 거절은 `POST /api/recommendations/{recommendation_id}/all-menu-reject`로 호출한다. 이전 `/reject` 경로는 `404`를 반환한다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 전체 거절·피드백·질문 검토와 실험 관련 테스트 21개 통과, MySQL 테스트 1개 건너뜀.
+
+#### 남은 작업 및 주의 사항
+
+- 클라이언트의 전체 거절 요청은 새 경로를 사용한다.
+
+### #58 / #77 (#78–#92) 주문서 하드필터·점수 추천 개편, 첫 목록 반응·가게 만족 분리, 개인/공통 질문 실험 및 리뷰 수정
+
+#### 변경 이유 및 내용
+
+- 주문서 질문 선별·추천 순위·피드백·그룹 라운드·질문 개선 실험 전반을 Spec `#77`(`#78`–`#92`) 기준으로 재설계하고, 2축 코드 리뷰에서 식별된 정합성·경계 이슈를 함께 수정했다.
+- **주문서 9문항 발급 및 순위 파이프라인 (`#78`, `#79`, `#82`, `#83`)**:
+  - 기본 9문항(`ORDER_SHEET_QUESTION_COUNT=9`) 발급과 `OrderSheetIssuance` 멱등성(`Idempotency-Key` / `issuance_key`), Q8 `cooking_style` 4선택지(`rice`/`noodle`/`other_style`/`any`) 정규화(`normalize_question_options`), 음식 종류별 1/N 엔트로피·커버리지 순위, 알레르기·제외 및 의미 축 중복 필터링을 적용했다.
+  - 취향 하드필터(Q3 국물, Q8 밥·면·그 외, Q9 고기)는 자동 완화 없이 엄격 적용하고, 점수 질문(Q1/Q2/Q4/Q5/Q6/Q7) 동등 가중 합산 + 최근 먹은 메뉴 반복 감점(`#82`) + 음식 종류별 장기 취향 보정(`#83`) + 음식 종류 대표 1개 선별(최대 5종)로 추천을 계산한다.
+  - `_find_valid_order_sheet_issuance` 소유 경계를 강화해 인증 사용자가 `user_id=None` 미소유 발급을 가로채거나 완료 처리할 수 없도록 제한했고, `feedback.py`의 중복 `_question_options`를 `question_pool.normalize_question_options`로 통합했다.
+- **첫 목록 반응·명시적 거절·가게 선택/만족 분리 (`#80`, `#81`)**:
+  - 첫 목록 메뉴별 좋아요·싫어요(`food_kind_id`, `exposure_rank` 포함)와 명시적 첫 목록 거절(`POST /api/recommendations/{id}/all-menu-reject`)을 분리 기록하며, 단일 메뉴 피드백으로 전역 질문 가중치를 자동 변경하지 않는다.
+  - 지도 음식점 선택(`PlaceSelection`)과 명시적 가게 만족(`PlaceSatisfaction`)을 메뉴 피드백·장기 취향과 독립 저장하며, 불필요한 양방향 ORM 관계(`PlaceSatisfaction.place_selection`)를 제거하고 단방향 `PlaceSelection.satisfaction`만 유지했다.
+- **후보 0건 제안·같이 고르기 9문항·하드필터 감사·순위 재현 (`#84`, `#85`, `#86`, `#87`, `#88`)**:
+  - 개인/그룹 주문서 후보 0건 시 하드필터 답변 1개 중립 변경 제안(읽기 전용)을 제공하고, 같이 고르기 라운드에서는 참여자 공통 제외·알레르기 생략과 채택된 공통 질문(`load_common_question_overrides`) 적용, 후보 0건 참여자 단독 재응답을 지원한다.
+  - 주문서별 하드필터 축소 과정(`OrderSheetHardFilterTrace`)과 1종 거절 감사를 기록하며, `is_list_rejected` 기준으로 좋아요 후 거절된 1종 주문서도 누락 없이 집계한다. 과거 개인 첫 주문서 재현용 스냅샷(`OrderSheetReplaySnapshot`)과 만료 정리를 구현했다.
+- **질문 영향 검토·개인/공통 질문 실험 및 백그라운드 워커 (`#89`, `#90`, `#91`, `#92`)**:
+  - 반복 거절(30일 내 2건 이상 및 30% 이상) 시 백그라운드 워커로 점수 질문 제거 영향을 재현·평가(`OrderSheetQuestionReview`)하고, 개인 쌍 배정 A/B 실험(`#90`)·채택/유지 판정(`#91`, 팔별 `no_response_rate` 및 `no_response_rate_diff` 기록 포함)·신규 사용자 첫 주문서 공통 질문 실험(`#92`)을 구현했다.
+  - 개인 실험 종료(채택 또는 유지) 시 해당 사용자의 `OrderSheetQuestionReview` 상태를 초기화(`pending_at=None`, `reviewed_at=None`, `result_json=None`, `revision += 1`)하여 이후 신규 명시적 거절이 재검토 조건을 만족하기 전까지 두 번째 개인 실험이 즉시 연쇄 시작되지 않도록 수정했다.
+  - UUID→카카오 계정 전환(`app/auth/transitions.py`) 시 발급·하드필터 추적·스냅샷·리뷰·개인 실험/오버라이드·가게 선택/만족 이력을 안전하게 병합한다.
+
+#### 주요 변경 파일
+
+- `app/core/config.py`, `app/main.py`, `app/auth/transitions.py`
+- `app/menus/models.py`, `app/map/models.py`, `app/map/router.py`, `app/map/schemas.py`, `app/map/service.py`, `app/map/exceptions.py`
+- `app/recommend/order_sheet.py`, `app/recommend/question_pool.py`, `app/recommend/ranking.py`, `app/recommend/feedback.py`, `app/recommend/no_results.py`, `app/recommend/meal_penalty.py`, `app/recommend/long_term_preference.py`, `app/recommend/hard_filter_audit.py`, `app/recommend/replay.py`, `app/recommend/question_review.py`, `app/recommend/question_experiments.py`, `app/recommend/personal_experiment_events.py`, `app/recommend/personal_experiment_decisions.py`, `app/recommend/common_question_experiments.py`, `app/recommend/experiment_metrics.py`, `app/recommend/router.py`, `app/recommend/schemas.py`
+- `app/rooms/rounds.py`, `app/rooms/router.py`, `app/rooms/schemas.py`
+- `scripts/migrate_order_sheet.py`
+- `tests/test_order_sheet_*.py`, `tests/test_first_list_reactions*.py`, `tests/test_hard_filter_audit*.py`, `tests/test_long_term_preference*.py`, `tests/test_recent_meal_penalty_http.py`, `tests/test_personal_*experiments*_http.py`, `tests/test_common_question_experiments_http.py`, `tests/test_group_round_order_sheet.py`, `tests/test_map_place_selections.py`, `tests/test_t06_t07_t08_transitions.py`
+- `LOG.md`
+
+#### API 변경
+
+- `GET /api/recommendations/order-sheet/questions` (변경): 기본 9문항 및 `order_sheet_id` 발급, `Idempotency-Key`/`issuance_key` 멱등 재전송(키 불일치 시 `400`), `Cache-Control: no-store`, Q8 4선택지, 개인/공통 오버라이드 및 실험 배정 적용.
+- `POST /api/recommendations/order-sheet` (변경): 선택적 `order_sheet_id` 연결(인증 사용자 소유 경계 검증), 하드필터 엄격 적용 + 점수/최근 식사 감점/장기 취향 합산, 음식 종류 대표 0~5종 반환, 하드필터 추적·재현 스냅샷 저장.
+- `POST /api/recommendations/order-sheet/no-results` (신규): 개인 주문서 후보 0건 시 취향 하드필터 1개 중립 변경 제안 조회(읽기 전용).
+- `POST /api/recommendations/{recommendation_id}/feedback` (변경) 및 `POST /api/recommendations/{recommendation_id}/all-menu-reject` (신규): 메뉴별 피드백(`food_kind_id`, `exposure_rank` 기록, 종료 후 재전송 시 `409 ORDER_SHEET_CLOSED`, `Idempotency-Key` 충돌 시 `409 IDEMPOTENCY_KEY_REUSED`) 및 첫 목록 명시적 거절(0종 목록 거절 시 `409 ZERO_CANDIDATES_RECOMMENDATION`).
+- `POST /api/rooms/{room_id}/rounds/start`(및 `/start`), `POST /api/rooms/{room_id}/rounds/current/order-sheet`(및 별칭), `POST /api/rooms/{room_id}/rounds/current/order-sheet/no-results` (신규/변경): 라운드 공통 제외·채택 공통 질문 적용, 후보 0건 시 `409 NO_MATCHING_MENUS_FOR_ANSWERS`·`NO_AVAILABLE_MENUS`·`INSUFFICIENT_QUESTION_POOL`·`STALE_ROUND_ID`·`STALE_ROUND_NO` 및 단독 재응답·변경 제안 지원.
+- `POST /api/places/selections`, `GET /api/places/selections`, `GET /api/places/selections/{selection_id}`, `POST /api/places/selections/{selection_id}/satisfaction` (신규): 지도 가게 선택 및 별도 가게 만족 기록·조회(소유권·메뉴 연결 검증 `400`/`403`/`404`).
+
+#### DB 변경
+
+- **신규 테이블 11개**: `order_sheet_issuances`, `order_sheet_hard_filter_traces`, `order_sheet_replay_snapshots`, `order_sheet_question_reviews`, `personal_order_sheet_question_experiments`, `personal_order_sheet_question_assignments`, `personal_order_sheet_question_overrides`, `common_order_sheet_question_experiments`, `common_order_sheet_question_assignments`, `place_selections`, `place_satisfactions`.
+- **기존 테이블 변경 3개**:
+  - `recommendations`: `initial_candidate_count`, `list_rejected_at`, `closed_at`, `order_sheet_list_scope` 컬럼 및 `ix_recommendations_user_sheet_scope_created` 인덱스 추가, MySQL `DATETIME(6)` 정밀도 적용.
+  - `recommendation_feedbacks`: `food_kind_id`(FK `food_kinds.id`, `ON DELETE SET NULL`), `exposure_rank` 컬럼 추가, MySQL `created_at` `DATETIME(6)` 정밀도 적용.
+  - `recommendation_feedback_states`: `food_kind_id`(FK `food_kinds.id`, `ON DELETE SET NULL`), `exposure_rank` 컬럼 추가.
+- **마이그레이션 스크립트**: `scripts/migrate_order_sheet.py` (`--check`, `--apply`, `--verify`).
+
+#### 검증
+
+- `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider` (주문서·반응·감사·장기 취향·최근 식사 감점·재현·리뷰·개인/공통 실험·그룹 라운드·지도·마이그레이션·계정 전환 32개 테스트 파일): **302 passed, 2 skipped** (MySQL 전용 테스트 2건은 로컬 SQLite 환경에서 skip).
+- `git diff --check`: 통과.
+
+#### 남은 작업 및 주의 사항
+
+- 운영 MySQL 배포 시 `python scripts/migrate_order_sheet.py --apply` 및 `--verify` 실행 필수.
+- 운영 DB 메뉴·질문 풀 정합성 확보를 위해 `scripts/seed_menus.py` 동기화(재시드 또는 정정 컬럼 반영) 진행 필요.
+
+## 2026-11-24
+
+### #58 떡볶이·라볶이 국물 분류 및 달콤·순한 떡볶이 맛 분류 정정
+
+#### 변경 이유 및 내용
+
+- 14번째 주문서 실험(`떡볶이`)에서 `국물떡볶이`를 포함한 `떡볶이`·`라볶이` 43건 전체가 `has_soup=False`이고, `달콤짭짤 궁중식`·`로제`·`까르보`·`간장`·`짜장(순한맛)` 등 비매운 변형까지 전부 `spicy_bold`로 묶여 있던 문제를 정정했다.
+- `scripts/seed_menus.py`의 `_derive_has_soup`에서 `떡볶이`·`라볶이`를 국물 있음(`True`)으로 분류하고(43건), `_derive_flavor_intensity`에서 `떡볶이`의 비매운·달콤 변형 키워드(`궁중`, `달콤`, `간장`, `짜장`, `까르보`, `로제`, `순한맛` — 매운/매콤/마라/맵 제외)를 `sweet_savory`로 분류하도록 추가했다(13건 `sweet_savory`, 29건 매콤 변형 `spicy_bold` 유지).
+- 공유 메뉴 데이터 3종(`data/menus_meals_only.csv`, `data/menus_meals_only.json`, `data/menus_cleaned_all.csv`)을 동기화했다. `data/order_sheet_questions_pool.json` 가중치는 #58 실험 연속성을 위해 유지했다.
+
+#### 주요 변경 파일
+
+- `scripts/seed_menus.py`
+- `data/menus_meals_only.csv`, `data/menus_meals_only.json`, `data/menus_cleaned_all.csv`
+- `tests/test_binary_questions.py`
+- `LOG.md`
+
+#### API 변경
+
+- 없음.
+
+#### DB 변경
+
+- 스키마 변경 없음. 로컬 공유 데이터만 갱신했으며 운영 DB 반영은 별도 배포 단계에서 진행한다.
+
+#### 검증
+
+- `pytest tests/test_binary_questions.py -k "not test_seed_preserves_old_feedback_and_serves_binary_questions"`: **64 passed** (`TestClient` 1건은 현재 실행 환경 제약으로 미실행).
+- 정정 데이터 기준 오프라인 재실행: `meal-014`(떡볶이) 설정 A·B 모두 1위 `떡볶이_로제비엔나 떡볶이`, 5위 `라볶이`로 변경됨(개선 사례). 기존 `meal-004`(마라탕)는 만점 동률에 `떡볶이`가 추가되며 5위에서 6위로 밀림.
+
+#### 남은 작업 및 주의 사항
+
+- 운영 DB 반영 시 `scripts/seed_menus.py` 재시드 또는 정정 컬럼 동기화 필요.
+
+### #58 국물 면류·물회 국물 분류 및 주재료·해산물 알레르기 부분문자열 오탐 정정
+
+#### 변경 이유 및 내용
+
+- 6~10번째 주문서 실험에서 발견된 데이터 오분류를 점검해 `scripts/seed_menus.py`와 `app/recommend/common.py`, 공유 메뉴 데이터 3종을 정정했다.
+- **국물 분류(`_derive_has_soup`)**: `라멘`(5건)·`탄탄면`(1건)·`물회`(3건)와 국물 면류(`잔치국수`, `김치말이국수`, `메밀국수_온면`, `물밀면`, `콩국수`, `올갱이국수`, `장국국수`, `기스면`, `울면`) 총 19건을 `has_soup=True`로 정정했다. 비빔·볶음·마제소바류는 `False`를 유지한다.
+- **주재료·해산물 알레르기 부분문자열 오탐(`_derive_main_ingredient`, `OFFICIAL_ALLERGEN_RULES["해산물"]`, `strip_non_duck_ori`)**:
+  - 1글자 `"게"`가 `스파게티`·`바게트`·`마르게리타`·`포게더`에, `"회"`가 `육회`·`회오리`·`파강회`에 오탐되어 `seafood` 및 `해산물` 알레르기로 잡히던 문제를 구체 복합어(`꽃게`, `게살`, `게장`, `회덮밥`, `회냉면`, `물회`, `모듬회` 등)로 교체해 해결했다.
+  - `"오리"`가 `오리지널`·`오리진`·`오리엔탈`·`회오리`·`칼로리`에, `"봉"`·`"윙"`이 `잠봉`·`한라봉`·`스노윙`에 오탐되어 `poultry`로 잡히던 문제를 `strip_non_duck_ori`와 치킨 복합어(`치킨윙`, `치킨봉`, `윙봉`)로 수정했다. `unable_code:poultry` 검색 텍스트에도 `strip_non_duck_ori`를 적용했다.
+  - 외래어 표기 누락(`미트`, `비프`, `볼로네제`, `라구` → `beef` / `포크`, `소세지`, `살라미`, `잠봉`, `런천미트`, `돈코츠` → `pork` / `쉬림프`, `감바스`, `감베로니`, `명란`, `랍스타`, `랍스터`, `크랩` → `seafood` 및 `해산물` 알레르기)을 보강했다.
+- 식사 메뉴(`data/menus_meals_only.csv`, `data/menus_meals_only.json`)는 총 `has_soup` 19건, `main_ingredient` 740건, `allergen_tags` 355건이 갱신되었으며, `data/menus_cleaned_all.csv`도 해당 3개 컬럼만 정정(`has_soup` 19건, `main_ingredient` 899건, `해산물` 태그 414건)했다. `data/order_sheet_questions_pool.json` 가중치는 #58 실험 연속성을 위해 변경하지 않았다.
+- 프랜차이즈 버거·피자 등의 `carb_g` 결측(식사 메뉴 6,968건 중 4,827건)은 원본 `foods_nutrition.csv` 자체의 미기재 항목임을 확인해 임의 추정치를 채우지 않았다.
+
+#### 주요 변경 파일
+
+- `app/recommend/common.py`
+- `scripts/seed_menus.py`
+- `data/menus_meals_only.csv`, `data/menus_meals_only.json`, `data/menus_cleaned_all.csv`
+- `tests/test_binary_questions.py`
+- `LOG.md`
+
+#### API 변경
+
+- 없음 (기존 API 경로 및 응답 스키마 유지).
+
+#### DB 변경
+
+- 스키마 변경 없음. 로컬 공유 데이터만 갱신했으며 운영 DB 반영은 별도 시드/배포 단계에서 진행한다.
+
+#### 검증
+
+- `pytest tests/test_binary_questions.py -k "not test_seed_preserves_old_feedback_and_serves_binary_questions" tests/test_recommend.py`: **61 passed** (`test_seed_preserves_old_feedback_and_serves_binary_questions`는 현재 실행 환경의 `TestClient` blocking portal 대기 제약으로 미실행).
+- `pytest tests/test_menu_cleanup.py`: **2 passed**.
+- `git diff --check`: 통과.
+- 정정 데이터 기준 10건 오프라인 재생: `meal-008`(알리오올리오) `라멘`·`탄탄면`·`미트 토마토 파스타` 제거 후 `스파게티_쉬림프 로제 파스타`가 3위→2위로 상승(5위에서 설정 A·B 분기), `meal-009`(돈까스) 2위가 `갈릭쉬림프 피자 오리지널`→`갈릭스테이크 피자 오리지널`로 정정, `meal-010`(샌드위치) 5위 `물회` 제거 확인.
+
+#### 남은 작업 및 주의 사항
+
+- 운영 DB 반영 시 `scripts/seed_menus.py` 재시드 또는 정정 대상 컬럼 일괄 동기화 필요.
+- `test_seed_preserves_old_feedback_and_serves_binary_questions` 포함 `TestClient` 통합 테스트는 일반 로컬/CI 환경에서 추가 확인 필요.
 - 랜덤 추천, 식사 기록, 홈 카드와 일러스트 관련 테스트 104개 통과, 5개 건너뜀.
 - 전체 테스트 531개 통과, 40개 건너뜀, 1개 실패. 실패한 카카오 로그인 응답 테스트는 작업 전 `HEAD`에서도 `requires_reauth` 필드 불일치로 동일하게 실패했다.
 
@@ -35,6 +243,20 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 - 기존 카카오 로그인 응답 테스트의 예상 필드 집합을 별도로 확인해야 한다.
 
 ## 2026-11-23
+
+### #58 면 요리 추천에서 만두와 떡국 분류 정정
+
+- 식품 대분류 ‘면 및 만두류’에서 대표 이름으로 만두와 국을 구분하도록 `scripts/seed_menus.py`와 메뉴 CSV 2개, 식사 메뉴 JSON을 수정했다. 식사 메뉴 23건이 해당되며 만두가 고명인 라면은 면으로 분류한다.
+- API 계약과 DB 스키마 변경은 없다. 운영 데이터 반영은 별도 배포 단계에 남아 있다.
+- `tests/test_binary_questions.py` 20건 통과. 짜장면 사례에서 8번을 면으로 선택해 재실행한 두 설정 모두 간자장이 2번째로 표시됐다.
+
+### #58 닭볶음탕·찜닭과 불짬뽕 치킨의 국물 분류 수정
+
+- 변경 이유와 내용. 닭볶음탕·닭도리탕·닭찜의 자작한 국물을 국물 있음으로 분류한다. 닭튀김의 맛 이름에 들어간 짬뽕이 국물로 해석되던 문제를 수정했다. 메뉴별 맛 분류는 기존 값을 사용한다.
+- 주요 파일. `scripts/seed_menus.py`, 메뉴 CSV 2개와 식사 메뉴 JSON, `tests/test_binary_questions.py`.
+- API와 DB. 로컬 시드와 공유 데이터에서 메뉴 9건의 국물 값을 정정했다. API와 DB 스키마 변경은 없다.
+- 검증. 주문서 질문 테스트 15건 통과. 기존 9문항과 가중치를 사용한 세 번째 끼니 재실험에서 512개 조합 중 56개 조합이 목표 메뉴를 상위 5개에 포함했고, 80개 조합은 후보가 없었다.
+- 남은 작업. 운영 DB 반영은 별도 배포 단계에서 진행한다.
 
 ### #74 대표 메뉴 일러스트 PNG 136종 해상도(150×135px) 수정
 

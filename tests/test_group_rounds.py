@@ -23,6 +23,7 @@ from app.menus.models import (
     Recommendation,
     RecommendationItemSnapshot,
     UserFoodExclusion,
+    UserMeal,
 )
 from app.recommend.question_pool import build_candidate_question_pool
 from app.rooms.models import (
@@ -199,10 +200,25 @@ def build_group_env(member_count: int = 3):
 
 
 def build_answers_for_questions(questions: list[dict], prefer_index: int = 0) -> list[dict]:
+    # Spec #77 (#81): 하드필터(Q3 국물·Q8 밥/면/그 외·Q9 고기)는 자동 완화 없이 엄격 적용되므로
+    # 테스트 시드 메뉴(M001 김치찌개 / M002 연어초밥 / M003 소고기쌀국수)와 모순되지 않는 조합을 선택한다.
+    hard_filter_profiles = (
+        {"has_soup": "soup_yes", "cooking_style": "other_style", "main_ingredient": "meat"},
+        {"has_soup": "soup_no", "cooking_style": "rice", "main_ingredient": "non_meat"},
+        {"has_soup": "soup_yes", "cooking_style": "noodle", "main_ingredient": "meat"},
+    )
+    profile = hard_filter_profiles[prefer_index % len(hard_filter_profiles)]
     answers = []
     for q in questions:
         opts = q["options"]
-        chosen = opts[prefer_index % len(opts)]["option_id"]
+        cluster = q.get("cluster_key")
+        preferred_opt_id = profile.get(cluster)
+        if preferred_opt_id and any(opt["option_id"] == preferred_opt_id for opt in opts):
+            chosen = preferred_opt_id
+        else:
+            non_any_opts = [opt for opt in opts if opt["option_id"] != "any"]
+            pool = non_any_opts or opts
+            chosen = pool[prefer_index % len(pool)]["option_id"]
         answers.append({"question_id": q["id"], "option_id": chosen})
     return answers
 
@@ -265,8 +281,8 @@ def test_t02_host_only_minimum_members_and_pure_question_get():
     assert q1.headers.get("cache-control") == "no-store"
     assert q1.json() == q2.json()
     assert q1.json()["total_count"] == 9
-    assert q1.json()["exploitation_count"] == 7
-    assert q1.json()["exploration_count"] == 2
+    assert q1.json()["exploitation_count"] == 9
+    assert q1.json()["exploration_count"] == 0
     q_after = {
         q.id: q.shown_count for q in db.query(OrderSheetQuestion).all()
     }
@@ -301,6 +317,38 @@ def test_t02_fail_fast_when_shared_exclusions_eliminate_all_menus():
     assert detail["status"] == "WAITING"
     assert detail["current_round"]["status"] == "CANCELLED"
     assert detail["current_round"]["cancel_reason"] == "NO_AVAILABLE_MENUS"
+
+
+def test_room_order_sheet_recent_meal_affects_only_the_participant_who_recorded_it():
+    _, db, users, menus, room_id, as_user = build_group_env(member_count=2)
+    host, member = users
+    first, second = menus[:2]
+    db.add(UserMeal(
+        user_id=host.id,
+        menu_id=first.id,
+        menu_name=first.name,
+        eaten_at=utcnow() - timedelta(days=1),
+    ))
+    db.commit()
+    assert as_user(host).post(f"/api/rooms/{room_id}/rounds/start").status_code == 200
+
+    endpoint = f"/api/rooms/{room_id}/rounds/current"
+    for user in users:
+        response = as_user(user).get(f"{endpoint}/questions")
+        assert response.status_code == 200
+        answers = [
+            {"question_id": question["id"], "option_id": "any"}
+            for question in response.json()["questions"]
+        ]
+        submission = as_user(user).post(f"{endpoint}/order-sheet", json={"answers": answers})
+        assert submission.status_code == 200
+
+    round_state = submission.json()["common_state"]["current_round"]
+    assert round_state["status"] == "VOTING"
+    assert {item["menu_id"]: item["proposer_user_ids"] for item in round_state["candidates"]} == {
+        first.id: [member.id],
+        second.id: [host.id],
+    }
 
 
 def test_t03_d20_and_t04_full_journey_with_cumulative_recommendations_and_co_winners():

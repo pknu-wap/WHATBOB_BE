@@ -51,7 +51,11 @@ from app.auth.sessions import (
 )
 from app.core.config import settings
 from app.core.security import create_access_token
+from app.map.models import PlaceSatisfaction, PlaceSelection
 from app.menus.models import (
+    OrderSheetHardFilterTrace,
+    OrderSheetIssuance,
+    OrderSheetReplaySnapshot,
     QuestionSelectionState,
     Recommendation,
     RecommendationFeedback,
@@ -60,6 +64,7 @@ from app.menus.models import (
     UserFoodExclusion,
     UserMeal,
 )
+from app.recommend.question_review import merge_question_review_work
 from app.rooms.models import Room, RoomMember, RoomMemberOrderSheet
 from app.rooms.service import has_active_or_pending_room_activity
 from app.rooms.state import prepare_room_notifications, close_pending_notifications
@@ -415,6 +420,29 @@ def _merge_request_operations(db: Session, origin_user_id: int, target_user_id: 
     db.flush()
 
 
+def _merge_order_sheet_issuances(db: Session, origin_user_id: int, target_user_id: int) -> None:
+    target_rows = (
+        db.query(OrderSheetIssuance)
+        .filter(OrderSheetIssuance.user_id == target_user_id)
+        .with_for_update()
+        .all()
+    )
+    target_keys = {row.issuance_key for row in target_rows if row.issuance_key is not None}
+    origin_rows = (
+        db.query(OrderSheetIssuance)
+        .filter(OrderSheetIssuance.user_id == origin_user_id)
+        .with_for_update()
+        .all()
+    )
+    for row in origin_rows:
+        if row.issuance_key is not None and row.issuance_key in target_keys:
+            row.issuance_key = None
+        elif row.issuance_key is not None:
+            target_keys.add(row.issuance_key)
+        row.user_id = target_user_id
+    db.flush()
+
+
 def _rebuild_feedback_states_for_recommendations(
     db: Session,
     target_user_id: int,
@@ -447,6 +475,8 @@ def _rebuild_feedback_states_for_recommendations(
                 user_id=target_user_id,
                 recommendation_id=rec_id,
                 selected_menu_id=fb.selected_menu_id,
+                food_kind_id=fb.food_kind_id,
+                exposure_rank=fb.exposure_rank,
                 menu_key=mkey,
                 menu_base_name=fb.menu_base_name or mkey,
                 menu_main_ingredient=fb.menu_main_ingredient or "other",
@@ -636,20 +666,45 @@ def _merge_uuid_user_into_kakao_target(
         {RecommendationItemSnapshot.user_id: target_id},
         synchronize_session=False,
     )
+    db.query(OrderSheetHardFilterTrace).filter(
+        OrderSheetHardFilterTrace.user_id == origin_id
+    ).update(
+        {OrderSheetHardFilterTrace.user_id: target_id},
+        synchronize_session=False,
+    )
+    db.query(OrderSheetReplaySnapshot).filter(
+        OrderSheetReplaySnapshot.user_id == origin_id
+    ).update(
+        {OrderSheetReplaySnapshot.user_id: target_id},
+        synchronize_session=False,
+    )
     db.query(RecommendationFeedbackState).filter(
         RecommendationFeedbackState.user_id == origin_id
     ).update(
         {RecommendationFeedbackState.user_id: target_id},
         synchronize_session=False,
     )
+    db.query(PlaceSelection).filter(PlaceSelection.user_id == origin_id).update(
+        {PlaceSelection.user_id: target_id},
+        synchronize_session=False,
+    )
+    db.query(PlaceSatisfaction).filter(PlaceSatisfaction.user_id == origin_id).update(
+        {PlaceSatisfaction.user_id: target_id},
+        synchronize_session=False,
+    )
     db.flush()
     _rebuild_feedback_states_for_recommendations(db, target_id, moved_rec_ids, now=now)
+    merge_question_review_work(db, origin_id, target_id, now)
 
     # 4. 질문 선택 순환 상태 합산 후 원본 user:{origin_id} 행 삭제
     _merge_question_selection_state(db, origin_id, target_id, now=now)
 
-    # 5. 작업 원장(request_operations) 소유자 이동
+    # 5. 작업 원장(request_operations) 및 주문서 발급 이력(order_sheet_issuances) 소유자 이동
     _merge_request_operations(db, origin_id, target_id)
+    _merge_order_sheet_issuances(db, origin_id, target_id)
+    from app.recommend.question_experiments import merge_personal_question_state
+
+    merge_personal_question_state(db, origin_id, target_id)
 
     # 6. 다른 PREPARED 전환 작업의 origin_user_id 참조 해제
     db.query(AccountTransition).filter(AccountTransition.origin_user_id == origin_id).update(

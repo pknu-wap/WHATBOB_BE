@@ -13,7 +13,11 @@ from sqlalchemy.pool import StaticPool
 from app.core.database import Base, get_db
 from app.menus.models import Menu, OrderSheetQuestion, Recommendation
 from app.users.models import User
-from app.recommend.common import evaluate_option_rules
+from app.recommend.common import (
+    derive_allergens_from_text,
+    evaluate_option_rules,
+    matches_unable_code,
+)
 from app.recommend.order_sheet import record_recommendation_feedback
 from app.recommend.question_pool import build_candidate_question_pool
 from app.recommend.router import router
@@ -38,6 +42,114 @@ def db():
     engine.dispose()
 
 
+@pytest.mark.parametrize("category,name,expected", [
+    ("조림류", "닭볶음탕", True),
+    ("조림류", "닭도리탕", True),
+    ("찜류", "닭찜_간장", True),
+    ("찜류", "닭찜_매운양념", True),
+    ("튀김류", "닭튀김_불짬뽕 치킨", False),
+    ("면 및 만두류", "짬뽕", True),
+])
+def test_broth_classification_for_chicken_and_jjamppong(category, name, expected):
+    assert seed_menus._derive_has_soup(category, name) is expected
+
+
+@pytest.mark.parametrize("name,style,has_soup", [
+    ("떡만두국_고기만두", "soup_stew", True),
+    ("만두_고기만두", "other", False),
+    ("고기만두", "other", False),
+    ("만두_군만두", "fried_pan", False),
+    ("라면_만두", "noodle", True),
+])
+def test_dumpling_menu_classification(name, style, has_soup):
+    assert seed_menus._derive_cooking_style("면 및 만두류", name) == style
+    assert seed_menus._derive_has_soup("면 및 만두류", name) is has_soup
+
+
+@pytest.mark.parametrize("category,name,expected", [
+    ("면 및 만두류", "라멘_간편조리세트_매운돈코츠라멘", True),
+    ("면 및 만두류", "라멘_돈코츠라멘", True),
+    ("면 및 만두류", "탄탄면_간편조리세트_마라 탄탄면", True),
+    ("생채·무침류", "물회", True),
+    ("생채·무침류", "물회_오징어", True),
+    ("면 및 만두류", "국수_잔치국수", True),
+    ("면 및 만두류", "메밀국수_온면", True),
+    ("면 및 만두류", "밀면_물밀면", True),
+    ("면 및 만두류", "콩국수", True),
+    ("면 및 만두류", "메밀소바_간편조리세트_부타이 마제소바", False),
+    ("면 및 만두류", "국수_비빔국수", False),
+    ("면 및 만두류", "냉면_비빔냉면", False),
+    ("면 및 만두류", "볶음 우동", False),
+])
+def test_broth_classification_for_ramen_tantanmen_mulhoe_and_broth_noodles(category, name, expected):
+    assert seed_menus._derive_has_soup(category, name) is expected
+
+
+@pytest.mark.parametrize("name,expected_ing,expect_seafood_allergen", [
+    ("스파게티_미트 토마토 파스타", "beef", False),
+    ("스파게티_베이컨 크림 파스타", "pork", False),
+    ("스파게티_간편조리세트_알리오올리오파스타", "other", False),
+    ("피자_마르게리타 피자", "other", False),
+    ("샌드위치_불고기치즈 바게트", "beef", False),
+    ("육회", "beef", False),
+    ("육회비빔밥", "beef", False),
+    ("피자_갈릭쉬림프 피자 오리지널 (M)", "seafood", True),
+    ("피자_골드고구마 피자 오리지널 (M)", "veggie_tofu", False),
+    ("버거_NBB 오리지널 버거", "other", False),
+    ("샌드위치_잠봉뵈르 샌드위치", "pork", False),
+    ("피자_쉬림프갈릭스노윙 피자", "seafood", True),
+    ("에이드_한라봉 에이드", "other", False),
+    ("오리백숙", "poultry", False),
+    ("훈제오리", "poultry", False),
+    ("꽃게탕", "seafood", True),
+    ("게살죽", "seafood", True),
+    ("회덮밥", "seafood", True),
+    ("물회_오징어", "seafood", True),
+    ("닭다리튀김_봉 (5조각)", "poultry", False),
+    ("닭튀김_교촌윙 치킨", "poultry", False),
+])
+def test_main_ingredient_and_seafood_allergen_avoid_substring_false_positives(
+    name, expected_ing, expect_seafood_allergen,
+):
+    assert seed_menus._derive_main_ingredient("", "", name) == expected_ing
+    allergens = derive_allergens_from_text(name)
+    assert ("해산물" in allergens) is expect_seafood_allergen
+
+
+@pytest.mark.parametrize("name,expected_soup,expected_flavor", [
+    ("떡볶이", True, "spicy_bold"),
+    ("떡볶이_국물떡볶이", True, "spicy_bold"),
+    ("떡볶이_매콤 떡볶이", True, "spicy_bold"),
+    ("떡볶이_간편조리세트_마라떡볶이", True, "spicy_bold"),
+    ("떡볶이_간편조리세트_달콤짭짤 궁중식 떡볶이", True, "sweet_savory"),
+    ("떡볶이_간편조리세트_로제떡볶이", True, "sweet_savory"),
+    ("떡볶이_까르보떡볶이", True, "sweet_savory"),
+    ("떡볶이_간편조리세트_짜장떡볶이(순한맛)", True, "sweet_savory"),
+    ("떡볶이_간장", True, "sweet_savory"),
+    ("라볶이", True, "mild_clean"),
+])
+def test_tteokbokki_broth_and_flavor_classification(name, expected_soup, expected_flavor):
+    assert seed_menus._derive_has_soup("볶음류", name) is expected_soup
+    assert seed_menus._derive_flavor_intensity("", name, 460.0 if expected_flavor == "sweet_savory" else 300.0, 4.0) == expected_flavor
+
+
+def test_unable_poultry_does_not_exclude_original_or_jambon_menus():
+    original_pizza = Menu(
+        name="피자_갈릭쉬림프 피자 오리지널 (M)",
+        base_name="피자",
+        main_ingredient="seafood",
+        allergen_tags=["밀", "해산물"],
+    )
+    duck_soup = Menu(
+        name="오리백숙",
+        base_name="오리백숙",
+        main_ingredient="poultry",
+        allergen_tags=[],
+    )
+    assert matches_unable_code(original_pizza, "poultry") is False
+    assert matches_unable_code(duck_soup, "poultry") is True
+
+
 def test_binary_options_cover_existing_menu_categories():
     """다섯 선택지를 단순 삭제하지 않고 모든 기존 분류를 두 그룹에 포함한다."""
     pool = build_candidate_question_pool()
@@ -49,9 +161,14 @@ def test_binary_options_cover_existing_menu_categories():
     )
     for question in pool:
         assert 1 <= len(question["question_text"]) <= 24
-        assert len(question["options"]) == 3
-        assert [o["label"] for o in question["options"]] == ["예", "아니요", "상관없어요"]
-        assert len({o["option_id"] for o in question["options"]}) == 3
+        if question["cluster_key"] == "cooking_style":
+            assert len(question["options"]) == 4
+            assert [o["label"] for o in question["options"]] == ["밥", "면", "그 외", "상관없어요"]
+            assert len({o["option_id"] for o in question["options"]}) == 4
+        else:
+            assert len(question["options"]) == 3
+            assert [o["label"] for o in question["options"]] == ["예", "아니요", "상관없어요"]
+            assert len({o["option_id"] for o in question["options"]}) == 3
         assert question["options"][-1] == {"option_id": "any", "label": "상관없어요", "rules": []}
     # 같은 주제의 문구 변형은 동일한 두 선택지를 사용한다.
     for question in {q["cluster_key"]: q for q in pool}.values():
@@ -76,7 +193,7 @@ def test_numeric_options_do_not_overlap_at_boundary(cluster, field, boundary):
         assert sum(evaluate_option_rules(menu, o["rules"]) for o in question["options"] if o["rules"]) == 1
 
 
-def test_response_contract_enforces_24_characters_and_two_or_three_options():
+def test_response_contract_enforces_24_characters_and_two_to_four_options():
     question = build_candidate_question_pool()[0]
     payload = dict(question, id=1, initial_score=0.5, importance_weight=0.5)
     payload["question_text"] = "가" * 24
@@ -84,7 +201,9 @@ def test_response_contract_enforces_24_characters_and_two_or_three_options():
     with pytest.raises(ValidationError):
         OrderSheetQuestionDTO(**dict(payload, question_text="가" * 25))
     assert len(OrderSheetQuestionDTO(**dict(payload, options=question["options"][:2])).options) == 2
-    for count in (1, 4):
+    q8 = next(q for q in build_candidate_question_pool() if q["cluster_key"] == "cooking_style")
+    assert len(OrderSheetQuestionDTO(**dict(payload, options=q8["options"])).options) == 4
+    for count in (1, 5):
         with pytest.raises(ValidationError):
             OrderSheetQuestionDTO(**dict(payload, options=[question["options"][0]] * count))
 
@@ -167,27 +286,39 @@ def test_seed_preserves_old_feedback_and_serves_binary_questions(db):
         response = client.get("/api/recommendations/order-sheet/questions")
         assert response.status_code == 200
         data = response.json()["data"]
-        assert (data["total_count"], data["exploitation_count"], data["exploration_count"]) == (9, 7, 2)
+        # 30개 샘플 메뉴에서 실제 후보를 구분하는 유효 주제만 반환한다 (퇴화 주제 제외).
+        assert (data["total_count"], data["exploitation_count"], data["exploration_count"]) == (8, 8, 0)
         for question in data["questions"]:
             assert question["id"] != old.id
             assert len(question["question_text"]) <= 24
-            assert len(question["options"]) == 3
+            expected_opts = 4 if question["cluster_key"] == "cooking_style" else 3
+            assert len(question["options"]) == expected_opts
         initial_shown_counts = {q["id"]: q["shown_count"] for q in data["questions"]}
         # 두 취향 답변과 상관없음 모두 추천과 피드백까지 처리할 수 있다.
+        # Spec #77 (#81): 하드필터는 자동 완화하지 않으므로 남은 음식 종류 수(최대 5종)만큼 반환한다.
+        feedback_recorded = 0
         for index in (0, 1, 2):
             response = client.post("/api/recommendations/order-sheet", json={
-                "answers": [{"question_id": q["id"], "option_id": q["options"][index]["option_id"]}
-                            for q in data["questions"]],
+                "answers": [
+                    {
+                        "question_id": q["id"],
+                        "option_id": q["options"][-1]["option_id"] if index == 2 else q["options"][index]["option_id"],
+                    }
+                    for q in data["questions"]
+                ],
                 "top_k": 5,
             })
             assert response.status_code == 201
             result = response.json()["data"]
-            assert len(result["recommended_menus"]) == 5
-            feedback = client.post(f'/api/recommendations/{result["recommendation_id"]}/feedback', json={
-                "selected_menu_id": result["recommended_menus"][0]["menu_id"],
-                "is_satisfied": index == 0,
-            })
-            assert feedback.status_code == 200
+            assert len(result["recommended_menus"]) == min(result["candidate_count"], 5)
+            if result["recommended_menus"]:
+                feedback = client.post(f'/api/recommendations/{result["recommendation_id"]}/feedback', json={
+                    "selected_menu_id": result["recommended_menus"][0]["menu_id"],
+                    "is_satisfied": index == 0,
+                })
+                assert feedback.status_code == 200
+                feedback_recorded += 1
+        assert feedback_recorded >= 2
 
     submitted_questions = (
         db.query(OrderSheetQuestion)
@@ -198,10 +329,13 @@ def test_seed_preserves_old_feedback_and_serves_binary_questions(db):
         question_id: count + 3 for question_id, count in initial_shown_counts.items()
     }
 
-    record_recommendation_feedback(db, record.id, RecommendationFeedbackRequest(
+    legacy_fb = record_recommendation_feedback(db, record.id, RecommendationFeedbackRequest(
         selected_menu_id=menu.id, is_satisfied=True,
     ))
-    assert old.positive_count == 1
+    # Spec #77 (#79): 비활성 이전 질문의 답변 조건 일치 기록은 유지하되 질문 전역 positive_count로 전파하지 않는다.
+    assert legacy_fb.exposure_rank == 1
+    assert legacy_fb.updated_weights == {}
+    assert old.positive_count == 0
     new_question = db.query(OrderSheetQuestion).filter(OrderSheetQuestion.is_active.is_(True)).first()
     weight = new_question.importance_weight
     repeated = seed_menus.seed_question_pool(db)
