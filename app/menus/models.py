@@ -152,7 +152,7 @@ class Menu(Base):
 
 
 class MenuIllustrationException(Base):
-    """홈 최근 메뉴 카드에서 대표 일러스트 대신 공통 이미지를 표시할 메뉴별 예외 테이블"""
+    """대표 일러스트 대신 공통 이미지를 표시할 메뉴별 예외 테이블"""
     __tablename__ = "menu_illustration_exceptions"
 
     menu_id = Column(
