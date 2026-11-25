@@ -108,7 +108,9 @@ def test_score_gap_keeps_matching_food_first_and_shortage_does_not_repeat(db):
     assert len(selected) == 3
 
 
-def test_order_sheet_relaxes_filter_when_matching_menus_share_one_group(db):
+def test_order_sheet_does_not_auto_relax_hard_filter_when_matching_menus_share_one_group(db):
+    # Spec #77 (#81): 기존 하드필터 자동 완화 정책을 폐지하고, 하드필터(Q3 국물) 통과 후보가 1종뿐이면
+    # 다른 종류로 채우지 않고 남은 1종(대표 1상품)만 반환한다.
     for index in range(5):
         add_menu(db, f"국밥_{index}", base="국밥", soup=True)
     other_groups = {"피자", "햄버거", "김밥", "비빔밥"}
@@ -124,9 +126,10 @@ def test_order_sheet_relaxes_filter_when_matching_menus_share_one_group(db):
         ),
     )
 
-    assert len(result.recommended_menus) == 5
-    assert {menu.base_name for menu in result.recommended_menus} == other_groups | {"국밥"}
+    assert result.candidate_count == 1
+    assert len(result.recommended_menus) == 1
     assert result.recommended_menus[0].base_name == "국밥"
+    assert result.recommended_menus[0].has_soup is True
 
 
 def test_recent_menu_groups_rotate_for_one_user_only(db):

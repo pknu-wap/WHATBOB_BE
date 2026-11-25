@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 import app.menus.models  # noqa: F401
 import app.users.models  # noqa: F401
 import app.auth.models  # noqa: F401
+import app.map.models  # noqa: F401
 from app.auth.cookie_router import router as cookie_auth_router, allowed_web_origins
 from app.auth.revocations import kakao_revocation_loop
 from app.auth.router import router as auth_router
@@ -24,7 +25,9 @@ from app.menus.popular import (
 from app.menus.popular_scheduler import popular_ranking_scheduler_loop
 from app.menus.router import router as menus_router
 from app.recommend.common import RecommendationDomainException
+from app.recommend.replay import replay_snapshot_cleanup_loop
 from app.recommend.router import router as recommend_router
+from app.recommend.order_sheet_scheduler import order_sheet_experiment_loop
 from app.rooms.router import operations_router as room_operations_router, router as rooms_router
 from app.rooms.cleanup import room_cleanup_loop
 from app.rooms.notifications import notification_loop, summary_cleanup_loop
@@ -50,6 +53,8 @@ async def lifespan(app: FastAPI):
     cleanup_task = asyncio.create_task(room_cleanup_loop())
     notification_task = asyncio.create_task(notification_loop(engine))
     summary_task = asyncio.create_task(summary_cleanup_loop(engine))
+    replay_cleanup_task = asyncio.create_task(replay_snapshot_cleanup_loop(SessionLocal))
+    order_sheet_experiment_task = asyncio.create_task(order_sheet_experiment_loop(SessionLocal))
     popular_ranking_task = asyncio.create_task(
         popular_ranking_scheduler_loop(
             run_startup_recovery=True,
@@ -57,18 +62,16 @@ async def lifespan(app: FastAPI):
             recover_fn=recover_missed_popular_menu_ranking,
         )
     )
+    tasks = (
+        cleanup_task, notification_task, summary_task, popular_ranking_task,
+        replay_cleanup_task, order_sheet_experiment_task,
+    )
     try:
         yield
     finally:
-        for task in (cleanup_task, notification_task, summary_task, popular_ranking_task):
+        for task in tasks:
             task.cancel()
-        await asyncio.gather(
-            cleanup_task,
-            notification_task,
-            summary_task,
-            popular_ranking_task,
-            return_exceptions=True,
-        )
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 app = FastAPI(

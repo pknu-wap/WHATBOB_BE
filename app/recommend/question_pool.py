@@ -4,8 +4,57 @@ from typing import Any
 from functools import lru_cache
 
 MAX_QUESTION_TEXT_LENGTH = 24
-QUESTION_OPTION_COUNT = 3
+QUESTION_OPTION_COUNT = 4
 QUESTION_CODE_PREFIX = "q_binary_v1_"
+
+COOKING_STYLE_OPTIONS: list[dict[str, Any]] = [
+    {
+        "option_id": "rice",
+        "label": "밥",
+        "rules": [{"field": "cooking_style", "op": "eq", "value": "rice"}],
+    },
+    {
+        "option_id": "noodle",
+        "label": "면",
+        "rules": [{"field": "cooking_style", "op": "eq", "value": "noodle"}],
+    },
+    {
+        "option_id": "other_style",
+        "label": "그 외",
+        "rules": [{"field": "cooking_style", "op": "not_in", "value": ["rice", "noodle"]}],
+    },
+    {"option_id": "any", "label": "상관없어요", "rules": []},
+]
+
+LEGACY_COOKING_STYLE_RULES: dict[str, list[dict[str, Any]]] = {
+    "rice_noodle": [{"field": "cooking_style", "op": "in", "value": ["rice", "noodle"]}],
+    "other_style": [{"field": "cooking_style", "op": "not_in", "value": ["rice", "noodle"]}],
+    "any": [],
+}
+
+
+def normalize_question_options(question: Any) -> list[dict[str, Any]]:
+    """Normalize legacy 2-option rows and 3-option cooking_style rows into current options."""
+    options = list(question.options_json or [])
+    # 기존 두 선택지 DB도 재적재 전까지 any를 조회·제출할 수 있다.
+    if len(options) == 2 and not any(opt.get("option_id") == "any" for opt in options):
+        options.append({"option_id": "any", "label": "상관없어요", "rules": []})
+    # 기존 3선택지(rice_noodle/other_style/any) Q8 행도 재적재 없이 4선택지(밥·면·그 외·상관없어요)로 정규화한다.
+    if (
+        question.cluster_key == "cooking_style"
+        and (question.question_code or "").startswith(QUESTION_CODE_PREFIX)
+    ):
+        actual_rules = {opt.get("option_id"): opt.get("rules", []) for opt in options}
+        if actual_rules == LEGACY_COOKING_STYLE_RULES:
+            return [
+                {
+                    "option_id": opt["option_id"],
+                    "label": opt["label"],
+                    "rules": [dict(rule) for rule in opt["rules"]],
+                }
+                for opt in COOKING_STYLE_OPTIONS
+            ]
+    return options
 
 
 def build_candidate_question_pool() -> list[dict[str, Any]]:
@@ -58,13 +107,23 @@ def build_candidate_question_pool() -> list[dict[str, Any]]:
     opposite_ops = {"eq": "neq", "in": "not_in", "gte": "lt", "lte": "gt"}
     pool = []
     for cluster, topic, field, op, value, positive, negative in specs:
-        options = [
-            {"option_id": positive[0], "label": "예",
-             "rules": [{"field": field, "op": op, "value": value}]},
-            {"option_id": negative[0], "label": "아니요",
-             "rules": [{"field": field, "op": opposite_ops[op], "value": value}]},
-            {"option_id": "any", "label": "상관없어요", "rules": []},
-        ]
+        if cluster == "cooking_style":
+            options = [
+                {
+                    "option_id": opt["option_id"],
+                    "label": opt["label"],
+                    "rules": [dict(rule) for rule in opt["rules"]],
+                }
+                for opt in COOKING_STYLE_OPTIONS
+            ]
+        else:
+            options = [
+                {"option_id": positive[0], "label": "예",
+                 "rules": [{"field": field, "op": op, "value": value}]},
+                {"option_id": negative[0], "label": "아니요",
+                 "rules": [{"field": field, "op": opposite_ops[op], "value": value}]},
+                {"option_id": "any", "label": "상관없어요", "rules": []},
+            ]
         for idx, template in enumerate(templates, start=1):
             question_text = template.format(topic=topic)
             for before, after in (

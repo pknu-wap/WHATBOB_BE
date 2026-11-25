@@ -1,16 +1,37 @@
+from datetime import datetime, timezone
 import math
 from typing import Any
 from urllib.parse import quote
 
-from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, selectinload
 
-from app.map.exceptions import PlaceSearchMenuNotFoundException
 from app.map.google_places import GooglePlaceSearchClient
-from app.map.kakao_local import KAKAO_RESTAURANT_CATEGORY_CODE, PlaceSearchClient
 from app.map.place_enrichment import enrich_google_place_ids
-from app.map.schemas import NearbyPlaceDTO, NearbyPlacesResponse, SearchRadius
+from app.auth.operations import lock_user_and_verify_session
+from app.map.exceptions import (
+    PlaceRecommendationForbiddenException,
+    PlaceRecommendationNotFoundException,
+    PlaceSearchMenuNotFoundException,
+    PlaceSelectionForbiddenException,
+    PlaceSelectionInvalidException,
+    PlaceSelectionNotFoundException,
+)
+from app.map.kakao_local import KAKAO_RESTAURANT_CATEGORY_CODE, PlaceSearchClient
+from app.map.models import PlaceSatisfaction, PlaceSelection
+from app.map.schemas import (
+    NearbyPlaceDTO,
+    NearbyPlacesResponse,
+    PlaceSatisfactionDTO,
+    PlaceSatisfactionUpsertRequest,
+    PlaceSelectionCreateRequest,
+    PlaceSelectionDTO,
+    PlaceSelectionListResponse,
+    SearchRadius,
+)
 from app.map.search_keywords import build_place_search_keyword
-from app.menus.models import Menu
+from app.menus.models import Menu, Recommendation
+from app.users.models import User
 
 MAX_NEARBY_PLACES = 10
 KAKAO_MAP_LINK_BASE_URL = "https://map.kakao.com/link"
@@ -154,3 +175,182 @@ def _straight_line_distance_m(lat1: float, lng1: float, lat2: float, lng2: float
 def _blank_to_none(value: Any) -> str | None:
     text = str(value).strip() if value is not None else ""
     return text or None
+
+
+def _to_place_satisfaction_dto(satisfaction: PlaceSatisfaction) -> PlaceSatisfactionDTO:
+    return PlaceSatisfactionDTO(
+        id=satisfaction.id,
+        place_selection_id=satisfaction.place_selection_id,
+        recommendation_id=satisfaction.recommendation_id,
+        menu_id=satisfaction.menu_id,
+        kakao_place_id=satisfaction.kakao_place_id,
+        is_satisfied=bool(satisfaction.is_satisfied),
+        created_at=satisfaction.created_at,
+        updated_at=satisfaction.updated_at,
+    )
+
+
+def _to_place_selection_dto(
+    selection: PlaceSelection,
+    satisfaction: PlaceSatisfaction | None = None,
+) -> PlaceSelectionDTO:
+    return PlaceSelectionDTO(
+        id=selection.id,
+        recommendation_id=selection.recommendation_id,
+        menu_id=selection.menu_id,
+        kakao_place_id=selection.kakao_place_id,
+        place_name=selection.place_name,
+        place_address=selection.place_address,
+        created_at=selection.created_at,
+        satisfaction=_to_place_satisfaction_dto(satisfaction) if satisfaction is not None else None,
+    )
+
+
+def create_place_selection(
+    db: Session,
+    current_user: User,
+    request: PlaceSelectionCreateRequest,
+) -> PlaceSelectionDTO:
+    """사용자가 지도에서 명시적으로 선택한 가게를 기록한다.
+
+    가게 선택만으로 가게 만족(PlaceSatisfaction)이나 메뉴 피드백을 생성하지 않는다.
+    """
+    locked_user = lock_user_and_verify_session(db, current_user)
+
+    menu = db.get(Menu, request.menu_id)
+    if menu is None:
+        raise PlaceSearchMenuNotFoundException(request.menu_id)
+
+    recommendation_id = request.recommendation_id
+    if recommendation_id is not None:
+        rec = db.get(Recommendation, recommendation_id)
+        if rec is None:
+            raise PlaceRecommendationNotFoundException(recommendation_id)
+        if rec.user_id != locked_user.id:
+            raise PlaceRecommendationForbiddenException()
+        recommended_menu_ids = [int(mid) for mid in (rec.recommended_menu_ids or [])]
+        if menu.id not in recommended_menu_ids:
+            raise PlaceSelectionInvalidException("해당 추천 결과에 포함된 메뉴만 가게 선택에 연결할 수 있습니다.")
+
+    now = datetime.now(timezone.utc)
+    selection = PlaceSelection(
+        user_id=locked_user.id,
+        recommendation_id=recommendation_id,
+        menu_id=menu.id,
+        kakao_place_id=request.kakao_place_id,
+        place_name=request.place_name,
+        place_address=request.place_address,
+        created_at=now,
+    )
+    db.add(selection)
+    db.commit()
+    db.refresh(selection)
+    return _to_place_selection_dto(selection, satisfaction=None)
+
+
+def get_place_selection(
+    db: Session,
+    current_user: User,
+    selection_id: int,
+) -> PlaceSelectionDTO:
+    """본인의 단일 가게 선택 기록과 명시적 만족 상태(없으면 None)를 조회한다."""
+    selection = (
+        db.query(PlaceSelection)
+        .options(selectinload(PlaceSelection.satisfaction))
+        .filter(PlaceSelection.id == selection_id)
+        .first()
+    )
+    if selection is None:
+        raise PlaceSelectionNotFoundException(selection_id)
+    if selection.user_id != current_user.id:
+        raise PlaceSelectionForbiddenException()
+    return _to_place_selection_dto(selection, satisfaction=selection.satisfaction)
+
+
+def list_place_selections(
+    db: Session,
+    current_user: User,
+    *,
+    recommendation_id: int | None = None,
+    menu_id: int | None = None,
+    limit: int = 20,
+) -> PlaceSelectionListResponse:
+    """본인의 가게 선택 기록 목록을 최신순으로 조회한다."""
+    query = (
+        db.query(PlaceSelection)
+        .options(selectinload(PlaceSelection.satisfaction))
+        .filter(PlaceSelection.user_id == current_user.id)
+    )
+    if recommendation_id is not None:
+        query = query.filter(PlaceSelection.recommendation_id == recommendation_id)
+    if menu_id is not None:
+        query = query.filter(PlaceSelection.menu_id == menu_id)
+
+    rows = (
+        query.order_by(PlaceSelection.created_at.desc(), PlaceSelection.id.desc())
+        .limit(limit)
+        .all()
+    )
+    items = [_to_place_selection_dto(row, satisfaction=row.satisfaction) for row in rows]
+    return PlaceSelectionListResponse(total_count=len(items), selections=items)
+
+
+def record_place_satisfaction(
+    db: Session,
+    current_user: User,
+    selection_id: int,
+    request: PlaceSatisfactionUpsertRequest,
+) -> PlaceSatisfactionDTO:
+    """선택한 가게에 대한 명시적 만족 여부를 가게 선택·메뉴 피드백과 별도로 기록(또는 갱신)한다."""
+    locked_user = lock_user_and_verify_session(db, current_user)
+
+    selection = (
+        db.query(PlaceSelection)
+        .filter(PlaceSelection.id == selection_id)
+        .with_for_update()
+        .first()
+    )
+    if selection is None:
+        raise PlaceSelectionNotFoundException(selection_id)
+    if selection.user_id != locked_user.id:
+        raise PlaceSelectionForbiddenException()
+
+    now = datetime.now(timezone.utc)
+    satisfaction = (
+        db.query(PlaceSatisfaction)
+        .filter(PlaceSatisfaction.place_selection_id == selection.id)
+        .with_for_update()
+        .first()
+    )
+    if satisfaction is None:
+        new_row = PlaceSatisfaction(
+            place_selection_id=selection.id,
+            user_id=locked_user.id,
+            recommendation_id=selection.recommendation_id,
+            menu_id=selection.menu_id,
+            kakao_place_id=selection.kakao_place_id,
+            is_satisfied=bool(request.is_satisfied),
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            with db.begin_nested():
+                db.add(new_row)
+                db.flush()
+            satisfaction = new_row
+        except IntegrityError:
+            satisfaction = (
+                db.query(PlaceSatisfaction)
+                .filter(PlaceSatisfaction.place_selection_id == selection.id)
+                .with_for_update()
+                .one()
+            )
+            satisfaction.is_satisfied = bool(request.is_satisfied)
+            satisfaction.updated_at = now
+    else:
+        satisfaction.is_satisfied = bool(request.is_satisfied)
+        satisfaction.updated_at = now
+
+    db.commit()
+    db.refresh(satisfaction)
+    return _to_place_satisfaction_dto(satisfaction)

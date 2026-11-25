@@ -59,6 +59,7 @@
 | `GET /api/recommendations/order-sheet/questions` | 주문서 질문 조회 | 인증 사용자 기준(`user:{user_id}`) 주제 노출 상태를 단일 트랜잭션으로 갱신 |
 | `POST /api/recommendations/order-sheet` | 주문서 맞춤 추천 | 제외 조건 하드 필터 적용 후 규칙 점수, 최근 노출 감점, 개인화 로지스틱 보정(`±5%`, 반감기 90일, 수축 `k=5`, 최근 3일 동일 식사 특징 포함) 및 가중 근접 추첨(`beta=0.5`)을 반영해 추천 생성 및 추천 시점 특징 스냅샷(`recommendation_item_snapshots`) 저장 |
 | `POST /api/recommendations/{recommendation_id}/feedback` | 추천 만족/불만족 피드백 | 원본 이력(`recommendation_feedbacks`)은 append-only로 보존하고, `(recommendation_id, menu_key)` 기준 최신 유효 1표 상태(`recommendation_feedback_states`)만 갱신. `Idempotency-Key` 재전송 시 중복 집계 방지 |
+| `POST /api/recommendations/{recommendation_id}/all-menu-reject` | 첫 추천 목록 전체 거절 | ‘이 중엔 먹고 싶은 게 없어요’를 선택하면 주문서를 종료하고 목록 거절 한 건을 기록한다. `Idempotency-Key`로 같은 요청을 재전송하면 기존 응답을 돌려주며, 추천 메뉴가 0개인 주문서는 `409 ZERO_CANDIDATES_RECOMMENDATION`을 반환한다. |
 
 랜덤 추천과 식사 기록 조회의 `image_url`은 백엔드 기준 상대 경로 문자열이다. 음식 종류의 대표 일러스트를 쓰며, 메뉴별 예외에 해당하거나 사용할 수 있는 대표 파일이 없으면 공통 이미지 `/static/menu-illustrations/default.svg`를 반환한다.
 

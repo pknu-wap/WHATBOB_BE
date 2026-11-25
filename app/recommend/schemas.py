@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Generic, Optional, TypeVar
 from pydantic import BaseModel, ConfigDict, Field
 from app.recommend.question_pool import MAX_QUESTION_TEXT_LENGTH, QUESTION_OPTION_COUNT
@@ -81,6 +82,7 @@ class UnableIngredientListResponse(BaseModel):
 
 
 class OrderSheetQuestionsResponse(BaseModel):
+    order_sheet_id: Optional[str] = None
     questions: list[OrderSheetQuestionDTO]
     total_count: int
     exploitation_count: int
@@ -97,6 +99,10 @@ class AnswerItemRequest(BaseModel):
 class OrderSheetRecommendRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    order_sheet_id: Optional[str | int] = Field(
+        default=None,
+        description="발급된 개인 주문서 식별자(선택, 전달 시 해당 발급 이력을 완료 처리)",
+    )
     exclusions: list[str] = Field(
         default_factory=list,
         description="추가로 제외할 알레르기/섭취불가/비선호 음식 또는 재료 키워드",
@@ -141,6 +147,27 @@ class OrderSheetRecommendResponse(BaseModel):
     candidate_count: int
 
 
+class SuggestedAnswerChangeDTO(BaseModel):
+    question_id: int = Field(description="변경을 제안하는 질문 ID")
+    replacement_option_id: str = Field(description="대체할 중립 선택지 ID (예: any)")
+    display_text: str = Field(description="사용자에게 보여줄 변경 제안 안내 문구")
+    display_menu_count: int = Field(
+        ge=1,
+        description="해당 답변만 변경했을 때 표시할 수 있는 음식 종류 수 (최대 5)",
+    )
+
+
+class OrderSheetNoResultsResponse(BaseModel):
+    suggested_answer_changes: list[SuggestedAnswerChangeDTO] = Field(
+        default_factory=list,
+        description="실제 후보가 생기는 단일 하드필터 변경 제안 목록 (표시 가능 수 내림차순)",
+    )
+    can_review_my_answers: bool = Field(
+        default=True,
+        description="기존 답변이 채워진 '내 답변 다시 보기' 제공 가능 여부",
+    )
+
+
 class RandomMenuDTO(BaseModel):
     menu_id: int
     food_code: str
@@ -165,6 +192,17 @@ class RecommendationFeedbackResponse(BaseModel):
     recommendation_id: int
     is_satisfied: bool
     updated_weights: dict[str, float]
+    selected_menu_id: Optional[int] = None
+    exposure_rank: Optional[int] = None
+
+
+class RecommendationRejectResponse(BaseModel):
+    recommendation_id: int
+    is_list_rejected: bool = True
+    is_closed: bool = True
+    list_rejected_at: datetime
+    closed_at: datetime
+    outcome: str
 
 
 class WeightAdjustmentItem(BaseModel):

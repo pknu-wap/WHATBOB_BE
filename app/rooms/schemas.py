@@ -120,6 +120,10 @@ class RoomOrderSheetSubmitRequest(BaseModel):
     round_no: int | None = None
 
 
+class RoomOrderSheetNoResultsRequest(RoomOrderSheetSubmitRequest):
+    round_id: int
+
+
 class RoomVoteSubmitRequest(BaseModel):
     """T04 / T06: Multiple-choice vote submission with vote_round_no epoch fence."""
     model_config = ConfigDict(extra="forbid")

@@ -13,11 +13,13 @@ from app.recommend.common import (
     UNABLE_CATALOG_VERSION,
     UNABLE_INGREDIENT_ITEMS,
 )
+from app.recommend.feedback import record_recommendation_feedback, reject_recommendation_list
+from app.recommend.no_results import get_personal_order_sheet_no_results_suggestions
 from app.recommend.order_sheet import (
     DEFAULT_EXPLOITATION_COUNT,
     DEFAULT_TOTAL_QUESTIONS,
     create_order_sheet_recommendation,
-    record_recommendation_feedback,
+    issue_order_sheet_questions,
     select_order_sheet_questions,
     tune_question_weights,
 )
@@ -26,6 +28,7 @@ from app.recommend.schemas import (
     AllergenItemDTO,
     AllergenListResponse,
     ApiResponse,
+    OrderSheetNoResultsResponse,
     OrderSheetQuestionsResponse,
     OrderSheetRecommendRequest,
     OrderSheetRecommendResponse,
@@ -35,6 +38,7 @@ from app.recommend.schemas import (
     RandomRecommendResponse,
     RecommendationFeedbackRequest,
     RecommendationFeedbackResponse,
+    RecommendationRejectResponse,
     UnableIngredientItemDTO,
     UnableIngredientListResponse,
 )
@@ -145,38 +149,51 @@ def get_random_recommendation(
     status_code=status.HTTP_200_OK,
 )
 def get_order_sheet_questions(
-    total_count: int = Query(
-        default=DEFAULT_TOTAL_QUESTIONS,
+    total_count: int | None = Query(
+        default=None,
         ge=1,
         le=20,
-        description="반환할 주문서 전체 질문 개수 (기본 최대 9개, 활성 주제 수 이내)",
+        description="반환할 주문서 전체 질문 개수 (미지정 시 서버 설정 ORDER_SHEET_QUESTION_COUNT 사용)",
     ),
-    exploitation_count: int = Query(
-        default=DEFAULT_EXPLOITATION_COUNT,
+    exploitation_count: int | None = Query(
+        default=None,
         ge=1,
         le=20,
-        description="가중치 최상위 고정 질문 개수 (나머지는 후보 탐색 질문)",
+        description="가중치 최상위 고정 질문 개수 (미지정 시 기본 주문서 전체 문항 수 적용)",
     ),
+    issuance_key: str | None = Query(
+        default=None,
+        description="동일 주문서 진입 요청 재전송 식별자 (Idempotency-Key 헤더와 동일 역할)",
+    ),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     http_request: Request = None,
     response: Response = None,
     current_user: User = Depends(get_current_user),
 ):
     """
-    DB에 적재된 질문 풀에서 엔트로피·피드백 기반 중요도가 높은 질문(기본 7개)과
-    새로운 피드백 수집을 위한 탐색 질문(기본 2개)을 합쳐 최대 9개의 주문서 질문지를 반환합니다.
+    개인 주문서 진입 시 오늘 답할 9문항(서버 설정 기준)을 발급한다.
+    동일한 Idempotency-Key(또는 issuance_key)로 재전송하면 기존 발급 주문서를 그대로 반환하고,
+    새로고침·재입장 시 새 주문서를 발급한다.
     """
     if response is not None:
         response.headers["Cache-Control"] = "no-store"
+    user_id = None
     scope_key = None
     if isinstance(current_user, User):
         locked_user = lock_user_and_verify_session(db, current_user)
+        user_id = locked_user.id
         scope_key = f"user:{locked_user.id}"
-    result = select_order_sheet_questions(
+    raw_idem_key = idempotency_key if isinstance(idempotency_key, str) else None
+    raw_issuance_key = issuance_key if isinstance(issuance_key, str) else None
+    result = issue_order_sheet_questions(
         db=db,
+        user_id=user_id,
         total_count=total_count,
-        exploitation_count=min(exploitation_count, total_count),
+        exploitation_count=exploitation_count,
         scope_key=scope_key,
+        idempotency_key=raw_idem_key,
+        issuance_key=raw_issuance_key,
     )
     return ApiResponse(success=True, data=result, message=None)
 
@@ -197,6 +214,30 @@ def submit_order_sheet(
     """
     actor = current_user if isinstance(current_user, User) else None
     result = create_order_sheet_recommendation(
+        db=db,
+        request=request,
+        user_id=actor.id if actor is not None else None,
+        current_user=actor,
+    )
+    return ApiResponse(success=True, data=result, message=None)
+
+
+@router.post(
+    "/order-sheet/no-results",
+    response_model=ApiResponse[OrderSheetNoResultsResponse],
+    status_code=status.HTTP_200_OK,
+)
+def get_order_sheet_no_results_suggestions(
+    request: OrderSheetRecommendRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    개인 주문서 첫 추천 후보가 0종일 때, 적용 중인 취향 하드필터 답변을 하나씩 독립적으로
+    중립('상관없어요')으로 바꿔 후보가 생기는 변경 제안을 읽기 전용으로 조회합니다.
+    """
+    actor = current_user if isinstance(current_user, User) else None
+    result = get_personal_order_sheet_no_results_suggestions(
         db=db,
         request=request,
         user_id=actor.id if actor is not None else None,
@@ -227,6 +268,33 @@ def submit_recommendation_feedback(
         db=db,
         recommendation_id=recommendation_id,
         request=request,
+        user_id=actor.id if actor is not None else None,
+        current_user=actor,
+        idempotency_key=raw_idem_key,
+    )
+    return ApiResponse(success=True, data=result, message=None)
+
+
+@router.post(
+    "/{recommendation_id}/all-menu-reject",
+    response_model=ApiResponse[RecommendationRejectResponse],
+    status_code=status.HTTP_200_OK,
+)
+def submit_recommendation_list_rejection(
+    recommendation_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    """
+    첫 추천 목록에서 '이 중엔 먹고 싶은 게 없어요'를 선택했을 때
+    해당 주문서를 종료하고 명시적 목록 거절 한 건을 멱등하게 기록합니다.
+    """
+    actor = current_user if isinstance(current_user, User) else None
+    raw_idem_key = idempotency_key if isinstance(idempotency_key, str) else None
+    result = reject_recommendation_list(
+        db=db,
+        recommendation_id=recommendation_id,
         user_id=actor.id if actor is not None else None,
         current_user=actor,
         idempotency_key=raw_idem_key,
