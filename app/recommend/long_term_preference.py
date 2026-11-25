@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -29,15 +29,10 @@ def _to_utc_aware(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _to_kst_date(value: datetime) -> date:
-    return _to_utc_aware(value).astimezone(get_seoul_tz()).date()
-
-
 def calculate_long_term_preference_scores(
     reactions: Sequence[FoodKindReaction],
     *,
     reference_time: datetime | None = None,
-    min_days: int | None = None,
     half_life_days: float | None = None,
     max_score: float | None = None,
     exclude_recommendation_id: int | None = None,
@@ -45,10 +40,7 @@ def calculate_long_term_preference_scores(
     """
     음식 종류별 좋아요·싫어요 반응으로부터 장기 취향 보정 점수([-max_score, +max_score])를 계산한다.
 
-    - 가중합이 음수면 싫어요 한 건부터 감점한다.
-    - 가중합이 0 이상이면 한국 날짜(Asia/Seoul) 기준으로 같은 방향의 반응이 서로 다른
-      min_days(초기 2)일 이상 쌓였을 때 활성화한다.
-    - 같은 날 서로 다른 메뉴에 남긴 반응은 각각 가중치를 합산하되 날짜는 하루로 센다.
+    - 좋아요·싫어요는 첫 반응부터 각 가중치를 합산한다.
     - 반응 한 건의 가중치는 0.5 ** (경과 한국 일수 / half_life_days)이며,
       좋아요는 양수, 싫어요는 음수로 합산한 뒤 [-1.0, +1.0]로 제한하고 max_score(초기 0.25)를 곱한다.
     """
@@ -56,11 +48,9 @@ def calculate_long_term_preference_scores(
         return {}
 
     ref_utc = _to_utc_aware(reference_time if reference_time is not None else datetime.now(timezone.utc))
-    ref_kst_date = ref_utc.astimezone(get_seoul_tz()).date()
+    seoul_tz = get_seoul_tz()
+    ref_kst_date = ref_utc.astimezone(seoul_tz).date()
 
-    effective_min_days = (
-        int(settings.ORDER_SHEET_LONG_TERM_MIN_DAYS) if min_days is None else int(min_days)
-    )
     effective_half_life = float(
         settings.ORDER_SHEET_LONG_TERM_HALF_LIFE_DAYS if half_life_days is None else half_life_days
     )
@@ -69,12 +59,10 @@ def calculate_long_term_preference_scores(
     )
     if effective_half_life <= 0.0:
         raise ValueError("half_life_days는 0보다 커야 합니다.")
-    if effective_min_days < 1:
-        raise ValueError("min_days는 1 이상이어야 합니다.")
     if effective_max_score < 0.0:
         raise ValueError("max_score는 0 이상이어야 합니다.")
 
-    grouped: dict[str, list[tuple[date, bool]]] = {}
+    net_weights: dict[str, float] = {}
     for reaction in reactions:
         key = (reaction.food_kind_key or "").strip()
         if not key:
@@ -88,28 +76,14 @@ def calculate_long_term_preference_scores(
         reacted_utc = _to_utc_aware(reaction.reacted_at)
         if reacted_utc > ref_utc:
             continue
-        reaction_kst_date = reacted_utc.astimezone(get_seoul_tz()).date()
-        grouped.setdefault(key, []).append((reaction_kst_date, bool(reaction.is_satisfied)))
+        reaction_kst_date = reacted_utc.astimezone(seoul_tz).date()
+        elapsed_days = max((ref_kst_date - reaction_kst_date).days, 0)
+        weight = 0.5 ** (elapsed_days / effective_half_life)
+        signed_weight = weight if reaction.is_satisfied else -weight
+        net_weights[key] = net_weights.get(key, 0.0) + signed_weight
 
     scores: dict[str, float] = {}
-    for kind_key, entries in grouped.items():
-        like_days: set[date] = set()
-        dislike_days: set[date] = set()
-        net_weight = 0.0
-
-        for reaction_kst_date, is_satisfied in entries:
-            elapsed_days = max((ref_kst_date - reaction_kst_date).days, 0)
-            weight = 0.5 ** (elapsed_days / effective_half_life)
-            if is_satisfied:
-                like_days.add(reaction_kst_date)
-                net_weight += weight
-            else:
-                dislike_days.add(reaction_kst_date)
-                net_weight -= weight
-
-        if net_weight >= 0.0 and max(len(like_days), len(dislike_days)) < effective_min_days:
-            continue
-
+    for kind_key, net_weight in net_weights.items():
         clamped = max(-1.0, min(1.0, net_weight))
         score = round(clamped * effective_max_score, 6)
         if score == 0.0:
@@ -155,7 +129,6 @@ def load_long_term_preference_scores(
     user_id: int,
     *,
     reference_time: datetime | None = None,
-    min_days: int | None = None,
     half_life_days: float | None = None,
     max_score: float | None = None,
     exclude_recommendation_id: int | None = None,
@@ -217,7 +190,6 @@ def load_long_term_preference_scores(
     return calculate_long_term_preference_scores(
         reactions,
         reference_time=reference_time,
-        min_days=min_days,
         half_life_days=half_life_days,
         max_score=max_score,
         exclude_recommendation_id=exclude_recommendation_id,

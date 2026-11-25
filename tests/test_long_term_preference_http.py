@@ -124,9 +124,7 @@ def _answers_payload(q_map: dict[str, OrderSheetQuestion], overrides: dict[str, 
     }
 
 
-def test_http_single_dislike_same_day_likes_consecutive_days_and_excludes_reject_and_map_reactions(
-    db: Session,
-):
+def test_http_first_menu_reactions_apply_same_day_and_exclude_reject_and_map_reactions(db: Session):
     user = User(kakao_id=831001, nickname="HTTP장기취향유저")
     db.add(user)
     q_map = _seed_questions(db)
@@ -145,10 +143,10 @@ def test_http_single_dislike_same_day_likes_consecutive_days_and_excludes_reject
         d1 = r1.json()["data"]
         assert [m["base_name"] for m in d1["recommended_menus"]] == ["비빔밥", "라면", "짜장면", "우동"]
 
-        # 2. 우동에 한 번 싫어요 -> 같은 날 다음 주문서에 -0.25점이 적용된다.
+        # 2. 짜장면에 첫 싫어요를 누르면 같은 날 다음 주문서에서 순위가 내려간다.
         fb1 = client.post(
             f"/api/recommendations/{d1['recommendation_id']}/feedback",
-            json={"selected_menu_id": udon_a.id, "is_satisfied": False},
+            json={"selected_menu_id": jjajang.id, "is_satisfied": False},
         )
         assert fb1.status_code == 200
         assert fb1.json()["data"]["updated_weights"] == {}
@@ -156,22 +154,9 @@ def test_http_single_dislike_same_day_likes_consecutive_days_and_excludes_reject
         r2 = client.post("/api/recommendations/order-sheet", json=_answers_payload(q_map))
         assert r2.status_code == 201
         d2 = r2.json()["data"]
-        assert [m["base_name"] for m in d2["recommended_menus"]] == ["비빔밥", "라면", "짜장면", "우동"]
-        udon_adjustment = (
-            db.query(RecommendationItemSnapshot.personal_adjustment)
-            .filter(
-                RecommendationItemSnapshot.recommendation_id == d2["recommendation_id"],
-                RecommendationItemSnapshot.menu_id == udon_a.id,
-            )
-            .scalar()
-        )
-        assert udon_adjustment == -0.25
+        assert [m["base_name"] for m in d2["recommended_menus"]] == ["비빔밥", "라면", "우동", "짜장면"]
 
-        # 3. 같은 날 우동 좋아요 2건으로 가중합이 양수가 되어도 가점 조건은 아직 충족하지 않는다.
-        r3 = client.post("/api/recommendations/order-sheet", json=_answers_payload(q_map))
-        assert r3.status_code == 201
-        d3 = r3.json()["data"]
-
+        # 3. 우동에 첫 좋아요를 누르면 같은 날 다음 주문서에서 우동이 1위가 된다.
         assert (
             client.post(
                 f"/api/recommendations/{d2['recommendation_id']}/feedback",
@@ -179,13 +164,10 @@ def test_http_single_dislike_same_day_likes_consecutive_days_and_excludes_reject
             ).status_code
             == 200
         )
-        assert (
-            client.post(
-                f"/api/recommendations/{d3['recommendation_id']}/feedback",
-                json={"selected_menu_id": udon_a.id, "is_satisfied": True},
-            ).status_code
-            == 200
-        )
+        r3 = client.post("/api/recommendations/order-sheet", json=_answers_payload(q_map))
+        assert r3.status_code == 201
+        d3 = r3.json()["data"]
+        assert [m["base_name"] for m in d3["recommended_menus"]] == ["우동", "비빔밥", "라면", "짜장면"]
 
         # 목록 거절 + 지도 가게 선택·만족을 라면에 대해 기록 (서로 다른 날 시뮬레이션)
         reject_rec = client.post("/api/recommendations/order-sheet", json=_answers_payload(q_map)).json()["data"]
@@ -238,37 +220,19 @@ def test_http_single_dislike_same_day_likes_consecutive_days_and_excludes_reject
         )
         db.commit()
 
-        # 같은 날 우동 좋아요 2건만 있으므로 아직 비빔밥 > 라면 > 짜장면 > 우동
+        # 목록 거절과 지도 만족을 남긴 뒤에도 메뉴별 보정 점수만 적용된다.
         r4 = client.post("/api/recommendations/order-sheet", json=_answers_payload(q_map))
         assert r4.status_code == 201
         d4 = r4.json()["data"]
-        assert [m["base_name"] for m in d4["recommended_menus"]] == ["비빔밥", "라면", "짜장면", "우동"]
-
-        # 4. d2의 우동 좋아요를 어제로 이동 -> 이틀 연속 좋아요 성립 -> 다음 주문서부터 우동 +0.25 1위!
-        # (d1의 우동 싫어요는 오늘이므로 제거해 순수 이틀 연속 좋아요 검증)
-        db.query(RecommendationFeedbackState).filter(
-            RecommendationFeedbackState.recommendation_id == d1["recommendation_id"]
-        ).delete()
-        db.query(RecommendationFeedbackState).filter(
-            RecommendationFeedbackState.recommendation_id == d2["recommendation_id"]
-        ).update({"created_at": yesterday, "updated_at": yesterday})
-        db.commit()
-
-        r5 = client.post("/api/recommendations/order-sheet", json=_answers_payload(q_map))
-        assert r5.status_code == 201
-        d5 = r5.json()["data"]
-        assert [m["base_name"] for m in d5["recommended_menus"]] == ["우동", "비빔밥", "라면", "짜장면"]
+        assert [m["base_name"] for m in d4["recommended_menus"]] == ["우동", "비빔밥", "라면", "짜장면"]
 
         snaps = {
             s.menu_id: s.personal_adjustment
             for s in db.query(RecommendationItemSnapshot)
-            .filter(RecommendationItemSnapshot.recommendation_id == d5["recommendation_id"])
+            .filter(RecommendationItemSnapshot.recommendation_id == d4["recommendation_id"])
             .all()
         }
-        assert snaps[udon_a.id] == pytest.approx(0.25, abs=1e-6)
-        assert snaps[bibimbap.id] == 0.0
-        assert snaps[ramen.id] == 0.0
-        assert snaps[jjajang.id] == 0.0
+        assert snaps == {udon_a.id: 0.25, bibimbap.id: 0.0, ramen.id: 0.0, jjajang.id: -0.25}
 
 
 def test_http_spec_section3_decay_reversal_and_todays_answer_priority(db: Session):

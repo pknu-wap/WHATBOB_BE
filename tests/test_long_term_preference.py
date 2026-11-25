@@ -1,4 +1,4 @@
-"""Spec #77 / Ticket #83: 반복된 메뉴 평가의 음식 종류별 장기 취향 보정 단위·서비스 테스트."""
+"""Spec #77 / Ticket #83: 메뉴 평가의 음식 종류별 장기 취향 보정 단위·서비스 테스트."""
 
 from __future__ import annotations
 
@@ -40,65 +40,41 @@ KST = get_seoul_tz()
 
 
 def test_long_term_preference_default_settings():
-    assert settings.ORDER_SHEET_LONG_TERM_MIN_DAYS == 2
     assert settings.ORDER_SHEET_LONG_TERM_HALF_LIFE_DAYS == 42.0
     assert settings.ORDER_SHEET_LONG_TERM_MAX_SCORE == 0.25
 
 
-def test_positive_scores_require_repeated_reactions_on_different_days():
-    ref = datetime(2026, 11, 24, 18, 0, tzinfo=KST)
-
-    # 같은 한국 날짜에 우동 메뉴 3건 좋아요 -> 날짜는 1일뿐이므로 보정 0점
-    same_day_likes = [
-        FoodKindReaction(food_kind_key="우동", is_satisfied=True, reacted_at=datetime(2026, 11, 24, 9, 0, tzinfo=KST)),
-        FoodKindReaction(food_kind_key="우동", is_satisfied=True, reacted_at=datetime(2026, 11, 24, 12, 30, tzinfo=KST)),
-        FoodKindReaction(food_kind_key="우동", is_satisfied=True, reacted_at=datetime(2026, 11, 24, 15, 0, tzinfo=KST)),
-    ]
-    scores_same_day = calculate_long_term_preference_scores(same_day_likes, reference_time=ref)
-    assert scores_same_day.get("우동", 0.0) == 0.0
-
-    # 가중합이 양수여도 어느 방향도 2일에 못 미치면 가점은 0점
-    mixed_single_days = [
-        FoodKindReaction("우동", True, ref - timedelta(days=1)),
-        FoodKindReaction("우동", False, ref - timedelta(days=2)),
-    ]
-    scores_mixed = calculate_long_term_preference_scores(mixed_single_days, reference_time=ref)
-    assert scores_mixed.get("우동", 0.0) == 0.0
-
-
-def test_first_dislike_applies_immediately_and_repeated_dislike_restores_the_cap():
+@pytest.mark.parametrize(("is_satisfied", "cap"), [(True, 0.25), (False, -0.25)], ids=["like", "dislike"])
+def test_first_reaction_applies_immediately_and_repeated_reaction_restores_the_cap(is_satisfied, cap):
     ref = datetime(2026, 11, 24, 12, 0, tzinfo=KST)
-    first_dislike = FoodKindReaction("우동", False, ref)
+    first_reaction = FoodKindReaction("우동", is_satisfied, ref)
     tomorrow = ref + timedelta(days=1)
-    second_dislike = FoodKindReaction("우동", False, tomorrow)
+    second_reaction = FoodKindReaction("우동", is_satisfied, tomorrow)
 
-    assert calculate_long_term_preference_scores([first_dislike], reference_time=ref)["우동"] == -0.25
-    assert calculate_long_term_preference_scores([first_dislike], reference_time=tomorrow)["우동"] == pytest.approx(
-        -0.25 * 0.5 ** (1 / 42), abs=1e-6,
+    assert calculate_long_term_preference_scores([first_reaction], reference_time=ref).get("우동", 0.0) == cap
+    assert calculate_long_term_preference_scores([first_reaction], reference_time=tomorrow)["우동"] == pytest.approx(
+        cap * 0.5 ** (1 / 42), abs=1e-6,
     )
     assert calculate_long_term_preference_scores(
-        [first_dislike], reference_time=ref + timedelta(days=42),
-    )["우동"] == -0.125
+        [first_reaction], reference_time=ref + timedelta(days=42),
+    )["우동"] == cap / 2
     assert calculate_long_term_preference_scores(
-        [first_dislike, second_dislike], reference_time=tomorrow,
-    )["우동"] == -0.25
+        [first_reaction, second_reaction], reference_time=tomorrow,
+    )["우동"] == cap
 
-    previous_like = FoodKindReaction("우동", True, ref - timedelta(days=42))
-    assert calculate_long_term_preference_scores([previous_like, first_dislike], reference_time=ref)["우동"] == -0.125
+    opposite_reaction = FoodKindReaction("우동", not is_satisfied, ref - timedelta(days=42))
+    assert calculate_long_term_preference_scores(
+        [opposite_reaction, first_reaction], reference_time=ref,
+    )["우동"] == cap / 2
 
 
-def test_two_consecutive_kst_days_likes_yield_max_boost_and_respect_kst_midnight():
-    # 같은 UTC 날짜(2026-11-23)이지만 KST 자정(15:00 UTC)을 경계로 11/23과 11/24 서로 다른 한국 날짜
+def test_like_weight_decays_at_kst_midnight():
     before_kst_midnight = datetime(2026, 11, 23, 14, 59, 0, tzinfo=timezone.utc)  # 2026-11-23 23:59 KST
     after_kst_midnight = datetime(2026, 11, 23, 15, 1, 0, tzinfo=timezone.utc)    # 2026-11-24 00:01 KST
-    ref = datetime(2026, 11, 24, 12, 0, 0, tzinfo=KST)
+    reactions = [FoodKindReaction("우동", True, before_kst_midnight)]
 
-    reactions = [
-        FoodKindReaction(food_kind_key="우동", is_satisfied=True, reacted_at=before_kst_midnight),
-        FoodKindReaction(food_kind_key="우동", is_satisfied=True, reacted_at=after_kst_midnight),
-    ]
-    scores = calculate_long_term_preference_scores(reactions, reference_time=ref)
-    assert scores["우동"] == pytest.approx(0.25, abs=1e-6)
+    assert calculate_long_term_preference_scores(reactions, reference_time=before_kst_midnight)["우동"] == 0.25
+    assert calculate_long_term_preference_scores(reactions, reference_time=after_kst_midnight)["우동"] == 0.245908
 
 
 def test_spec_section3_worked_examples_with_42_day_half_life():
@@ -136,21 +112,21 @@ def test_spec_section3_worked_examples_with_42_day_half_life():
     assert score_3 == pytest.approx(-0.023, abs=0.001)
 
 
-def test_same_day_multiple_reactions_count_as_one_day_but_each_contributes_weight():
+def test_same_day_reactions_each_contribute_weight_up_to_the_cap():
     ref = datetime(2026, 11, 24, 12, 0, tzinfo=KST)
     day_30_am = datetime(2026, 10, 25, 11, 0, tzinfo=KST)
     day_30_pm = datetime(2026, 10, 25, 19, 0, tzinfo=KST)
     day_28 = datetime(2026, 10, 27, 12, 0, tzinfo=KST)
     day_1 = datetime(2026, 11, 23, 12, 0, tzinfo=KST)
 
-    # 30일 전 같은 날 서로 다른 메뉴 2건만 있을 때는 아직 1일 -> 0점
+    # 같은 날 좋아요 두 건도 각각 가중치에 포함된다.
     only_one_day = [
         FoodKindReaction("우동", True, day_30_am),
         FoodKindReaction("우동", True, day_30_pm),
     ]
-    assert calculate_long_term_preference_scores(only_one_day, reference_time=ref).get("우동", 0.0) == 0.0
+    assert calculate_long_term_preference_scores(only_one_day, reference_time=ref)["우동"] == 0.25
 
-    # 28일 전 좋아요 1건이 추가되어 2일이 되면, 30일 전 두 건이 모두 가중합에 기여한다
+    # 다른 날의 좋아요와 싫어요까지 가중합에 포함된다.
     # (2 * 0.5^(30/42) + 0.5^(28/42) - 0.5^(1/42)) * 0.25 ~= 0.216335
     with_second_day = [
         FoodKindReaction("우동", True, day_30_am),
@@ -184,16 +160,11 @@ def test_scores_clamp_to_bounds_and_server_settings_are_configurable(monkeypatch
     monkeypatch.setattr(settings, "ORDER_SHEET_LONG_TERM_HALF_LIFE_DAYS", 56.0)
     assert calculate_long_term_preference_scores(case_50_48_1, reference_time=ref)["우동"] > 0.0
 
-    # 적용 일수를 3일로 올리면 2일 좋아요는 0점
+    # 보정 상한을 0.40으로 조정하면 +0.40 적용
     two_day_likes = [
         FoodKindReaction("우동", True, ref - timedelta(days=2)),
         FoodKindReaction("우동", True, ref - timedelta(days=1)),
     ]
-    monkeypatch.setattr(settings, "ORDER_SHEET_LONG_TERM_MIN_DAYS", 3)
-    assert calculate_long_term_preference_scores(two_day_likes, reference_time=ref).get("우동", 0.0) == 0.0
-
-    # 보정 상한을 0.40으로 조정하면 활성화 시 +0.40 적용
-    monkeypatch.setattr(settings, "ORDER_SHEET_LONG_TERM_MIN_DAYS", 2)
     monkeypatch.setattr(settings, "ORDER_SHEET_LONG_TERM_MAX_SCORE", 0.40)
     assert calculate_long_term_preference_scores(two_day_likes, reference_time=ref)["우동"] == pytest.approx(
         0.40, abs=1e-6
@@ -206,10 +177,10 @@ def test_future_reactions_and_excluded_recommendation_id_are_ignored():
         FoodKindReaction("우동", True, ref - timedelta(days=1), recommendation_id=10),
         FoodKindReaction("우동", True, ref + timedelta(seconds=1), recommendation_id=11),
     ]
-    # 미래 시각 반응 제외 -> 1일뿐이라 0점
-    assert calculate_long_term_preference_scores(reactions, reference_time=ref).get("우동", 0.0) == 0.0
+    # 미래 시각 반응을 제외하고 전날 좋아요만 합산한다.
+    assert calculate_long_term_preference_scores(reactions, reference_time=ref)["우동"] == 0.245908
 
-    # 현재 주문서(recommendation_id=11) 제외 -> 1일뿐이라 0점
+    # 현재 주문서(recommendation_id=11)를 제외하고 전날 좋아요만 합산한다.
     same_or_earlier = [
         FoodKindReaction("우동", True, ref - timedelta(days=1), recommendation_id=10),
         FoodKindReaction("우동", True, ref, recommendation_id=11),
@@ -219,8 +190,8 @@ def test_future_reactions_and_excluded_recommendation_id_are_ignored():
             same_or_earlier,
             reference_time=ref,
             exclude_recommendation_id=11,
-        ).get("우동", 0.0)
-        == 0.0
+        )["우동"]
+        == 0.245908
     )
 
 
