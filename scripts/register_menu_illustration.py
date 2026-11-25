@@ -47,12 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sync-deployed",
         action="store_true",
-        help="Sync food_kinds.representative_image_url for mapped illustration files currently deployed on disk.",
+        help="Register deployed illustrations, preferring SVG and upgrading mapped PNG paths to SVG.",
     )
     parser.add_argument(
         "--overwrite-existing",
         action="store_true",
-        help="Used with --sync-deployed to overwrite already-registered representative_image_url paths.",
+        help="Used with --sync-deployed to also replace custom representative_image_url paths.",
     )
     parser.add_argument(
         "--kind-key",

@@ -4,8 +4,9 @@ from pathlib import Path
 from sqlalchemy import event
 from sqlalchemy.orm import Session
 
-DEFAULT_MENU_ILLUSTRATION_URL = "/static/menu-illustrations/default.svg"
 STATIC_URL_PREFIX = "/static/"
+MENU_ILLUSTRATIONS_URL_PREFIX = f"{STATIC_URL_PREFIX}menu-illustrations/"
+DEFAULT_MENU_ILLUSTRATION_URL = f"{MENU_ILLUSTRATIONS_URL_PREFIX}default.svg"
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
@@ -82,6 +83,31 @@ def resolve_safe_static_file_path(
     return cleaned, candidate
 
 
+def find_deployed_menu_illustration_url(
+    image_url: str,
+    *,
+    static_dir: Path | None = None,
+    prefer_svg: bool = False,
+) -> str | None:
+    """등록된 형식을 우선하고, 같은 이름의 대체 파일을 찾는다."""
+    cleaned = image_url.strip()
+    stem, _, extension = cleaned.rpartition(".")
+    urls = (cleaned,)
+    if cleaned.startswith(MENU_ILLUSTRATIONS_URL_PREFIX) and (
+        extension == "svg" or (extension == "png" and prefer_svg)
+    ):
+        urls = (f"{stem}.svg", f"{stem}.png")
+
+    for url in urls:
+        try:
+            _, candidate = resolve_safe_static_file_path(url, static_dir=static_dir)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return url
+    return None
+
+
 def resolve_menu_illustration_url(
     representative_image_url: str | None,
     *,
@@ -92,17 +118,10 @@ def resolve_menu_illustration_url(
     if use_common_fallback or not representative_image_url:
         return DEFAULT_MENU_ILLUSTRATION_URL
 
-    try:
-        cleaned, candidate = resolve_safe_static_file_path(
-            representative_image_url,
-            static_dir=static_dir,
-        )
-    except ValueError:
-        return DEFAULT_MENU_ILLUSTRATION_URL
-
-    if candidate.is_file():
-        return cleaned
-    return DEFAULT_MENU_ILLUSTRATION_URL
+    return (
+        find_deployed_menu_illustration_url(representative_image_url, static_dir=static_dir)
+        or DEFAULT_MENU_ILLUSTRATION_URL
+    )
 
 
 def get_menu_illustration_url(db: Session, menu_id: int) -> str:

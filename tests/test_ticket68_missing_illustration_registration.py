@@ -1454,7 +1454,11 @@ def test_mysql_issue68_cli_registration_and_immediate_home_api_reflection(
             assert json.loads(res_jj.stdout)["image_url"] == "/static/menu-illustrations/jjajangmyeon.png"
 
             (illus_dir / "pasta.png").write_bytes(pasta_src.read_bytes())
-            res_sync = run_cli("--sync-deployed")
+            sync_static = tmp_path / "sync-static"
+            sync_assets = sync_static / "menu-illustrations"
+            sync_assets.mkdir(parents=True)
+            (sync_assets / "pasta.png").write_bytes(pasta_src.read_bytes())
+            res_sync = run_cli("--sync-deployed", "--static-dir", str(sync_static))
             assert res_sync.returncode == 0, res_sync.stdout + res_sync.stderr
             assert json.loads(res_sync.stdout)["updated"] == 1
 

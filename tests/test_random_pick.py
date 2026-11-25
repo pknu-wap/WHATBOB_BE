@@ -137,7 +137,7 @@ def test_random_pick_does_not_relax_exclusions_when_no_candidate_remains(db):
 @pytest.mark.parametrize(
     ("representative_url", "has_exception", "expected_url"),
     [
-        ("/static/menu-illustrations/bibimbap.png", False, "/static/menu-illustrations/bibimbap.png"),
+        ("/static/menu-illustrations/bibimbap.svg", False, "/static/menu-illustrations/bibimbap.svg"),
         ("/static/menu-illustrations/bibimbap.png", True, DEFAULT_MENU_ILLUSTRATION_URL),
         ("/static/menu-illustrations/missing.png", False, DEFAULT_MENU_ILLUSTRATION_URL),
         (None, False, DEFAULT_MENU_ILLUSTRATION_URL),
