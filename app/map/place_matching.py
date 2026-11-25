@@ -9,6 +9,11 @@ MAX_MATCH_DISTANCE_M = 100
 EARTH_RADIUS_M = 6_371_000
 _COMPANY_MARKERS = ("주식회사", "유한회사", "(주)", "(유)")
 _KOREAN_REGION_SUFFIXES = ("특별자치도", "특별자치시", "광역시", "특별시")
+_ROAD_ADDRESS_PATTERN = re.compile(
+    r"(?P<road>[가-힣a-z0-9·.]+(?:대로|로|길)(?:\s*\d+번길)?)"
+    r"\s*(?P<main>\d+)(?:\s*-\s*(?P<sub>\d+))?(?!\d)",
+    re.IGNORECASE,
+)
 
 
 def find_unique_google_place_id(
@@ -45,14 +50,29 @@ def _normalize_name(value: str) -> str:
 
 
 def _same_address(place: NearbyPlaceDTO, google_address: str) -> bool:
+    google_road_key = _road_address_key(google_address)
+    kakao_road_key = _road_address_key(place.road_address or "")
+    if google_road_key and kakao_road_key:
+        return google_road_key == kakao_road_key
+
     google_key = _normalize_address(google_address)
     if not google_key:
         return False
     for kakao_address in (place.road_address, place.address):
         kakao_key = _normalize_address(kakao_address or "")
-        if kakao_key and (kakao_key in google_key or google_key in kakao_key):
+        if kakao_key and kakao_key == google_key:
             return True
     return False
+
+
+def _road_address_key(value: str) -> tuple[str, int, int | None] | None:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    match = _ROAD_ADDRESS_PATTERN.search(normalized)
+    if match is None:
+        return None
+    road_name = "".join(character for character in match.group("road") if character.isalnum())
+    sub_number = match.group("sub")
+    return road_name, int(match.group("main")), int(sub_number) if sub_number else None
 
 
 def _normalize_address(value: str) -> str:

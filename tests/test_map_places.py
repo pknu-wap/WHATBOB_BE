@@ -404,6 +404,16 @@ def test_matches_unique_google_place_with_normalized_name_address_and_nearby_coo
     assert result == "ChIJ-match"
 
 
+@pytest.mark.parametrize("google_address", [
+    "대한민국 부산광역시 남구 용소로 45-1",
+    "대한민국 부산광역시 남구 용소로 450",
+])
+def test_rejects_google_candidate_with_different_road_building_number(google_address):
+    candidate = make_google_candidate(address=google_address)
+
+    assert find_unique_google_place_id(make_nearby_place(), [candidate]) is None
+
+
 @pytest.mark.parametrize("candidate", [
     make_google_candidate(name="봉추찜닭 경성대점"),
     make_google_candidate(name="다른식당 대연점"),
