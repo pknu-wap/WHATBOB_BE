@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     APP_DEEP_LINK_CALLBACK_URI: str = "whatbob://auth/kakao/callback"
     KAKAO_CLIENT_SECRET: str | None = None
     KAKAO_TOKEN_ENCRYPTION_KEY: str | None = None
+    GOOGLE_PLACES_API_KEY: str | None = None
+    GOOGLE_PLACES_REQUEST_TIMEOUT_SECONDS: float = Field(default=1.0, gt=0, le=5)
+    GOOGLE_PLACES_TOTAL_BUDGET_SECONDS: float = Field(default=2.5, gt=0, le=10)
+    GOOGLE_PLACES_MAX_CONCURRENCY: int = Field(default=3, ge=1, le=10)
     LLM_API_KEY: str | None = None
     LLM_API_URL: str = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
     LLM_MODEL: str = "gemini-2.0-flash"

@@ -13,6 +13,7 @@ class SearchRadius(IntEnum):
 
 class NearbyPlaceDTO(BaseModel):
     kakao_place_id: str
+    google_place_id: str | None = None
     name: str
     category_name: str | None = None
     phone: str | None = None

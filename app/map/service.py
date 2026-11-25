@@ -5,7 +5,9 @@ from urllib.parse import quote
 from sqlalchemy.orm import Session
 
 from app.map.exceptions import PlaceSearchMenuNotFoundException
+from app.map.google_places import GooglePlaceSearchClient
 from app.map.kakao_local import KAKAO_RESTAURANT_CATEGORY_CODE, PlaceSearchClient
+from app.map.place_enrichment import enrich_google_place_ids
 from app.map.schemas import NearbyPlaceDTO, NearbyPlacesResponse, SearchRadius
 from app.map.search_keywords import build_place_search_keyword
 from app.menus.models import Menu
@@ -23,6 +25,9 @@ def find_nearby_restaurants(
     latitude: float,
     longitude: float,
     radius: SearchRadius,
+    google_client: GooglePlaceSearchClient,
+    google_max_concurrency: int,
+    google_total_budget_seconds: float,
 ) -> NearbyPlacesResponse:
     """추천 메뉴로 사용자 주변 음식점을 직선거리순 최대 10개 찾는다.
 
@@ -54,6 +59,12 @@ def find_nearby_restaurants(
 
     places.sort(key=lambda p: p.distance_m)
     places = places[:MAX_NEARBY_PLACES]
+    enrich_google_place_ids(
+        places,
+        google_client,
+        max_concurrency=google_max_concurrency,
+        total_budget_seconds=google_total_budget_seconds,
+    )
 
     return NearbyPlacesResponse(
         menu_id=menu.id,
