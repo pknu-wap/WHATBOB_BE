@@ -8,6 +8,7 @@ import subprocess
 import sys
 from types import SimpleNamespace
 from uuid import uuid4
+from xml.etree import ElementTree
 
 from fastapi.testclient import TestClient
 import pytest
@@ -174,6 +175,19 @@ def test_resolve_menu_illustration_url_handles_common_fallback_and_file_existenc
             static_dir=tmp_path,
         )
         == "/static/menu-illustrations/pasta.png"
+    )
+    assert (
+        resolve_menu_illustration_url("/static/menu-illustrations/pasta.svg", static_dir=tmp_path)
+        == "/static/menu-illustrations/pasta.png"
+    )
+    (illustrations_dir / "pasta.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+    assert (
+        resolve_menu_illustration_url("/static/menu-illustrations/pasta.png", static_dir=tmp_path)
+        == "/static/menu-illustrations/pasta.png"
+    )
+    assert (
+        resolve_menu_illustration_url("/static/menu-illustrations/pasta.svg", static_dir=tmp_path)
+        == "/static/menu-illustrations/pasta.svg"
     )
     # Forced common fallback always returns common image even if representative file exists
     assert (
@@ -355,8 +369,9 @@ def test_sync_and_register_food_kind_illustrations_verify_files_and_preserve_cus
     )
     assert updated.representative_image_url == "/static/menu-illustrations/gukbap-v2.png"
 
-    # Re-running sync does NOT clobber custom registered path (even if gukbap.png later exists)
+    # A matching SVG upgrades the mapped path while preserving a separately named custom path.
     (illustrations_dir / "gukbap.png").write_bytes(b"fake-gukbap-default-png")
+    (illustrations_dir / "gukbap.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
     second_sync = sync_food_kind_representative_illustrations(sqlite_db, static_dir=tmp_path)
     assert second_sync["updated"] == 0
     assert second_sync["already_registered"] == 3
@@ -762,12 +777,12 @@ def test_catalog_illustration_sync_registers_all_136_images_and_preserves_food_k
         )
 
     examples = {
-        "김치우동": "udon.png",
-        "백우동": "udon.png",
-        "볶음 우동": "yaki_udon.png",
-        "치킨까스": "tonkatsu.png",
-        "치킨가스": "tonkatsu.png",
-        "생선까스": "fish_cutlet.png",
+        "김치우동": "udon.svg",
+        "백우동": "udon.svg",
+        "볶음 우동": "yaki_udon.svg",
+        "치킨까스": "tonkatsu.svg",
+        "치킨가스": "tonkatsu.svg",
+        "생선까스": "fish_cutlet.svg",
     }
     catalog_kinds.update({key: key for key in examples.keys() - catalog_kinds.keys()})
     db.add_all(FoodKind(kind_key=key, name=name) for key, name in catalog_kinds.items())
@@ -776,24 +791,40 @@ def test_catalog_illustration_sync_registers_all_136_images_and_preserves_food_k
         kind.kind_key: (kind.id, kind.name) for kind in db.query(FoodKind).all()
     }
 
+    legacy_kinds = db.query(FoodKind).filter(FoodKind.kind_key.in_(examples)).all()
+    for kind in legacy_kinds:
+        filename = examples[kind.kind_key].removesuffix(".svg")
+        kind.representative_image_url = f"/static/menu-illustrations/{filename}.png"
+    db.commit()
+
     first = sync_food_kind_representative_illustrations(db)
     assert first["updated"] == len(catalog_kinds)
     assert first["skipped_missing_file"] == 0
     assert first["skipped_missing_kind"] == 0
     kinds = {kind.kind_key: kind for kind in db.query(FoodKind).all()}
     assert {key: (kind.id, kind.name) for key, kind in kinds.items()} == original_kinds
-    expected_urls = {
-        f"/static/menu-illustrations/{file.name}"
-        for file in (STATIC_DIR / "menu-illustrations").glob("*.png")
-    }
+    illustrations_dir = STATIC_DIR / "menu-illustrations"
+    png_files = list(illustrations_dir.glob("*.png"))
+    svg_files = [file for file in illustrations_dir.glob("*.svg") if file.stem != "default"]
+    expected_urls = {f"/static/menu-illustrations/{file.name}" for file in svg_files}
     assert len(expected_urls) == 136
-    for png_file in (STATIC_DIR / "menu-illustrations").glob("*.png"):
+    assert {file.stem for file in svg_files} == {file.stem for file in png_files}
+    for png_file in png_files:
         asset = validate_menu_illustration_png(png_file)
         assert (asset.width, asset.height) == (
             REPRESENTATIVE_ILLUSTRATION_WIDTH,
             REPRESENTATIVE_ILLUSTRATION_HEIGHT,
         )
         assert asset.has_alpha is True
+    namespace = "{http://www.w3.org/2000/svg}"
+    for svg_file in svg_files:
+        svg = ElementTree.parse(svg_file).getroot()
+        assert svg.tag == namespace + "svg"
+        assert svg.attrib["width"] == str(REPRESENTATIVE_ILLUSTRATION_WIDTH)
+        assert svg.attrib["height"] == str(REPRESENTATIVE_ILLUSTRATION_HEIGHT)
+        assert svg.attrib["viewBox"] == "0 0 450 405"
+        assert len(svg) and all(path.tag == namespace + "path" for path in svg)
+        assert any("C" in path.attrib["d"] for path in svg)
     assert {kind.representative_image_url for kind in kinds.values()} == expected_urls
     for key, filename in examples.items():
         assert kinds[key].representative_image_url == f"/static/menu-illustrations/{filename}"
@@ -822,7 +853,10 @@ def test_catalog_illustration_sync_registers_all_136_images_and_preserves_food_k
     for response in (recent, popular):
         item = response.json()["data"]["items"][0]
         assert item["food_kind_id"] == udon.food_kind_id
-        assert item["image_url"] == "/static/menu-illustrations/udon.png"
+        assert item["image_url"] == "/static/menu-illustrations/udon.svg"
+    svg_response = home_api.client.get("/static/menu-illustrations/udon.svg")
+    assert svg_response.status_code == 200
+    assert svg_response.headers["content-type"] == "image/svg+xml"
     assert home_api.client.get("/static/menu-illustrations/udon.png").status_code == 200
 
 

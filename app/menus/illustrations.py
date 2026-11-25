@@ -18,11 +18,11 @@ from PIL import Image, UnidentifiedImageError
 from sqlalchemy.orm import Session
 
 from app.menus import food_kinds
+from app.menus.food_kinds import MENU_ILLUSTRATIONS_URL_PREFIX
 from app.menus.models import FoodKind, Menu, MenuIllustrationException
 
 logger = logging.getLogger(__name__)
 
-MENU_ILLUSTRATIONS_URL_PREFIX = "/static/menu-illustrations/"
 MENU_ILLUSTRATIONS_SUBDIR = "menu-illustrations"
 MENU_ILLUSTRATION_MAPPINGS_PATH = (
     Path(__file__).resolve().parents[2] / "data" / "menu_illustration_mappings.csv"
@@ -675,7 +675,13 @@ def inspect_food_kind_illustration_status(
     for spec in FOOD_KIND_ILLUSTRATION_SPECS:
         food_kind = kinds_by_key.get(spec.kind_key)
         registered_url = food_kind.representative_image_url if food_kind is not None else None
-        target_url_to_check = (registered_url or "").strip() or spec.expected_image_url
+        expected_url = (
+            food_kinds.find_deployed_menu_illustration_url(
+                spec.expected_image_url, static_dir=effective_static_dir, prefer_svg=True,
+            )
+            or spec.expected_image_url
+        )
+        target_url_to_check = (registered_url or "").strip() or expected_url
         try:
             _cleaned, candidate = food_kinds.resolve_safe_static_file_path(
                 target_url_to_check,
@@ -695,7 +701,7 @@ def inspect_food_kind_illustration_status(
                 food_kind_id=int(food_kind.id) if food_kind is not None else None,
                 name=food_kind.name if food_kind is not None else spec.name,
                 audit_status=spec.status,
-                expected_image_url=spec.expected_image_url,
+                expected_image_url=expected_url,
                 registered_image_url=registered_url,
                 file_exists_on_disk=file_exists_on_disk,
                 effective_image_url=effective_url,
@@ -732,19 +738,21 @@ def sync_food_kind_representative_illustrations(
         fk.kind_key: fk
         for fk in db.query(FoodKind).filter(FoodKind.kind_key.in_(urls_by_key)).all()
     }
-    available_urls = set()
-    for image_url in set(urls_by_key.values()):
-        _, candidate = _resolve_static_url_or_raise(image_url, static_dir=static_dir)
-        if candidate.is_file():
-            available_urls.add(image_url)
+    deployed_urls = {
+        legacy_url: food_kinds.find_deployed_menu_illustration_url(
+            legacy_url, static_dir=static_dir, prefer_svg=True,
+        )
+        for legacy_url in set(urls_by_key.values())
+    }
 
     updated = 0
     already_registered = 0
     skipped_missing_file = 0
     skipped_missing_kind = 0
 
-    for kind_key, image_url in urls_by_key.items():
-        if image_url not in available_urls:
+    for kind_key, legacy_url in urls_by_key.items():
+        image_url = deployed_urls[legacy_url]
+        if image_url is None:
             skipped_missing_file += 1
             continue
 
@@ -754,15 +762,14 @@ def sync_food_kind_representative_illustrations(
             continue
 
         current_url = (food_kind.representative_image_url or "").strip()
-        if current_url and not overwrite_existing:
+        if current_url == image_url or (
+            current_url and current_url != legacy_url and not overwrite_existing
+        ):
             already_registered += 1
             continue
 
-        if current_url != image_url:
-            food_kind.representative_image_url = image_url
-            updated += 1
-        else:
-            already_registered += 1
+        food_kind.representative_image_url = image_url
+        updated += 1
 
     if updated > 0:
         db.flush()

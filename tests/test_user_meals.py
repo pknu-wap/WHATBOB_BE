@@ -329,9 +329,8 @@ def test_get_my_meals_returns_current_illustration_for_each_record(api):
         assert response.status_code == 201
         meal_ids[name] = response.json()["data"]["id"]
 
-    gukbap_illustration_url = "/static/menu-illustrations/gukbap.png"
     gukbap_kind = api.menus["gukbap"].food_kind
-    gukbap_kind.representative_image_url = gukbap_illustration_url
+    gukbap_kind.representative_image_url = "/static/menu-illustrations/gukbap.svg"
     pasta = api.menus["pasta"]
     pasta.food_kind.representative_image_url = "/static/menu-illustrations/pasta.png"
     api.db.add(MenuIllustrationException(menu_id=pasta.id))
@@ -341,7 +340,7 @@ def test_get_my_meals_returns_current_illustration_for_each_record(api):
     assert response.status_code == 200
     items = response.json()["data"]["items"]
     assert {item["id"]: item["image_url"] for item in items} == {
-        meal_ids["gukbap"]: gukbap_illustration_url,
+        meal_ids["gukbap"]: "/static/menu-illustrations/gukbap.svg",
         meal_ids["chicken"]: DEFAULT_MENU_ILLUSTRATION_URL,
         meal_ids["pasta"]: DEFAULT_MENU_ILLUSTRATION_URL,
     }
