@@ -1,3 +1,5 @@
+import threading
+import time
 from urllib.parse import unquote
 
 import httpx
@@ -12,8 +14,19 @@ from sqlalchemy.pool import StaticPool
 from app.auth.dependencies import get_current_user
 from app.core.database import Base, get_db
 from app.map.exceptions import PlaceSearchException, PlaceSearchUnavailableException
+from app.map.google_places import (
+    GOOGLE_TEXT_SEARCH_FIELD_MASK,
+    GOOGLE_TEXT_SEARCH_URL,
+    GooglePlaceCandidate,
+    GooglePlacesTextSearchClient,
+    GooglePlacesUnavailableError,
+    get_google_place_search_client,
+)
 from app.map.kakao_local import KAKAO_KEYWORD_SEARCH_URL, KakaoLocalClient, get_place_search_client
+from app.map.place_enrichment import enrich_google_place_ids
+from app.map.place_matching import find_unique_google_place_id
 from app.map.router import router
+from app.map.schemas import NearbyPlaceDTO
 from app.map.search_keywords import build_place_search_keyword
 from app.map.service import build_walking_directions_url
 from app.menus.models import Menu
@@ -73,6 +86,32 @@ class FakePlaceSearchClient:
         return self.documents
 
 
+class FakeGooglePlaceSearchClient:
+    def __init__(self, candidates=None, error: Exception | None = None, delay_seconds: float = 0):
+        self.candidates = candidates or []
+        self.error = error
+        self.delay_seconds = delay_seconds
+        self.calls: list[dict] = []
+        self.active_count = 0
+        self.max_active_count = 0
+        self._lock = threading.Lock()
+
+    def search_place_candidates(self, **kwargs):
+        self.calls.append(kwargs)
+        with self._lock:
+            self.active_count += 1
+            self.max_active_count = max(self.max_active_count, self.active_count)
+        try:
+            if self.delay_seconds:
+                time.sleep(self.delay_seconds)
+            if self.error is not None:
+                raise self.error
+            return self.candidates
+        finally:
+            with self._lock:
+                self.active_count -= 1
+
+
 @pytest.fixture
 def db():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
@@ -93,7 +132,12 @@ def menu(db):
     return item
 
 
-def build_client(db, fake: FakePlaceSearchClient, authenticated: bool = True) -> TestClient:
+def build_client(
+    db,
+    fake: FakePlaceSearchClient,
+    authenticated: bool = True,
+    google_fake: FakeGooglePlaceSearchClient | None = None,
+) -> TestClient:
     app = FastAPI()
     app.include_router(router)
 
@@ -103,6 +147,9 @@ def build_client(db, fake: FakePlaceSearchClient, authenticated: bool = True) ->
 
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[get_place_search_client] = lambda: fake
+    app.dependency_overrides[get_google_place_search_client] = lambda: (
+        google_fake or FakeGooglePlaceSearchClient()
+    )
     if authenticated:
         app.dependency_overrides[get_current_user] = lambda: User(id=1)
     return TestClient(app)
@@ -130,6 +177,7 @@ def test_returns_restaurants_sorted_by_straight_line_distance(db, menu):
     assert data["distance_type"] == "STRAIGHT_LINE"
     assert [p["kakao_place_id"] for p in data["places"]] == ["1", "2"]
     first = data["places"][0]
+    assert first["google_place_id"] is None
     assert first["distance_m"] == 120
     assert first["directions_url"] == "https://map.kakao.com/link/to/1"
     assert first["walking_directions_url"].startswith("https://map.kakao.com/link/by/walk/")
@@ -159,10 +207,14 @@ def test_excludes_non_restaurant_out_of_radius_duplicate_and_invalid_results(db,
 
 def test_returns_at_most_ten_places(db, menu):
     fake = FakePlaceSearchClient([make_document(str(i), f"국밥집{i}", str(i * 10)) for i in range(1, 16)])
-    data = build_client(db, fake).get("/api/places/nearby", params=nearby_params(menu.id)).json()["data"]
+    google_fake = FakeGooglePlaceSearchClient()
+    data = build_client(db, fake, google_fake=google_fake).get(
+        "/api/places/nearby", params=nearby_params(menu.id)
+    ).json()["data"]
 
     assert len(data["places"]) == 10
     assert data["places"][-1]["kakao_place_id"] == "10"
+    assert len(google_fake.calls) == 10
 
 
 def test_empty_result_does_not_expand_radius_automatically(db, menu):
@@ -316,3 +368,223 @@ def test_kakao_client_maps_timeout_to_unavailable():
     client = KakaoLocalClient("kakao-key", transport=httpx.MockTransport(handler))
     with pytest.raises(PlaceSearchUnavailableException):
         client.search_restaurants("국밥", ORIGIN_LAT, ORIGIN_LNG, 1000, 10)
+
+
+def make_nearby_place(name: str = "봉추찜닭 대연점", **overrides) -> NearbyPlaceDTO:
+    values = {
+        "kakao_place_id": "kakao-1",
+        "name": name,
+        "address": "부산 남구 대연동 1",
+        "road_address": "부산 남구 용소로 45",
+        "latitude": 35.1340,
+        "longitude": 129.1040,
+        "distance_m": 100,
+        "directions_url": "https://map.kakao.com/link/to/kakao-1",
+        "walking_directions_url": "https://map.kakao.com/link/by/walk/origin/destination",
+    }
+    values.update(overrides)
+    return NearbyPlaceDTO(**values)
+
+
+def make_google_candidate(
+    place_id: str = "ChIJ-match",
+    name: str = "봉추찜닭 대연점",
+    address: str = "대한민국 부산광역시 남구 용소로 45",
+    latitude: float = 35.1341,
+    longitude: float = 129.1041,
+) -> GooglePlaceCandidate:
+    return GooglePlaceCandidate(place_id, name, address, latitude, longitude)
+
+
+def test_matches_unique_google_place_with_normalized_name_address_and_nearby_coordinates():
+    place = make_nearby_place(name="㈜ 봉추찜닭, 대연점")
+
+    result = find_unique_google_place_id(place, [make_google_candidate()])
+
+    assert result == "ChIJ-match"
+
+
+@pytest.mark.parametrize("google_address", [
+    "대한민국 부산광역시 남구 용소로 45-1",
+    "대한민국 부산광역시 남구 용소로 450",
+])
+def test_rejects_google_candidate_with_different_road_building_number(google_address):
+    candidate = make_google_candidate(address=google_address)
+
+    assert find_unique_google_place_id(make_nearby_place(), [candidate]) is None
+
+
+@pytest.mark.parametrize("candidate", [
+    make_google_candidate(name="봉추찜닭 경성대점"),
+    make_google_candidate(name="다른식당 대연점"),
+    make_google_candidate(address="대한민국 부산광역시 남구 수영로 100"),
+    make_google_candidate(latitude=35.1400, longitude=129.1040),
+])
+def test_rejects_other_branch_other_business_address_or_far_coordinates(candidate):
+    assert find_unique_google_place_id(make_nearby_place(), [candidate]) is None
+
+
+def test_returns_null_when_multiple_google_candidates_match():
+    candidates = [
+        make_google_candidate(place_id="ChIJ-one"),
+        make_google_candidate(place_id="ChIJ-two", latitude=35.1342),
+    ]
+
+    assert find_unique_google_place_id(make_nearby_place(), candidates) is None
+
+
+def test_returns_null_when_google_search_has_no_results():
+    assert find_unique_google_place_id(make_nearby_place(), []) is None
+
+
+def test_google_failure_does_not_fail_kakao_response(db, menu):
+    kakao_fake = FakePlaceSearchClient([make_document("1", "봉추찜닭 대연점", "100")])
+    google_fake = FakeGooglePlaceSearchClient(error=GooglePlacesUnavailableError())
+
+    response = build_client(db, kakao_fake, google_fake=google_fake).get(
+        "/api/places/nearby", params=nearby_params(menu.id)
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["places"][0]["google_place_id"] is None
+    assert "server-key" not in response.text
+
+
+def test_google_id_is_added_to_existing_kakao_place_response(db, menu):
+    kakao_fake = FakePlaceSearchClient([make_document("1", "봉추찜닭 대연점", "100")])
+    google_fake = FakeGooglePlaceSearchClient([make_google_candidate()])
+
+    response = build_client(db, kakao_fake, google_fake=google_fake).get(
+        "/api/places/nearby", params=nearby_params(menu.id)
+    )
+
+    place = response.json()["data"]["places"][0]
+    assert response.status_code == 200
+    assert place["kakao_place_id"] == "1"
+    assert place["google_place_id"] == "ChIJ-match"
+    assert google_fake.calls[0]["latitude"] == 35.1340
+    assert google_fake.calls[0]["longitude"] == 129.1040
+
+
+def test_google_enrichment_limits_concurrent_requests():
+    places = [make_nearby_place(name=f"식당{i}") for i in range(6)]
+    google_fake = FakeGooglePlaceSearchClient(delay_seconds=0.02)
+
+    enrich_google_place_ids(
+        places,
+        google_fake,
+        max_concurrency=2,
+        total_budget_seconds=1,
+    )
+
+    assert google_fake.max_active_count == 2
+    assert len(google_fake.calls) == 6
+
+
+def test_google_enrichment_returns_when_total_time_budget_expires():
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingGoogleClient:
+        def search_place_candidates(self, **kwargs):
+            started.set()
+            release.wait(timeout=1)
+            return []
+
+    places = [make_nearby_place(name=f"식당{i}") for i in range(3)]
+    started_at = time.monotonic()
+    try:
+        enrich_google_place_ids(
+            places,
+            BlockingGoogleClient(),
+            max_concurrency=1,
+            total_budget_seconds=0.03,
+        )
+        elapsed = time.monotonic() - started_at
+    finally:
+        release.set()
+
+    assert started.is_set()
+    assert elapsed < 0.2
+    assert all(place.google_place_id is None for place in places)
+
+
+def test_google_text_search_sends_korean_region_bias_and_limited_field_mask():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(200, json={"places": [{
+            "id": "ChIJ-match",
+            "displayName": {"text": "봉추찜닭 대연점", "languageCode": "ko"},
+            "formattedAddress": "대한민국 부산광역시 남구 용소로 45",
+            "location": {"latitude": 35.1341, "longitude": 129.1041},
+        }]})
+
+    client = GooglePlacesTextSearchClient(
+        " server-key ",
+        timeout_seconds=1,
+        max_concurrency=2,
+        transport=httpx.MockTransport(handler),
+    )
+    candidates = client.search_place_candidates(
+        name="봉추찜닭 대연점",
+        address="부산 남구 용소로 45",
+        latitude=35.1340,
+        longitude=129.1040,
+    )
+
+    request = captured["request"]
+    payload = request.read()
+    assert str(request.url) == GOOGLE_TEXT_SEARCH_URL
+    assert request.headers["X-Goog-Api-Key"] == "server-key"
+    assert request.headers["X-Goog-FieldMask"] == GOOGLE_TEXT_SEARCH_FIELD_MASK
+    assert b'"languageCode":"ko"' in payload
+    assert b'"regionCode":"KR"' in payload
+    assert b'"latitude":35.134' in payload
+    assert candidates[0].place_id == "ChIJ-match"
+
+
+@pytest.mark.parametrize("handler", [
+    lambda request: httpx.Response(401, json={"error": "invalid key"}),
+    lambda request: httpx.Response(429, json={"error": "quota"}),
+    lambda request: httpx.Response(500, json={"error": "server"}),
+    lambda request: httpx.Response(200, text="not-json"),
+    lambda request: httpx.Response(200, json=[]),
+    lambda request: httpx.Response(200, json={"places": {}}),
+])
+def test_google_client_maps_bad_responses_to_internal_unavailable(handler):
+    client = GooglePlacesTextSearchClient(
+        "server-key",
+        timeout_seconds=1,
+        max_concurrency=1,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(GooglePlacesUnavailableError):
+        client.search_place_candidates(
+            name="봉추찜닭 대연점",
+            address="부산 남구 용소로 45",
+            latitude=35.1340,
+            longitude=129.1040,
+        )
+
+
+def test_google_client_maps_timeout_to_internal_unavailable():
+    def handler(request):
+        raise httpx.ReadTimeout("timeout", request=request)
+
+    client = GooglePlacesTextSearchClient(
+        "server-key",
+        timeout_seconds=1,
+        max_concurrency=1,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(GooglePlacesUnavailableError):
+        client.search_place_candidates(
+            name="봉추찜닭 대연점",
+            address="부산 남구 용소로 45",
+            latitude=35.1340,
+            longitude=129.1040,
+        )

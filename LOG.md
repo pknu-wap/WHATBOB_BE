@@ -5,6 +5,26 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-25
 
+### 주변 음식점 응답에 검증된 Google 장소 ID 보강
+
+#### 변경 이유 및 내용
+
+- 카카오 로컬 검색의 반경·거리순·최대 10개 정책을 유지하면서, 최종 음식점에 Places API (New) Text Search로 찾은 `google_place_id`를 추가했다.
+- Google 검색은 카카오 음식점명과 도로명 주소, 해당 음식점 좌표의 위치 편향, 한국어·한국 지역 설정을 사용하고 필요한 ID·표시명·주소·좌표 필드만 요청한다.
+- 이름의 공백·문장부호·법인 표기와 주소의 국가·광역 행정구역 표기를 정규화한 뒤 이름·주소·100m 이내 좌표가 모두 일치하는 유일 후보만 연결한다. 다른 지점, 다른 음식점, 먼 후보, 복수 일치 후보는 `null`로 처리한다.
+- 도로명 주소는 도로명과 건물번호의 본번·부번을 분리해 정확히 비교한다. `용소로 45`가 `용소로 45-1` 또는 `용소로 450`과 부분 일치해 다른 장소가 연결될 수 있던 문제를 방지했다.
+- Google 호출은 기본 동시 요청 3개, 개별 타임아웃 1초, 전체 예산 2.5초로 제한했다. 키 미설정, 타임아웃, 인증·쿼터·서버 오류, 비정상 응답은 카카오 결과에 전파하지 않고 해당 ID만 `null`로 반환한다.
+- 서버 키와 시간 제한은 환경변수로 관리하며 키·검색어·주소·좌표를 로그에 남기지 않는다.
+
+#### 주요 변경 파일
+
+- `app/map/google_places.py`, `app/map/place_matching.py`, `app/map/place_enrichment.py`
+- `app/map/service.py`, `app/map/router.py`, `app/map/schemas.py`
+- `app/core/config.py`, `.env.example`, `tests/test_map_places.py`, `LOG.md`
+
+#### API 변경
+
+- 수정: `GET /api/places/nearby`의 각 `places[]` 항목에 `google_place_id: string | null`을 추가했다. 기존 요청 형식, 카카오 장소 정보, 정렬·반경·개수 정책과 카카오 장애 시 503 동작은 유지한다.
 ### #58 / #77 첫 메뉴 좋아요부터 주문서 순위에 반영
 
 #### 변경 이유 및 내용
@@ -41,6 +61,15 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 #### 검증
 
+- `python -m pytest -q tests/test_map_places.py`: 52 passed. 동일 음식점 연결, 도로명 건물번호 본번·부번이 다른 후보와 숫자 접두사가 같은 후보의 거부, 다른 체인 지점·다른 주소·먼 좌표 거부, 복수 후보·결과 없음의 null 처리, Google 장애 격리, 한국어·한국 지역·위치 편향·필드 마스크, 동시성·전체 시간 예산, 기존 카카오 정책을 검증했다.
+- `python -m compileall -q app/map app/core/config.py`: 통과.
+- `git diff --check`: 통과.
+- `python -m pytest -q`: 548 passed, 40 skipped, 1 failed. 실패는 변경 범위 밖의 기존 로그인 응답 계약 불일치인 `tests/test_user_profile.py::test_login_and_me_return_same_profile_and_preserve_login_contract`이다.
+
+#### 남은 작업 및 주의 사항
+
+- Google Cloud에서 Places API (New)를 활성화하고 운영 서버의 고정 외부 IP 및 Places API (New)로 제한한 서버 키를 `GOOGLE_PLACES_API_KEY`에 설정한다. 고정 egress IP가 없으면 먼저 배포 네트워크를 준비해야 한다.
+- 프런트의 Places UI Kit에는 서버 키를 전달하지 말고 플랫폼별 제한을 적용한 별도 클라이언트 키를 사용한다.
 - 장기 취향·추천 순위·최근 식사 감점·순위 재현 테스트 46개 통과. 중립 답변의 HTTP 테스트에서 우동의 첫 좋아요 직후 당일 다음 주문서의 우동 순위가 3위에서 1위로 올랐고, +0.25점이 스냅샷에 저장됐다.
 - 전체 테스트 708개 통과, 42개 건너뜀, 1개 실패. 기존 카카오 로그인 응답 테스트는 `requires_reauth` 필드 불일치로 실패했다.
 
