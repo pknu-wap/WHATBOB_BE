@@ -181,7 +181,7 @@ def test_http_single_dislike_same_day_likes_consecutive_days_and_excludes_reject
         # 목록 거절 + 지도 가게 선택·만족을 라면에 대해 기록 (서로 다른 날 시뮬레이션)
         reject_rec = client.post("/api/recommendations/order-sheet", json=_answers_payload(q_map)).json()["data"]
         assert (
-            client.post(f"/api/recommendations/{reject_rec['recommendation_id']}/reject").status_code
+            client.post(f"/api/recommendations/{reject_rec['recommendation_id']}/all-menu-reject").status_code
             == 200
         )
         sel1 = client.post(

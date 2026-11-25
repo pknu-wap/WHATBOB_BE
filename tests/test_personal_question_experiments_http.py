@@ -53,7 +53,7 @@ def _question_ids(sheet):
 
 
 def _reject(client, recommendation):
-    response = client.post(f"/api/recommendations/{recommendation['recommendation_id']}/reject")
+    response = client.post(f"/api/recommendations/{recommendation['recommendation_id']}/all-menu-reject")
     assert response.status_code == 200, response.text
 
 

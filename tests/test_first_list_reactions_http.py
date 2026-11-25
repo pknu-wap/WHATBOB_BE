@@ -196,14 +196,16 @@ def test_http_reject_endpoint_auth_idempotency_closes_sheet_and_rejects_zero_can
     assert rec_res.status_code == 201
     rec_id = rec_res.json()["data"]["recommendation_id"]
     first_menu_id = rec_res.json()["data"]["recommended_menus"][0]["menu_id"]
+    reject_url = f"/api/recommendations/{rec_id}/all-menu-reject"
+    assert client.post(f"/api/recommendations/{rec_id}/reject", headers=headers).status_code == 404
 
     # 비인증 401 / 타인 404
-    assert client.post(f"/api/recommendations/{rec_id}/reject").status_code == 401
-    assert client.post(f"/api/recommendations/{rec_id}/reject", headers=other_headers).status_code == 404
+    assert client.post(reject_url).status_code == 401
+    assert client.post(reject_url, headers=other_headers).status_code == 404
 
     # 명시적 목록 거절 200 + 멱등 재전송
     rej1 = client.post(
-        f"/api/recommendations/{rec_id}/reject",
+        reject_url,
         headers={**headers, "Idempotency-Key": "http-reject-1"},
     )
     assert rej1.status_code == 200
@@ -215,11 +217,11 @@ def test_http_reject_endpoint_auth_idempotency_closes_sheet_and_rejects_zero_can
     assert rej_body["data"]["outcome"] == OUTCOME_LIST_REJECTED
 
     rej2 = client.post(
-        f"/api/recommendations/{rec_id}/reject",
+        reject_url,
         headers={**headers, "Idempotency-Key": "http-reject-1"},
     )
     rej3 = client.post(
-        f"/api/recommendations/{rec_id}/reject",
+        reject_url,
         headers=headers,
     )
     assert rej2.status_code == 200 and rej3.status_code == 200
@@ -244,7 +246,7 @@ def test_http_reject_endpoint_auth_idempotency_closes_sheet_and_rejects_zero_can
     db.add(zero_rec)
     db.commit()
 
-    zero_rej = client.post(f"/api/recommendations/{zero_rec.id}/reject", headers=headers)
+    zero_rej = client.post(f"/api/recommendations/{zero_rec.id}/all-menu-reject", headers=headers)
     assert zero_rej.status_code == 409
     assert zero_rej.json()["success"] is False
 

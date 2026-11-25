@@ -5,6 +5,32 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-25
 
+### #58 / #77 첫 추천 목록 전체 거절 API 경로 변경
+
+#### 변경 이유 및 내용
+
+- 메뉴별 피드백과 첫 추천 목록 전체 거절을 경로에서 구분할 수 있도록 전체 거절의 경로를 `all-menu-reject`로 변경했다.
+
+#### 주요 변경 파일
+
+- `app/recommend/router.py`, `docs/USER_EXCLUSIONS_API.md`, 전체 거절을 호출하는 HTTP 테스트
+
+#### API 변경
+
+- 전체 거절은 `POST /api/recommendations/{recommendation_id}/all-menu-reject`로 호출한다. 이전 `/reject` 경로는 `404`를 반환한다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- 전체 거절·피드백·질문 검토와 실험 관련 테스트 21개 통과, MySQL 테스트 1개 건너뜀.
+
+#### 남은 작업 및 주의 사항
+
+- 클라이언트의 전체 거절 요청은 새 경로를 사용한다.
+
 ### #58 / #77 (#78–#92) 주문서 하드필터·점수 추천 개편, 첫 목록 반응·가게 만족 분리, 개인/공통 질문 실험 및 리뷰 수정
 
 #### 변경 이유 및 내용
@@ -15,7 +41,7 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
   - 취향 하드필터(Q3 국물, Q8 밥·면·그 외, Q9 고기)는 자동 완화 없이 엄격 적용하고, 점수 질문(Q1/Q2/Q4/Q5/Q6/Q7) 동등 가중 합산 + 최근 먹은 메뉴 반복 감점(`#82`) + 음식 종류별 장기 취향 보정(`#83`) + 음식 종류 대표 1개 선별(최대 5종)로 추천을 계산한다.
   - `_find_valid_order_sheet_issuance` 소유 경계를 강화해 인증 사용자가 `user_id=None` 미소유 발급을 가로채거나 완료 처리할 수 없도록 제한했고, `feedback.py`의 중복 `_question_options`를 `question_pool.normalize_question_options`로 통합했다.
 - **첫 목록 반응·명시적 거절·가게 선택/만족 분리 (`#80`, `#81`)**:
-  - 첫 목록 메뉴별 좋아요·싫어요(`food_kind_id`, `exposure_rank` 포함)와 명시적 첫 목록 거절(`POST /api/recommendations/{id}/reject`)을 분리 기록하며, 단일 메뉴 피드백으로 전역 질문 가중치를 자동 변경하지 않는다.
+  - 첫 목록 메뉴별 좋아요·싫어요(`food_kind_id`, `exposure_rank` 포함)와 명시적 첫 목록 거절(`POST /api/recommendations/{id}/all-menu-reject`)을 분리 기록하며, 단일 메뉴 피드백으로 전역 질문 가중치를 자동 변경하지 않는다.
   - 지도 음식점 선택(`PlaceSelection`)과 명시적 가게 만족(`PlaceSatisfaction`)을 메뉴 피드백·장기 취향과 독립 저장하며, 불필요한 양방향 ORM 관계(`PlaceSatisfaction.place_selection`)를 제거하고 단방향 `PlaceSelection.satisfaction`만 유지했다.
 - **후보 0건 제안·같이 고르기 9문항·하드필터 감사·순위 재현 (`#84`, `#85`, `#86`, `#87`, `#88`)**:
   - 개인/그룹 주문서 후보 0건 시 하드필터 답변 1개 중립 변경 제안(읽기 전용)을 제공하고, 같이 고르기 라운드에서는 참여자 공통 제외·알레르기 생략과 채택된 공통 질문(`load_common_question_overrides`) 적용, 후보 0건 참여자 단독 재응답을 지원한다.
@@ -40,7 +66,7 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 - `GET /api/recommendations/order-sheet/questions` (변경): 기본 9문항 및 `order_sheet_id` 발급, `Idempotency-Key`/`issuance_key` 멱등 재전송(키 불일치 시 `400`), `Cache-Control: no-store`, Q8 4선택지, 개인/공통 오버라이드 및 실험 배정 적용.
 - `POST /api/recommendations/order-sheet` (변경): 선택적 `order_sheet_id` 연결(인증 사용자 소유 경계 검증), 하드필터 엄격 적용 + 점수/최근 식사 감점/장기 취향 합산, 음식 종류 대표 0~5종 반환, 하드필터 추적·재현 스냅샷 저장.
 - `POST /api/recommendations/order-sheet/no-results` (신규): 개인 주문서 후보 0건 시 취향 하드필터 1개 중립 변경 제안 조회(읽기 전용).
-- `POST /api/recommendations/{recommendation_id}/feedback` (변경) 및 `POST /api/recommendations/{recommendation_id}/reject` (신규): 메뉴별 피드백(`food_kind_id`, `exposure_rank` 기록, 종료 후 재전송 시 `409 ORDER_SHEET_CLOSED`, `Idempotency-Key` 충돌 시 `409 IDEMPOTENCY_KEY_REUSED`) 및 첫 목록 명시적 거절(0종 목록 거절 시 `409 ZERO_CANDIDATES_RECOMMENDATION`).
+- `POST /api/recommendations/{recommendation_id}/feedback` (변경) 및 `POST /api/recommendations/{recommendation_id}/all-menu-reject` (신규): 메뉴별 피드백(`food_kind_id`, `exposure_rank` 기록, 종료 후 재전송 시 `409 ORDER_SHEET_CLOSED`, `Idempotency-Key` 충돌 시 `409 IDEMPOTENCY_KEY_REUSED`) 및 첫 목록 명시적 거절(0종 목록 거절 시 `409 ZERO_CANDIDATES_RECOMMENDATION`).
 - `POST /api/rooms/{room_id}/rounds/start`(및 `/start`), `POST /api/rooms/{room_id}/rounds/current/order-sheet`(및 별칭), `POST /api/rooms/{room_id}/rounds/current/order-sheet/no-results` (신규/변경): 라운드 공통 제외·채택 공통 질문 적용, 후보 0건 시 `409 NO_MATCHING_MENUS_FOR_ANSWERS`·`NO_AVAILABLE_MENUS`·`INSUFFICIENT_QUESTION_POOL`·`STALE_ROUND_ID`·`STALE_ROUND_NO` 및 단독 재응답·변경 제안 지원.
 - `POST /api/places/selections`, `GET /api/places/selections`, `GET /api/places/selections/{selection_id}`, `POST /api/places/selections/{selection_id}/satisfaction` (신규): 지도 가게 선택 및 별도 가게 만족 기록·조회(소유권·메뉴 연결 검증 `400`/`403`/`404`).
 

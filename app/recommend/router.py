@@ -273,7 +273,7 @@ def submit_recommendation_feedback(
 
 
 @router.post(
-    "/{recommendation_id}/reject",
+    "/{recommendation_id}/all-menu-reject",
     response_model=ApiResponse[RecommendationRejectResponse],
     status_code=status.HTTP_200_OK,
 )

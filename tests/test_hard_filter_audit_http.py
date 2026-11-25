@@ -246,7 +246,7 @@ def test_http_order_sheet_hard_filter_trace_rejection_audit_and_no_auto_replacem
     assert [m["menu_id"] for m in rec1_data["recommended_menus"]] == [best_beef_soup.id]
 
     rej_res1 = client.post(
-        f"/api/recommendations/{rec1_data['recommendation_id']}/reject",
+        f"/api/recommendations/{rec1_data['recommendation_id']}/all-menu-reject",
         headers=headers1,
     )
     assert rej_res1.status_code == 200
@@ -267,7 +267,7 @@ def test_http_order_sheet_hard_filter_trace_rejection_audit_and_no_auto_replacem
     )
     assert rec_res2.status_code == 201
     rec2_id = rec_res2.json()["data"]["recommendation_id"]
-    assert client.post(f"/api/recommendations/{rec2_id}/reject", headers=headers2).status_code == 200
+    assert client.post(f"/api/recommendations/{rec2_id}/all-menu-reject", headers=headers2).status_code == 200
 
     # 3) user1: 1종 후보에 좋아요 (전체 만족도에 포함되어야 함)
     q_res3 = client.get("/api/recommendations/order-sheet/questions", headers=headers1)
