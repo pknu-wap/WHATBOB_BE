@@ -355,7 +355,7 @@ def test_room_order_sheet_recent_meal_affects_only_the_participant_who_recorded_
     }
 
 
-def test_t03_d20_and_t04_full_journey_with_cumulative_recommendations_and_co_winners():
+def test_full_journey_saves_vote_edits_and_one_winner_from_the_tie(monkeypatch):
     client, db, users, menus, room_id, as_user = build_group_env(member_count=3)
     host, m1, m2 = users[0], users[1], users[2]
     menus_by_code = {menu.food_code: menu for menu in menus}
@@ -406,7 +406,7 @@ def test_t03_d20_and_t04_full_journey_with_cumulative_recommendations_and_co_win
     assert s_host.json()["common_state"]["current_round"]["candidates"] == []
     assert "exclusion_snapshot_json" not in str(s_host.json())
 
-    # Force distinct top menus on host and m1, and duplicate on m2 to verify exact-menu merging + tie voting
+    # Fix distinct top menus for the host and m1 so the vote has at least two candidates.
     rm_host = db.query(RoomRoundMember).filter_by(user_id=host.id).one()
     rm_host.top_menu_id = db.query(Menu).filter_by(food_code="M001").one().id
     db.commit()
@@ -460,29 +460,24 @@ def test_t03_d20_and_t04_full_journey_with_cumulative_recommendations_and_co_win
         )
         assert mod_res.status_code == 409
 
-    # T04: Multiple-choice voting & co-winners
+    votes_url = f"/api/rooms/{room_id}/rounds/current/votes"
     cid1, cid2 = cands[0]["candidate_id"], cands[1]["candidate_id"]
-    # Empty vote and duplicate candidate ID are rejected
-    assert (
-        as_user(host)
-        .post(f"/api/rooms/{room_id}/rounds/current/votes", json={"candidate_ids": []})
-        .status_code
-        == 400
-    )
-    assert (
-        as_user(host)
-        .post(
-            f"/api/rooms/{room_id}/rounds/current/votes",
-            json={"candidate_ids": [cid1, cid1]},
-        )
-        .status_code
-        == 400
-    )
+    draws = []
 
-    # Host votes [cid1, cid2], m1 votes [cid1], m2 votes [cid2] -> cid1=2, cid2=2 co-winners!
+    def choose_second_candidate(candidate_ids):
+        assert set(candidate_ids) == {cid1, cid2}
+        draws.append(candidate_ids)
+        return cid2
+
+    monkeypatch.setattr("app.rooms.rounds.choice", choose_second_candidate)
+
+    # Empty vote and duplicate candidate ID are rejected
+    assert as_user(host).post(votes_url, json={"candidate_ids": []}).status_code == 400
+    assert as_user(host).post(votes_url, json={"candidate_ids": [cid1, cid1]}).status_code == 400
+
     v_host = as_user(host).post(
-        f"/api/rooms/{room_id}/rounds/current/votes",
-        json={"candidate_ids": [cid2, cid1], "vote_round_no": 1},
+        votes_url,
+        json={"candidate_ids": [cid2], "vote_round_no": 1},
     )
     assert v_host.status_code == 200
     assert v_host.json()["voted_member_count"] == 1
@@ -492,10 +487,28 @@ def test_t03_d20_and_t04_full_journey_with_cumulative_recommendations_and_co_win
     )
 
     v_m1 = as_user(m1).post(
-        f"/api/rooms/{room_id}/rounds/current/votes",
-        json={"candidate_ids": [cid1], "vote_round_no": 1},
+        votes_url,
+        json={"candidate_ids": [cid2, cid1], "vote_round_no": 1},
     )
     assert v_m1.status_code == 200
+
+    edited_vote = as_user(host).post(
+        votes_url,
+        json={"candidate_ids": [cid1], "vote_round_no": 1},
+    )
+    assert edited_vote.status_code == 200
+    edited = edited_vote.json()
+    assert edited["round_status"] == "VOTING"
+    assert edited["voted_member_count"] == 2
+    assert edited["all_votes_submitted"] is False
+    assert edited["viewer_state"]["voted_candidate_ids"] == [cid1]
+    assert all(c["vote_count"] is None for c in edited["common_state"]["current_round"]["candidates"])
+    assert edited["common_state"]["state_version"] == v_m1.json()["common_state"]["state_version"] + 1
+
+    repeated_edit = as_user(host).post(votes_url, json={"candidate_ids": [cid1], "vote_round_no": 1})
+    assert repeated_edit.status_code == 200
+    assert repeated_edit.json() == edited
+    assert draws == []
 
     token = session_token(db, host)
 
@@ -510,27 +523,37 @@ def test_t03_d20_and_t04_full_journey_with_cumulative_recommendations_and_co_win
     with client.websocket_connect(f"/ws/rooms/{room_id}") as socket:
         socket.send_json({"type": "auth", "access_token": token})
         assert socket.receive_json()["type"] == "connection.ready"
-        v_m2 = as_user(m2).post(
-            f"/api/rooms/{room_id}/rounds/current/votes",
-            json={"candidate_ids": [cid2], "vote_round_no": 1},
-        )
+        v_m2 = as_user(m2).post(votes_url, json={"candidate_ids": [cid2], "vote_round_no": 1})
         assert v_m2.status_code == 200
         event = socket.receive_json()
         assert event["type"] == "room.updated"
         assert event["reason"] == "ROUND_RESULT_FINALIZED"
         detail = as_user(host).get(f"/api/rooms/{room_id}").json()
         assert event["common_state"] == detail["common_state"] == v_m2.json()["common_state"]
+
+        repeated_final_vote = as_user(m2).post(
+            votes_url, json={"candidate_ids": [cid2], "vote_round_no": 1}
+        )
+        assert repeated_final_vote.status_code == 200
+        assert repeated_final_vote.json() == v_m2.json()
+        rejected_edit = as_user(host).post(
+            votes_url, json={"candidate_ids": [cid2], "vote_round_no": 1}
+        )
+        assert rejected_edit.status_code == 409
+        assert rejected_edit.json()["detail"]["code"] == "VOTE_ALREADY_SUBMITTED"
+
     final_round = v_m2.json()["common_state"]["current_round"]
     assert final_round["status"] == "RESULT"
     assert final_round["is_uncontested"] is False
-    winners = final_round["winners"]
-    assert {w["candidate_id"] for w in winners} == {cid1, cid2}
-    assert all(w["final_vote_count"] == 2 and w["is_winner"] is True for w in winners)
-    assert {w["food_code"]: w["image_url"] for w in winners} == {
-        "M001": stew_image,
-        "M002": DEFAULT_MENU_ILLUSTRATION_URL,
-    }
+    assert v_m2.json()["all_votes_submitted"] is True
+    final_candidates = {c["candidate_id"]: c for c in final_round["candidates"]}
+    assert final_round["winners"] == [final_candidates[cid2]]
+    assert final_candidates[cid1]["final_vote_count"] == final_candidates[cid2]["final_vote_count"] == 2
+    assert final_candidates[cid1]["is_winner"] is False
+    assert final_candidates[cid2]["is_winner"] is True
+    assert final_round["winners"][0]["image_url"] == candidate_images[final_candidates[cid2]["food_code"]]
     assert "voted_candidate_ids" not in str(v_m2.json()["common_state"])
+    assert len(draws) == 1
 
 
 def test_t05_answering_departure_pause_version_token_and_host_continue_or_cancel():
