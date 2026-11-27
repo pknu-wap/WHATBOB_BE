@@ -188,7 +188,7 @@ def test_mysql_concurrent_final_submissions_and_votes_converge_to_single_result(
 
     def submit_vote(idx: int):
         uid = uids[idx]
-        chosen = [cids[idx % len(cids)]]
+        chosen = (cids[:2], [cids[0]], [cids[1]])[idx]
         with factory() as db:
             user = db.get(User, uid)
             vote_barrier.wait(timeout=10)
@@ -203,7 +203,7 @@ def test_mysql_concurrent_final_submissions_and_votes_converge_to_single_result(
     with ThreadPoolExecutor(max_workers=3) as pool:
         vote_statuses = list(pool.map(submit_vote, range(3)))
 
-    assert "RESULT" in vote_statuses
+    assert vote_statuses.count("RESULT") == 1
     with factory() as db:
         r_row = db.get(RoomRound, round_id)
         assert r_row.status == "RESULT"
@@ -212,7 +212,9 @@ def test_mysql_concurrent_final_submissions_and_votes_converge_to_single_result(
             .filter_by(round_id=round_id, is_winner=True)
             .all()
         )
-        assert len(winners) >= 1
+        assert len(winners) == 1
+        assert winners[0].id in cids[:2]
+        assert winners[0].final_vote_count == 2
 
         # Physical room deletion cascades round tables but preserves personal Recommendations
         close_room_by_host(db, room_id, db.get(User, uids[0]))

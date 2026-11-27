@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from random import choice
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -1136,7 +1137,7 @@ def submit_room_round_votes(
     user: User,
     request: RoomVoteSubmitRequest,
 ) -> tuple[RoomRoundVoteSubmitResponse, bool, list[Any]]:
-    """T04 + T06: Submit multiple-choice candidate votes, enforce vote_round_no fencing, and materialize co-winners when all voted."""
+    """Save a participant's current ballot and finalize one winner when everyone has voted."""
     from app.rooms.service import _apply_lazy_room_deadlines
 
     try:
@@ -1279,13 +1280,14 @@ def submit_room_round_votes(
                     True,
                     left_events,
                 )
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "VOTE_ALREADY_SUBMITTED",
-                    "message": "이미 제출한 투표는 수정할 수 없습니다.",
-                },
-            )
+            if current_round.status == "RESULT":
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "VOTE_ALREADY_SUBMITTED",
+                        "message": "결과가 확정되어 투표를 수정할 수 없습니다.",
+                    },
+                )
 
         if current_round.status in PAUSED_ROUND_STATUSES:
             raise HTTPException(
@@ -1320,10 +1322,14 @@ def submit_room_round_votes(
                     cid_int = int(cid)
                     if cid_int in counts:
                         counts[cid_int] += 1
-            max_votes = max(counts.values()) if counts else 0
+            max_votes = max(counts.values())
+            top_candidate_ids = [cid for cid, count in counts.items() if count == max_votes]
+            winner_id = (
+                choice(top_candidate_ids) if len(top_candidate_ids) > 1 else top_candidate_ids[0]
+            )
             for cid, cand in active_cands_by_id.items():
                 cand.final_vote_count = counts[cid]
-                cand.is_winner = bool(max_votes > 0 and counts[cid] == max_votes)
+                cand.is_winner = cid == winner_id
             current_round.is_uncontested = False
             current_round.status = "RESULT"
             current_round.completed_at = now
