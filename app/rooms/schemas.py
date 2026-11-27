@@ -3,6 +3,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.map.schemas import NearbyPlacesResponse
 from app.recommend.schemas import AnswerItemRequest, OrderSheetQuestionDTO
 
 
@@ -141,6 +142,23 @@ class RoomDepartureDecisionRequest(BaseModel):
     action: str
     decision_version: int = Field(..., ge=1)
     round_id: int | None = None
+
+
+class RoomRoundSearchCoordinates(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    latitude: float = Field(ge=-90, le=90, allow_inf_nan=False, strict=True)
+    longitude: float = Field(ge=-180, le=180, allow_inf_nan=False, strict=True)
+
+
+class RoomRoundSearchOriginResponse(BaseModel):
+    round_id: int
+    common_state: dict[str, Any]
+
+
+class RoomRoundNearbyPlacesResponse(NearbyPlacesResponse):
+    round_id: int
+    search_origin: RoomRoundSearchCoordinates
 
 
 class RoomRoundQuestionsResponse(BaseModel):

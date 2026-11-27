@@ -19,7 +19,9 @@ from app.rooms.models import (
     RoomRoundCandidate,
     RoomRoundCandidateProposer,
     RoomRoundMember,
+    RoomRoundSearchOrigin,
 )
+from app.rooms.result_places import get_room_round_search_origin, set_room_round_search_origin
 from app.rooms.rounds import (
     decide_room_round_departure,
     start_room_round,
@@ -30,6 +32,7 @@ from app.rooms.schemas import (
     RoomCreateRequest,
     RoomDepartureDecisionRequest,
     RoomOrderSheetSubmitRequest,
+    RoomRoundSearchCoordinates,
     RoomVoteSubmitRequest,
 )
 from app.rooms.service import close_room_by_host, create_room, delete_closed_room, join_room, leave_room_member
@@ -50,6 +53,7 @@ def test_mysql_room_rounds_migration_check_apply_resume_verify(mysql_env, tmp_pa
         create_room(db, host, RoomCreateRequest())
 
     with engine.begin() as conn:
+        conn.execute(text("DROP TABLE room_round_search_origins"))
         conn.execute(text("DROP TABLE room_round_candidate_proposers"))
         conn.execute(text("DROP TABLE room_round_candidates"))
         conn.execute(text("DROP TABLE room_round_members"))
@@ -98,6 +102,7 @@ def test_mysql_room_rounds_migration_check_apply_resume_verify(mysql_env, tmp_pa
             "room_round_members",
             "room_round_candidates",
             "room_round_candidate_proposers",
+            "room_round_search_origins",
         } <= set(inspector.get_table_names())
 
 
@@ -216,12 +221,38 @@ def test_mysql_concurrent_final_submissions_and_votes_converge_to_single_result(
         assert winners[0].id in cids[:2]
         assert winners[0].final_vote_count == 2
 
+        winner_menu_id = winners[0].menu_id
+
+    coordinates = RoomRoundSearchCoordinates(latitude=35.13362239, longitude=129.10301127)
+    registration_barrier = threading.Barrier(2)
+
+    def register_location():
+        with factory() as db:
+            host = db.get(User, uids[0])
+            registration_barrier.wait(timeout=10)
+            return set_room_round_search_origin(db, room_id, round_id, host, coordinates)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_request = pool.submit(register_location)
+        repeated_request = pool.submit(register_location)
+        first = first_request.result(timeout=20)
+        repeated = repeated_request.result(timeout=20)
+
+    assert first == repeated
+    assert first.common_state["current_round"]["nearby_location_ready"] is True
+    with factory() as db:
+        assert get_room_round_search_origin(db, room_id, round_id, db.get(User, uids[1])) == (
+            winner_menu_id, coordinates,
+        )
+        assert db.query(RoomRoundSearchOrigin).count() == 1
+
         # Physical room deletion cascades round tables but preserves personal Recommendations
         close_room_by_host(db, room_id, db.get(User, uids[0]))
         delete_closed_room(db, room_id)
         assert db.query(RoomRound).count() == 0
         assert db.query(RoomRoundMember).count() == 0
         assert db.query(RoomRoundCandidate).count() == 0
+        assert db.query(RoomRoundSearchOrigin).count() == 0
         assert db.query(Recommendation).count() == 3
 
 

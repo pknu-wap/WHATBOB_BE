@@ -1,13 +1,20 @@
 from app.rooms.notifications import dispatch_room
 from datetime import datetime, timezone
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, Response, status
+from fastapi import APIRouter, Depends, Header, Path, Query, Response, status
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app.auth.dependencies import get_current_user
+from app.core.config import settings
 from app.core.database import get_db
+from app.map.google_places import GooglePlaceSearchClient, get_google_place_search_client
+from app.map.kakao_local import PlaceSearchClient, get_place_search_client
+from app.map.schemas import SearchRadius
+from app.map.service import find_nearby_restaurants
 from app.recommend.schemas import ApiResponse, OrderSheetNoResultsResponse
+from app.rooms.result_places import get_room_round_search_origin, set_room_round_search_origin
 from app.rooms.rounds import (
     decide_room_round_departure,
     get_room_round_no_results_suggestions,
@@ -29,8 +36,11 @@ from app.rooms.schemas import (
     RoomOrderSheetNoResultsRequest,
     RoomOrderSheetSubmitRequest,
     RoomRoundCommandResponse,
+    RoomRoundNearbyPlacesResponse,
     RoomRoundOrderSheetSubmitResponse,
     RoomRoundQuestionsResponse,
+    RoomRoundSearchCoordinates,
+    RoomRoundSearchOriginResponse,
     RoomRoundVoteSubmitResponse,
     RoomVoteSubmitRequest,
 )
@@ -358,6 +368,69 @@ async def submit_room_round_votes_endpoint(
         return response
     finally:
         await dispatch_room(bind, room_id)
+
+
+@router.put(
+    "/{room_id}/rounds/{round_id}/nearby/location",
+    response_model=RoomRoundSearchOriginResponse,
+    summary="방장이 함께 검색할 기준 위치 등록",
+)
+async def set_room_round_search_origin_endpoint(
+    room_id: str,
+    round_id: Annotated[int, Path(ge=1)],
+    coordinates: RoomRoundSearchCoordinates,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    bind = db.get_bind()
+    try:
+        return await run_in_threadpool(
+            set_room_round_search_origin, db, room_id, round_id, current_user, coordinates,
+        )
+    finally:
+        await dispatch_room(bind, room_id)
+
+
+@router.get(
+    "/{room_id}/rounds/{round_id}/nearby",
+    response_model=ApiResponse[RoomRoundNearbyPlacesResponse],
+    summary="방장 위치에서 확정 메뉴의 주변 음식점 검색",
+)
+async def search_room_round_nearby_places_endpoint(
+    room_id: str,
+    round_id: Annotated[int, Path(ge=1)],
+    response: Response,
+    radius: SearchRadius = Query(SearchRadius.DEFAULT),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    client: PlaceSearchClient = Depends(get_place_search_client),
+    google_client: GooglePlaceSearchClient = Depends(get_google_place_search_client),
+):
+    bind = db.get_bind()
+    try:
+        menu_id, coordinates = await run_in_threadpool(
+            get_room_round_search_origin, db, room_id, round_id, current_user,
+        )
+    finally:
+        await dispatch_room(bind, room_id)
+
+    result = await run_in_threadpool(
+        find_nearby_restaurants,
+        db=db,
+        client=client,
+        menu_id=menu_id,
+        latitude=coordinates.latitude,
+        longitude=coordinates.longitude,
+        radius=radius,
+        google_client=google_client,
+        google_max_concurrency=settings.GOOGLE_PLACES_MAX_CONCURRENCY,
+        google_total_budget_seconds=settings.GOOGLE_PLACES_TOTAL_BUDGET_SECONDS,
+        origin_label="방장 위치",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return ApiResponse(success=True, data=RoomRoundNearbyPlacesResponse(
+        round_id=round_id, search_origin=coordinates, **result.model_dump(),
+    ))
 
 
 @router.post(

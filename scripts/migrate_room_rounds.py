@@ -20,6 +20,7 @@ from app.rooms.models import (
     RoomRoundCandidate,
     RoomRoundCandidateProposer,
     RoomRoundMember,
+    RoomRoundSearchOrigin,
 )
 from scripts import migrate_room_notifications as notif_migration
 from scripts.migrate_uuid_auth import (
@@ -34,6 +35,7 @@ ROUND_TABLES = (
     RoomRoundMember.__table__,
     RoomRoundCandidate.__table__,
     RoomRoundCandidateProposer.__table__,
+    RoomRoundSearchOrigin.__table__,
 )
 EXCLUDED_TABLES = {"room_notifications"} | {t.name for t in ROUND_TABLES}
 

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from urllib.parse import unquote
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -17,6 +19,8 @@ import app.users.models  # noqa: F401
 from app.auth.dependencies import get_current_user
 from app.core.config import settings
 from app.core.database import Base, get_db
+from app.map.google_places import DisabledGooglePlaceSearchClient, get_google_place_search_client
+from app.map.kakao_local import get_place_search_client
 from app.menus.food_kinds import DEFAULT_MENU_ILLUSTRATION_URL
 from app.menus.models import (
     Menu,
@@ -35,12 +39,14 @@ from app.rooms.models import (
     RoomRoundCandidate,
     RoomRoundCandidateProposer,
     RoomRoundMember,
+    RoomRoundSearchOrigin,
 )
 from app.rooms.router import operations_router, router as rooms_router
 from app.rooms.service import expire_room_member_after_grace, recover_rooms_after_restart, utcnow
 from app.rooms.websocket import router as rooms_ws_router
 from app.users.models import User
 from tests.auth_helpers import session_token
+from tests.test_map_places import FakePlaceSearchClient, make_document
 
 
 def seed_menus_and_questions(db: Session) -> list[Menu]:
@@ -554,6 +560,101 @@ def test_full_journey_saves_vote_edits_and_one_winner_from_the_tie(monkeypatch):
     assert final_round["winners"][0]["image_url"] == candidate_images[final_candidates[cid2]["food_code"]]
     assert "voted_candidate_ids" not in str(v_m2.json()["common_state"])
     assert len(draws) == 1
+
+
+@pytest.mark.parametrize("uncontested", [False, True])
+def test_round_nearby_places_share_the_host_origin_with_all_participants(uncontested):
+    client, db, (host, member), _, room_id, as_user = build_group_env(member_count=2)
+    fake_places = FakePlaceSearchClient([make_document("place-1", "근처 식당", "134")])
+    client.app.dependency_overrides[get_place_search_client] = lambda: fake_places
+    client.app.dependency_overrides[get_google_place_search_client] = DisabledGooglePlaceSearchClient
+    room_url = f"/api/rooms/{room_id}"
+    started = as_user(host).post(f"{room_url}/rounds/start").json()
+    round_id = started["round_id"]
+    nearby_url = f"{room_url}/rounds/{round_id}/nearby"
+    location_url = f"{nearby_url}/location"
+    coordinates = {"latitude": 35.13362239, "longitude": 129.10301127}
+
+    early = as_user(host).put(location_url, json=coordinates)
+    assert early.status_code == 409
+    assert early.json()["detail"]["code"] == "ROUND_RESULT_PENDING"
+
+    for i, voter in enumerate((host, member)):
+        questions = as_user(voter).get(f"{room_url}/rounds/current/questions").json()["questions"]
+        body = {"answers": build_answers_for_questions(questions, 0 if uncontested else i)}
+        submitted = as_user(voter).post(f"{room_url}/rounds/current/order-sheet", json=body)
+        assert submitted.status_code == 200
+    current_round = submitted.json()["common_state"]["current_round"]
+    if not uncontested:
+        assert current_round["status"] == "VOTING"
+        candidate_id = current_round["candidates"][0]["candidate_id"]
+        for voter in (host, member):
+            voted = as_user(voter).post(f"{room_url}/rounds/current/votes", json={"candidate_ids": [candidate_id]})
+            assert voted.status_code == 200
+        current_round = voted.json()["common_state"]["current_round"]
+    assert current_round["status"] == "RESULT"
+    assert current_round["is_uncontested"] is uncontested
+    assert current_round["nearby_location_ready"] is False
+    pending = as_user(member).get(nearby_url)
+    assert pending.status_code == 409
+    assert pending.json()["detail"]["code"] == "ROUND_NEARBY_LOCATION_PENDING"
+    assert as_user(member).put(location_url, json=coordinates).status_code == 403
+    assert as_user(host).put(location_url, json={**coordinates, "latitude": 91}).status_code == 422
+    stale = as_user(host).put(f"{room_url}/rounds/{round_id + 1}/nearby/location", json=coordinates)
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "STALE_ROUND_ID"
+    assert fake_places.calls == []
+
+    token = session_token(db, member)
+
+    def db_for_connection(connection: HTTPConnection):
+        if connection.scope["type"] == "websocket":
+            with Session(bind=db.get_bind()) as socket_db:
+                yield socket_db
+        else:
+            yield db
+
+    client.app.dependency_overrides[get_db] = db_for_connection
+    with client.websocket_connect(f"/ws/rooms/{room_id}") as socket:
+        socket.send_json({"type": "auth", "access_token": token})
+        assert socket.receive_json()["type"] == "connection.ready"
+        registered = as_user(host).put(location_url, json=coordinates)
+        assert registered.status_code == 200
+        event = socket.receive_json()
+        assert event["type"] == "room.updated"
+        assert event["reason"] == "ROUND_NEARBY_LOCATION_READY"
+        ready_state = registered.json()["common_state"]
+        assert ready_state == event["common_state"]
+        assert ready_state["current_round"]["nearby_location_ready"] is True
+        assert str(coordinates["latitude"]) not in str(event)
+        assert str(coordinates["longitude"]) not in str(event)
+        assert as_user(host).put(location_url, json=coordinates).json() == registered.json()
+        moved = as_user(host).put(location_url, json={**coordinates, "latitude": 35.2})
+        assert moved.status_code == 409
+        assert moved.json()["detail"]["code"] == "ROUND_NEARBY_LOCATION_ALREADY_SET"
+
+        details = as_user(member).get(room_url).json()
+        assert details["common_state"] == ready_state
+        host_search = as_user(host).get(nearby_url)
+        member_search = as_user(member).get(nearby_url, params={"latitude": 37.5, "longitude": 127.0})
+        assert host_search.status_code == member_search.status_code == 200
+        assert member_search.headers["cache-control"] == "no-store"
+        assert host_search.json() == member_search.json()
+        data = member_search.json()["data"]
+        assert data["round_id"] == round_id
+        assert data["menu_id"] == current_round["winners"][0]["menu_id"]
+        assert data["search_origin"] == coordinates
+        assert data["places"][0]["distance_m"] == 134
+        assert "방장 위치" in unquote(data["places"][0]["walking_directions_url"])
+        assert len(fake_places.calls) == 2
+        assert fake_places.calls[0] == fake_places.calls[1]
+        assert fake_places.calls[0]["latitude"] == coordinates["latitude"]
+        assert fake_places.calls[0]["longitude"] == coordinates["longitude"]
+
+    assert as_user(member).delete(f"{room_url}/members/{member.id}").status_code == 200
+    assert as_user(member).get(nearby_url).status_code == 403
+    assert as_user(host).delete(room_url).status_code == 200
+    assert db.get(RoomRoundSearchOrigin, round_id) is None
 
 
 def test_t05_answering_departure_pause_version_token_and_host_continue_or_cancel():

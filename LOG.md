@@ -5,6 +5,36 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-27
 
+### #106 같이 고르기에서 방장 위치로 주변 음식점 검색
+
+#### 변경 이유 및 내용
+
+- 같이 고르기 결과에서 모두 같은 메뉴와 위치를 기준으로 주변 음식점을 볼 수 있도록 검색 기준을 라운드에 저장한다. 결과가 확정되면 방장만 위치를 등록할 수 있고, 전용 검색 API는 저장된 위치와 확정 메뉴를 사용한다.
+- 방 조회와 `room.updated`는 등록 여부를 전달한다. 좌표는 인증된 라운드 참여자의 전용 검색 응답에 포함하며 방 삭제 시 제거한다.
+
+#### 주요 변경 파일
+
+- `app/rooms/result_places.py`, `app/rooms/router.py`, `app/rooms/rounds.py`, `app/rooms/models.py`, `app/map/service.py`
+- `docs/specs/36-group-menu-selection-and-voting.md`, `tests/test_group_rounds.py`, `tests/test_group_rounds_mysql.py`
+
+#### API 변경
+
+- `PUT /api/rooms/{room_id}/rounds/{round_id}/nearby/location`에 방장이 숫자 `latitude`, `longitude`를 보낸다. 같은 좌표는 재전송할 수 있다. 등록 후 `common_state.current_round.nearby_location_ready`가 `true`로 바뀐다.
+- `GET /api/rooms/{room_id}/rounds/{round_id}/nearby`의 `data`는 기존 주변 음식점 응답과 지도 중심 `search_origin`, `round_id`를 반환한다.
+
+#### DB 변경
+
+- `room_round_search_origins` 테이블에 `round_id`(기본 키 및 삭제 연쇄 외래 키), `latitude`, `longitude`를 추가했다. 앱 기동 시 새 테이블을 생성하며 명시적 마이그레이션은 `scripts/migrate_room_rounds.py`에 포함했다.
+
+#### 검증
+
+- 관련 백엔드 테스트 123개와 격리 MySQL 8.0 테스트 9개 통과. 방장과 참여자가 같은 좌표로 검색하는 것, WebSocket으로 등록 상태를 받는 것, 동시 재등록에서 좌표 한 쌍만 저장되는 것을 확인했다.
+- 전체 기본 테스트는 735개 통과, 42개 건너뜀, 1개 실패. 카카오 로그인 응답의 `requires_reauth` 필드에 대한 기존 프로필 테스트 실패는 변경 전 커밋에서도 재현했다.
+
+#### 남은 작업 및 주의 사항
+
+- 프론트 투표 결과 화면의 지도 버튼과 위치 등록·조회 API를 연결해야 한다.
+
 ### #104 같이 고르기 투표 수정과 최종 메뉴 하나 확정
 
 #### 변경 이유 및 내용

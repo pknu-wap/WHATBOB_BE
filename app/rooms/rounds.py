@@ -43,6 +43,7 @@ from app.rooms.models import (
     RoomRoundCandidate,
     RoomRoundCandidateProposer,
     RoomRoundMember,
+    RoomRoundSearchOrigin,
 )
 from app.rooms.schemas import (
     RoomDepartureDecisionRequest,
@@ -138,6 +139,9 @@ def delete_room_rounds_for_rooms(db: Session, room_ids: list[int]) -> None:
         ).delete(synchronize_session=False)
     db.query(RoomRoundMember).filter(
         RoomRoundMember.round_id.in_(round_ids)
+    ).delete(synchronize_session=False)
+    db.query(RoomRoundSearchOrigin).filter(
+        RoomRoundSearchOrigin.round_id.in_(round_ids)
     ).delete(synchronize_session=False)
     db.query(RoomRound).filter(
         RoomRound.id.in_(round_ids)
@@ -290,16 +294,12 @@ def build_round_common_state(
     users_by_id: dict[int, User] | None = None,
 ) -> dict[str, Any] | None:
     """Build the public/common snapshot of the latest round without exposing private answers/exclusions/ballots."""
-    current_round = get_latest_round(db, room.id, for_update=False)
+    # Use current reads so the round state matches the locked room version.
+    current_round = get_latest_round(db, room.id, for_update=True)
     if current_round is None:
         return None
 
-    round_members = (
-        db.query(RoomRoundMember)
-        .filter(RoomRoundMember.round_id == current_round.id)
-        .order_by(RoomRoundMember.id.asc())
-        .all()
-    )
+    round_members = lock_round_members(db, current_round.id)
     needed_uids = {rm.user_id for rm in round_members}
     user_map = dict(users_by_id or {})
     missing_uids = needed_uids - set(user_map.keys())
@@ -327,25 +327,10 @@ def build_round_common_state(
     candidate_dtos: list[dict[str, Any]] = []
     winner_dtos: list[dict[str, Any]] = []
     if current_round.status in ("VOTING", "VOTING_PAUSED", "RESULT"):
-        candidates = (
-            db.query(RoomRoundCandidate)
-            .filter(
-                RoomRoundCandidate.round_id == current_round.id,
-                RoomRoundCandidate.is_active.is_(True),
-            )
-            .order_by(RoomRoundCandidate.display_order.asc(), RoomRoundCandidate.id.asc())
-            .all()
-        )
+        candidates = [c for c in lock_round_candidates(db, current_round.id) if c.is_active]
         cand_ids = [c.id for c in candidates]
         menu_ids = [c.menu_id for c in candidates]
-        proposers = (
-            db.query(RoomRoundCandidateProposer)
-            .filter(RoomRoundCandidateProposer.candidate_id.in_(cand_ids))
-            .order_by(RoomRoundCandidateProposer.id.asc())
-            .all()
-            if cand_ids
-            else []
-        )
+        proposers = lock_round_proposers(db, cand_ids)
         menu_rows = (
             db.query(Menu, FoodKind.representative_image_url, MenuIllustrationException.menu_id)
             .outerjoin(FoodKind, Menu.food_kind_id == FoodKind.id)
@@ -421,6 +406,9 @@ def build_round_common_state(
         "pending_departed_members": pending_departed_dtos,
         "candidates": candidate_dtos,
         "winners": winner_dtos,
+        "nearby_location_ready": len(winner_dtos) == 1 and db.get(
+            RoomRoundSearchOrigin, current_round.id, populate_existing=True, with_for_update=True
+        ) is not None,
     }
 
 
