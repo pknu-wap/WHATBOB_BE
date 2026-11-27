@@ -18,7 +18,7 @@ from app.auth.operations import (
 from app.auth.sessions import utc_now
 from app.core.config import settings
 from app.menus.display import format_menu_name
-from app.menus.food_kinds import classify_food_kind
+from app.menus.food_kinds import classify_food_kind, get_menu_illustration_urls
 from app.menus.models import (
     GROUP_ORDER_SHEET_LIST,
     PERSONAL_INITIAL_LIST,
@@ -1112,6 +1112,8 @@ def create_order_sheet_recommendation(
         ranking_rule_version=common_experiment.ranking_rule_version if common_experiment is not None else None,
     )
     top_details = evaluation.selected_candidates
+    recommended_menu_ids = [detail.menu.id for detail in top_details]
+    image_urls = get_menu_illustration_urls(db, recommended_menu_ids)
     surviving_kind_count = len(evaluation.surviving_kind_representatives)
 
     # 실제로 사용자에게 노출되어 제출된 질문들의 shown_count 증가 (NULL 방어 포함)
@@ -1145,7 +1147,7 @@ def create_order_sheet_recommendation(
         user_id=effective_user_id,
         shown_question_ids=submitted_q_ids,
         answers_json=answers_payload,
-        recommended_menu_ids=[d.menu.id for d in top_details],
+        recommended_menu_ids=recommended_menu_ids,
         initial_candidate_count=surviving_kind_count,
         order_sheet_list_scope=list_scope,
     )
@@ -1226,6 +1228,7 @@ def create_order_sheet_recommendation(
             menu_id=d.menu.id,
             food_code=d.menu.food_code,
             name=format_menu_name(d.menu.name),
+            image_url=image_urls[d.menu.id],
             base_name=d.menu.base_name,
             category_large=d.menu.category_large,
             category_medium=d.menu.category_medium,
