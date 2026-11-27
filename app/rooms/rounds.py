@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 from app.auth.operations import lock_user_and_verify_session
 from app.core.config import settings
 from app.menus.display import format_menu_name
-from app.menus.models import Menu
+from app.menus.food_kinds import resolve_menu_illustration_url
+from app.menus.models import FoodKind, Menu, MenuIllustrationException
 from app.recommend.common import (
     InvalidOrderSheetException,
     NoAvailableFoodException,
@@ -344,11 +345,19 @@ def build_round_common_state(
             if cand_ids
             else []
         )
-        menus_by_id = (
-            {m.id: m for m in db.query(Menu).filter(Menu.id.in_(menu_ids)).all()}
+        menu_rows = (
+            db.query(Menu, FoodKind.representative_image_url, MenuIllustrationException.menu_id)
+            .outerjoin(FoodKind, Menu.food_kind_id == FoodKind.id)
+            .outerjoin(MenuIllustrationException, Menu.id == MenuIllustrationException.menu_id)
+            .filter(Menu.id.in_(menu_ids))
+            .all()
             if menu_ids
-            else {}
+            else []
         )
+        menus_by_id = {
+            menu.id: (menu, representative_url, exception_menu_id)
+            for menu, representative_url, exception_menu_id in menu_rows
+        }
         proposers_by_cand: dict[int, list[int]] = {}
         for p in proposers:
             if p.user_id in active_uids:
@@ -356,7 +365,7 @@ def build_round_common_state(
 
         is_result = current_round.status == "RESULT"
         for c in candidates:
-            menu = menus_by_id.get(c.menu_id)
+            menu, representative_url, exception_menu_id = menus_by_id.get(c.menu_id, (None, None, None))
             prop_uids = proposers_by_cand.get(c.id, [])
             vote_count_val = (
                 (None if current_round.is_uncontested else int(c.final_vote_count or 0))
@@ -368,6 +377,9 @@ def build_round_common_state(
                 "menu_id": c.menu_id,
                 "food_code": menu.food_code if menu else None,
                 "name": format_menu_name(menu.name) if menu else None,
+                "image_url": resolve_menu_illustration_url(
+                    representative_url, use_common_fallback=exception_menu_id is not None
+                ),
                 "base_name": menu.base_name if menu else None,
                 "category_large": menu.category_large if menu else None,
                 "category_medium": menu.category_medium if menu else None,

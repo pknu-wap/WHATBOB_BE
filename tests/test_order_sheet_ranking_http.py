@@ -13,8 +13,10 @@ from app.auth.dependencies import get_current_user
 from app.core.config import settings
 from app.core.database import Base, get_db
 from app.main import handle_recommendation_domain_exception
+from app.menus.food_kinds import DEFAULT_MENU_ILLUSTRATION_URL
 from app.menus.models import (
     Menu,
+    MenuIllustrationException,
     OrderSheetIssuance,
     OrderSheetQuestion,
     Recommendation,
@@ -120,12 +122,17 @@ def test_http_order_sheet_submit_counts_0_1_3_5_6_kinds_and_dedups_multi_product
     q_map = _seed_questions(db)
 
     kind_names = ["국밥", "설렁탕", "갈비탕", "육개장", "곰탕", "추어탕"]
+    registered_images = {
+        "K00_2": "/static/menu-illustrations/gukbap.svg",
+        "K01_2": "/static/menu-illustrations/clear_soup.svg",
+        "K02_2": "/static/menu-illustrations/missing-order-sheet.svg",
+    }
     for idx in range(surviving_kind_count):
         kind = kind_names[idx]
         # 같은 음식 종류에 상품 3개씩 생성: 마지막 상품만 매콤·고단백·저탄수 일치
         for prod_idx in range(3):
             is_best = prod_idx == 2
-            _add_menu(
+            menu = _add_menu(
                 db,
                 food_code=f"K{idx:02d}_{prod_idx}",
                 name=f"{kind}_상품{prod_idx}",
@@ -140,6 +147,10 @@ def test_http_order_sheet_submit_counts_0_1_3_5_6_kinds_and_dedups_multi_product
                 carb_g=10.0 if is_best else None,  # 미확인 속성(None)은 가점 0점
                 protein_g=20.0 if is_best else None,
             )
+            if menu.food_code in registered_images:
+                menu.food_kind.representative_image_url = registered_images[menu.food_code]
+            if menu.food_code == "K01_2":
+                db.add(MenuIllustrationException(menu_id=menu.id))
 
     # 하드필터(국물 있음)에서 탈락하는 비국물 메뉴 5종 (자동 완화 금지 검증)
     for idx, name in enumerate(("비빔밥", "불고기덮밥", "김치볶음밥", "카레라이스", "오므라이스"), start=1):
@@ -190,6 +201,9 @@ def test_http_order_sheet_submit_counts_0_1_3_5_6_kinds_and_dedups_multi_product
             assert item["has_soup"] is True
             assert item["food_code"].endswith("_2")
             assert "상품2" in item["name"]
+            assert item["image_url"] == (
+                registered_images["K00_2"] if item["food_code"] == "K00_2" else DEFAULT_MENU_ILLUSTRATION_URL
+            )
 
         if surviving_kind_count >= 1:
             assert data["recommended_menus"][0]["base_name"] == "국밥"

@@ -124,26 +124,32 @@ def resolve_menu_illustration_url(
     )
 
 
-def get_menu_illustration_url(db: Session, menu_id: int) -> str:
-    """메뉴 한 건의 대표 일러스트와 메뉴별 예외를 조회한다."""
+def get_menu_illustration_urls(db: Session, menu_ids: list[int]) -> dict[int, str]:
+    """메뉴들의 대표 일러스트와 메뉴별 예외를 한 번에 조회한다."""
+    if not menu_ids:
+        return {}
+
     from app.menus.models import FoodKind, Menu, MenuIllustrationException
 
-    illustration = (
-        db.query(FoodKind.representative_image_url, MenuIllustrationException.menu_id)
+    illustrations = (
+        db.query(Menu.id, FoodKind.representative_image_url, MenuIllustrationException.menu_id)
         .select_from(Menu)
         .outerjoin(FoodKind, Menu.food_kind_id == FoodKind.id)
         .outerjoin(MenuIllustrationException, Menu.id == MenuIllustrationException.menu_id)
-        .filter(Menu.id == menu_id)
-        .one_or_none()
+        .filter(Menu.id.in_(menu_ids))
+        .all()
     )
-    if illustration is None:
-        return DEFAULT_MENU_ILLUSTRATION_URL
+    urls_by_id = dict.fromkeys(menu_ids, DEFAULT_MENU_ILLUSTRATION_URL)
+    for menu_id, representative_url, exception_menu_id in illustrations:
+        urls_by_id[menu_id] = resolve_menu_illustration_url(
+            representative_url,
+            use_common_fallback=exception_menu_id is not None,
+        )
+    return urls_by_id
 
-    representative_image_url, exception_menu_id = illustration
-    return resolve_menu_illustration_url(
-        representative_image_url,
-        use_common_fallback=exception_menu_id is not None,
-    )
+
+def get_menu_illustration_url(db: Session, menu_id: int) -> str:
+    return get_menu_illustration_urls(db, [menu_id])[menu_id]
 
 
 def _ensure_new_menu_food_kind_on_flush(

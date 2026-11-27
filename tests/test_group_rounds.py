@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
+from starlette.requests import HTTPConnection
 
 import app.auth.models  # noqa: F401
 import app.menus.models  # noqa: F401
@@ -16,8 +17,10 @@ import app.users.models  # noqa: F401
 from app.auth.dependencies import get_current_user
 from app.core.config import settings
 from app.core.database import Base, get_db
+from app.menus.food_kinds import DEFAULT_MENU_ILLUSTRATION_URL
 from app.menus.models import (
     Menu,
+    MenuIllustrationException,
     OrderSheetQuestion,
     QuestionSelectionState,
     Recommendation,
@@ -37,6 +40,7 @@ from app.rooms.router import operations_router, router as rooms_router
 from app.rooms.service import expire_room_member_after_grace, recover_rooms_after_restart, utcnow
 from app.rooms.websocket import router as rooms_ws_router
 from app.users.models import User
+from tests.auth_helpers import session_token
 
 
 def seed_menus_and_questions(db: Session) -> list[Menu]:
@@ -352,8 +356,14 @@ def test_room_order_sheet_recent_meal_affects_only_the_participant_who_recorded_
 
 
 def test_t03_d20_and_t04_full_journey_with_cumulative_recommendations_and_co_winners():
-    _, db, users, _, room_id, as_user = build_group_env(member_count=3)
+    client, db, users, menus, room_id, as_user = build_group_env(member_count=3)
     host, m1, m2 = users[0], users[1], users[2]
+    menus_by_code = {menu.food_code: menu for menu in menus}
+    stew_image = "/static/menu-illustrations/kimchi_jjigae.svg"
+    menus_by_code["M001"].food_kind.representative_image_url = stew_image
+    sushi = menus_by_code["M002"]
+    sushi.food_kind.representative_image_url = "/static/menu-illustrations/sushi.svg"
+    db.add(MenuIllustrationException(menu_id=sushi.id))
 
     # Exclude 샐러드 for m2 before start; snapshot freezes this exclusion
     db.add(UserFoodExclusion(user_id=m2.id, exclusion_type="DISLIKE", keyword="샐러드"))
@@ -422,6 +432,9 @@ def test_t03_d20_and_t04_full_journey_with_cumulative_recommendations_and_co_win
     cands = round_state["candidates"]
     assert len(cands) >= 2
     assert all(c["vote_count"] is None and c["is_winner"] is False for c in cands)
+    candidate_images = {c["food_code"]: c["image_url"] for c in cands}
+    assert candidate_images["M001"] == stew_image
+    assert candidate_images["M002"] == DEFAULT_MENU_ILLUSTRATION_URL
 
     # T03-D03: Personal Recommendation & RecommendationItemSnapshot rows were created for all 3 users
     assert db.query(Recommendation).count() == 3
@@ -484,17 +497,39 @@ def test_t03_d20_and_t04_full_journey_with_cumulative_recommendations_and_co_win
     )
     assert v_m1.status_code == 200
 
-    v_m2 = as_user(m2).post(
-        f"/api/rooms/{room_id}/rounds/current/votes",
-        json={"candidate_ids": [cid2], "vote_round_no": 1},
-    )
-    assert v_m2.status_code == 200
+    token = session_token(db, host)
+
+    def db_for_connection(connection: HTTPConnection):
+        if connection.scope["type"] == "websocket":
+            with Session(bind=db.get_bind()) as socket_db:
+                yield socket_db
+        else:
+            yield db
+
+    client.app.dependency_overrides[get_db] = db_for_connection
+    with client.websocket_connect(f"/ws/rooms/{room_id}") as socket:
+        socket.send_json({"type": "auth", "access_token": token})
+        assert socket.receive_json()["type"] == "connection.ready"
+        v_m2 = as_user(m2).post(
+            f"/api/rooms/{room_id}/rounds/current/votes",
+            json={"candidate_ids": [cid2], "vote_round_no": 1},
+        )
+        assert v_m2.status_code == 200
+        event = socket.receive_json()
+        assert event["type"] == "room.updated"
+        assert event["reason"] == "ROUND_RESULT_FINALIZED"
+        detail = as_user(host).get(f"/api/rooms/{room_id}").json()
+        assert event["common_state"] == detail["common_state"] == v_m2.json()["common_state"]
     final_round = v_m2.json()["common_state"]["current_round"]
     assert final_round["status"] == "RESULT"
     assert final_round["is_uncontested"] is False
     winners = final_round["winners"]
     assert {w["candidate_id"] for w in winners} == {cid1, cid2}
     assert all(w["final_vote_count"] == 2 and w["is_winner"] is True for w in winners)
+    assert {w["food_code"]: w["image_url"] for w in winners} == {
+        "M001": stew_image,
+        "M002": DEFAULT_MENU_ILLUSTRATION_URL,
+    }
     assert "voted_candidate_ids" not in str(v_m2.json()["common_state"])
 
 

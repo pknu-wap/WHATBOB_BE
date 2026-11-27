@@ -3,6 +3,38 @@
 WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 최신 작업을 위에 추가하며, 기록 방법은 같은 디렉터리의 `AGENTS.md`를 따른다.
 
+## 2026-11-27
+
+### #101 같이 고르기와 주문서 추천에 메뉴 일러스트 제공
+
+#### 변경 이유 및 내용
+
+- 같이 고르기 투표 후보와 최종 결과, 개인 주문서 추천 목록에서 메뉴 그림을 표시할 수 있도록 각 메뉴에 이미지 주소를 추가했다.
+- 랜덤 추천과 같은 대표 일러스트 선택 규칙을 사용한다. 대표 파일이 없거나 메뉴별 예외면 `/static/menu-illustrations/default.svg`를 반환한다. 여러 메뉴의 일러스트 정보는 한 쿼리로 조회한다.
+
+#### 주요 변경 파일
+
+- `app/rooms/rounds.py`, `app/recommend/order_sheet.py`, `app/recommend/schemas.py`, `app/menus/food_kinds.py`
+- `docs/USER_EXCLUSIONS_API.md`, `tests/test_group_rounds.py`, `tests/test_order_sheet_ranking_http.py`
+
+#### API 변경
+
+- 방 조회, 라운드 명령 응답, WebSocket `room.updated`의 `common_state.current_round.candidates[]`와 `winners[]` 항목에 `image_url`을 추가했다.
+- `POST /api/recommendations/order-sheet`의 `data.recommended_menus[]` 항목에 `image_url`을 추가했다. `GET /api/recommendations/random`은 `data.selected_menu.image_url`을 반환한다.
+
+#### DB 변경
+
+- 없음. 음식 종류에 등록된 대표 이미지와 메뉴별 예외를 조회한다.
+
+#### 검증
+
+- 주문서 추천·랜덤 추천·같이 고르기 관련 테스트 89개 통과. 격리 MySQL이 필요한 테스트 3개는 건너뛰었다.
+- 주문서 추천 응답의 대표 이미지 및 공통 이미지와 방 조회·WebSocket 알림의 공통 상태 일치를 확인했다.
+
+#### 남은 작업 및 주의 사항
+
+- 변경된 응답은 백엔드 배포 후 운영에서 사용할 수 있다.
+
 ## 2026-11-26
 
 ### #99 DB에 등록된 대표 메뉴 SVG의 확대 화질 개선
