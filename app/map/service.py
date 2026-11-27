@@ -49,10 +49,11 @@ def find_nearby_restaurants(
     google_client: GooglePlaceSearchClient,
     google_max_concurrency: int,
     google_total_budget_seconds: float,
+    *,
+    origin_label: str = CURRENT_LOCATION_LABEL,
 ) -> NearbyPlacesResponse:
-    """추천 메뉴로 사용자 주변 음식점을 직선거리순 최대 10개 찾는다.
+    """메뉴를 검색어로 써서 전달받은 좌표 주변 음식점을 직선거리순 최대 10개 찾는다.
 
-    좌표는 검색 요청에만 사용하고 저장하거나 로그에 남기지 않는다.
     검색 결과가 없어도 반경을 자동으로 넓히지 않는다. 확대는 사용자가 선택한다.
     """
     menu = db.get(Menu, menu_id)
@@ -72,7 +73,7 @@ def find_nearby_restaurants(
     places: list[NearbyPlaceDTO] = []
     seen_ids: set[str] = set()
     for document in documents:
-        place = _to_nearby_place(document, latitude, longitude)
+        place = _to_nearby_place(document, latitude, longitude, origin_label)
         if place is None or place.distance_m > radius_m or place.kakao_place_id in seen_ids:
             continue
         seen_ids.add(place.kakao_place_id)
@@ -97,7 +98,9 @@ def find_nearby_restaurants(
     )
 
 
-def _to_nearby_place(document: dict[str, Any], origin_lat: float, origin_lng: float) -> NearbyPlaceDTO | None:
+def _to_nearby_place(
+    document: dict[str, Any], origin_lat: float, origin_lng: float, origin_label: str,
+) -> NearbyPlaceDTO | None:
     """외부 응답을 신뢰하지 않고 필수 필드·카테고리·좌표를 검증해 DTO로 변환한다."""
     if document.get("category_group_code") != KAKAO_RESTAURANT_CATEGORY_CODE:
         return None
@@ -130,7 +133,7 @@ def _to_nearby_place(document: dict[str, Any], origin_lat: float, origin_lng: fl
         place_url=_blank_to_none(document.get("place_url")),
         directions_url=f"{KAKAO_MAP_LINK_BASE_URL}/to/{quote(place_id, safe='')}",
         walking_directions_url=build_walking_directions_url(
-            origin_lat, origin_lng, name, latitude, longitude
+            origin_lat, origin_lng, name, latitude, longitude, origin_label=origin_label,
         ),
     )
 
@@ -141,12 +144,14 @@ def build_walking_directions_url(
     destination_name: str,
     destination_lat: float,
     destination_lng: float,
+    *,
+    origin_label: str = CURRENT_LOCATION_LABEL,
 ) -> str:
     """카카오맵 도보 길찾기 URL(/link/by/walk/출발/도착)을 만든다.
 
     URL 구분자인 ','와 '/'가 장소명에 있으면 경로가 깨지므로 공백으로 바꾼 뒤 인코딩한다.
     """
-    origin = _link_point(CURRENT_LOCATION_LABEL, origin_lat, origin_lng)
+    origin = _link_point(origin_label, origin_lat, origin_lng)
     destination = _link_point(destination_name, destination_lat, destination_lng)
     return f"{KAKAO_MAP_LINK_BASE_URL}/by/walk/{origin}/{destination}"
 

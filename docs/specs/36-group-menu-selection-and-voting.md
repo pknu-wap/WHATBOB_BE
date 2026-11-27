@@ -122,6 +122,13 @@
 - 중간 득표수·다른 사람의 개별 표를 화면·응답·알림 어디에서도 노출하지 않는다.
 - Q19·Q20에 해당하는 화면·요청의 지원 여부는 보류 결정 후 정한다.
 
+### 방장 위치로 주변 음식점 검색
+
+1. 확정 메뉴가 하나인 `RESULT` 상태에서 방장은 위치 권한을 받아 `PUT /api/rooms/{room_id}/rounds/{round_id}/nearby/location`에 `{"latitude": 35.1336, "longitude": 129.1030}`을 보낸다. 단일 후보로 투표 없이 확정된 경우에도 같은 API를 쓴다. 한 라운드에서 처음 등록된 위치를 사용하며, 같은 좌표의 재요청은 성공하고 다른 좌표는 `409 ROUND_NEARBY_LOCATION_ALREADY_SET`를 반환한다.
+2. 등록 완료 시 `room.updated`의 `reason`은 `ROUND_NEARBY_LOCATION_READY`이고 `common_state.current_round.nearby_location_ready`는 `true`다. 재접속한 참여자는 방 조회에서 같은 필드를 읽는다. 등록 전 검색은 `409 ROUND_NEARBY_LOCATION_PENDING`을 반환한다.
+3. 모든 참여자는 `GET /api/rooms/{room_id}/rounds/{round_id}/nearby`에서 확정 메뉴와 방장이 등록한 위치로 검색한다. 기존 주변 음식점 응답의 `data`에 `round_id`와 지도 중심에 사용할 `search_origin`(`latitude`, `longitude`)이 추가된다. `radius`는 기본 1000m이고 3000m로 확대할 수 있다. 각 가게의 거리와 도보 길찾기 링크의 출발점은 방장 위치다.
+4. 방 좌표는 인증된 현재 라운드 참여자의 전용 검색 응답에서만 제공한다. 방 조회와 WebSocket에는 준비 여부만 포함한다. 방을 삭제할 때 라운드와 함께 좌표를 삭제한다. 개인 추천의 `GET /api/places/nearby`는 요청에 들어온 좌표를 사용한다.
+
 ## Testing Decisions
 
 ### 검증 경계와 확인 상태

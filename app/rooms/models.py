@@ -6,6 +6,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     DateTime,
+    Double,
     ForeignKey,
     Integer,
     JSON,
@@ -170,6 +171,14 @@ class RoomRound(Base):
         DateTime().with_variant(DATETIME(fsp=6), "mysql"),
         nullable=True,
     )
+
+
+class RoomRoundSearchOrigin(Base):
+    __tablename__ = "room_round_search_origins"
+
+    round_id = Column(Integer, ForeignKey("room_rounds.id", ondelete="CASCADE"), primary_key=True)
+    latitude = Column(Double, nullable=False)
+    longitude = Column(Double, nullable=False)
 
 
 class RoomRoundMember(Base):
