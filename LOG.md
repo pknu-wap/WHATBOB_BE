@@ -5,6 +5,43 @@ WhatBap 백엔드의 주요 개발 및 변경 사항을 기록한다.
 
 ## 2026-11-27
 
+### #103 Google 장소 ID의 null 원인 확인 및 권한 오류 진단 로그 보강
+
+#### 변경 이유 및 내용
+
+- 기존 Google 연동 브랜치에서 진단한 변경을, Google 연동이 병합된 최신 `origin/main` 기준의 `fix/#103-구글-place-id-권한-오류-진단` 브랜치로 분리했다.
+- 로컬 `.env`의 키로 제보된 음식점 두 곳을 Google Places API (New)에 직접 조회한 결과 모두 HTTP 403, `PERMISSION_DENIED`, `ACCESS_DENIED`였다. ID 매칭 이전에 Google이 요청을 거부하며, 이 응답만으로 API 활성화·결제·키 제한 중 구체 원인은 확정할 수 없다.
+- 기존 HTTP 상태 로그에 허용 목록의 Google 오류 사유 코드를 추가하고, 403에는 Places API (New) 활성화·결제·API/IP 제한 확인 안내를 기록한다. 외부 오류 메시지·metadata·키·주소·좌표는 기록하지 않는다.
+- 키 미설정 시 캐시된 클라이언트 초기화에서 보강 비활성화 경고를 한 번 기록한다. 비정상 오류 본문도 기존 도메인 예외로 처리한다.
+- 운영 설정과 프로세스 재시작, null의 다른 원인 및 왓밥 401과의 구분을 문서화했다.
+
+#### 주요 변경 파일
+
+- `app/map/google_places.py`, `tests/test_map_places.py`
+- `docs/GOOGLE_PLACES_SETUP.md`, `LOG.md`
+
+#### API 변경
+
+- 없음. `GET /api/places/nearby`의 Google 실패 시 카카오 결과와 `google_place_id: null`을 반환하는 기존 계약을 유지한다.
+
+#### DB 변경
+
+- 없음.
+
+#### 검증
+
+- `python -m pytest -q tests/test_map_places.py`: 65 passed. Google 권한 오류 사유, 민감 정보 비노출, 비정상 오류 본문, 키 미설정 로그와 기존 검색·매칭·장애 격리를 검증했다.
+- `git diff --check`: 통과.
+- 실제 Google 호출: 제보된 두 음식점 조회 및 ID 필드만 요청하는 확인 호출 모두 HTTP 403, `ACCESS_DENIED`. 키 원문은 출력하지 않았다.
+- 전체 테스트 미실행: 검색 동작과 API 계약 변경 없이 Google 오류 진단 로그만 수정하여 관련 테스트를 실행했다.
+
+#### 남은 작업 및 주의 사항
+
+- Google Cloud에서 키가 속한 프로젝트의 Places API (New) 활성화, 결제 연결 및 키의 API·서버 외부 IP 제한을 확인해야 한다. 이 환경에서 Cloud 설정은 변경하지 않았다.
+- 운영 서버 키·설정·출발 IP는 미확인이다. 로컬 권한 거부만으로 운영도 동일 원인이라고 확정하지 않는다.
+- 설정 변경 후 백엔드 프로세스를 재시작하고 운영 서버에서 재검증해야 한다. 권한이 해결된 뒤 실제 음식점 매칭 성공 여부도 확인해야 한다.
+
+
 ### #101 같이 고르기와 주문서 추천에 메뉴 일러스트 제공
 
 #### 변경 이유 및 내용

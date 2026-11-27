@@ -588,3 +588,60 @@ def test_google_client_maps_timeout_to_internal_unavailable():
             latitude=35.1340,
             longitude=129.1040,
         )
+
+
+@pytest.mark.parametrize("reason", [
+    "ACCESS_DENIED", "SERVICE_DISABLED", "BILLING_DISABLED",
+    "API_KEY_SERVICE_BLOCKED", "API_KEY_IP_ADDRESS_BLOCKED",
+    "API_KEY_HTTP_REFERRER_BLOCKED",
+])
+def test_google_permission_error_logs_safe_reason_without_sensitive_data(reason, caplog):
+    client = GooglePlacesTextSearchClient(
+        "private-server-key",
+        timeout_seconds=1,
+        max_concurrency=1,
+        transport=httpx.MockTransport(lambda request: httpx.Response(403, json={
+            "error": {
+                "status": "PERMISSION_DENIED",
+                "message": "private-server-key secret-address secret-ip",
+                "details": [{"reason": reason, "metadata": {"ip": "secret-ip"}}],
+            },
+        })),
+    )
+    with pytest.raises(GooglePlacesUnavailableError):
+        client.search_place_candidates(
+            name="secret-name", address="secret-address", latitude=35.1, longitude=129.1,
+        )
+    assert f"status=403 reason={reason}" in caplog.text
+    assert "API/IP" in caplog.text
+    for private_value in ("private-server-key", "secret-address", "secret-ip", "secret-name", "35.1", "129.1"):
+        assert private_value not in caplog.text
+
+
+@pytest.mark.parametrize("body", [
+    None, [], {"error": []}, {"error": {"details": {}}},
+    {"error": {"details": [None, {"reason": ["ACCESS_DENIED"]}]}},
+    {"error": {"details": [{"reason": "private-server-key"}]}},
+])
+def test_google_error_logging_handles_malformed_or_unknown_reason(body, caplog):
+    client = GooglePlacesTextSearchClient(
+        "private-server-key", timeout_seconds=1, max_concurrency=1,
+        transport=httpx.MockTransport(lambda request: httpx.Response(403, json=body)),
+    )
+    with pytest.raises(GooglePlacesUnavailableError):
+        client.search_place_candidates(name="식당", address=None, latitude=35, longitude=129)
+    assert "status=403 reason=UNKNOWN" in caplog.text
+    assert "private-server-key" not in caplog.text
+
+
+def test_missing_google_key_logs_disabled_state(monkeypatch, caplog):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "GOOGLE_PLACES_API_KEY", " ")
+    get_google_place_search_client.cache_clear()
+    try:
+        assert get_google_place_search_client().enabled is False
+        assert get_google_place_search_client().enabled is False
+        assert caplog.text.count("GOOGLE_PLACES_API_KEY") == 1
+    finally:
+        get_google_place_search_client.cache_clear()

@@ -16,6 +16,12 @@ GOOGLE_TEXT_SEARCH_FIELD_MASK = (
 )
 GOOGLE_TEXT_SEARCH_MAX_RESULTS = 5
 GOOGLE_LOCATION_BIAS_RADIUS_M = 100.0
+# 외부 오류 메시지·metadata에는 키나 IP가 포함될 수 있어 알려진 사유 코드만 기록한다.
+GOOGLE_SAFE_ERROR_REASONS = frozenset({
+    "ACCESS_DENIED", "SERVICE_DISABLED", "BILLING_DISABLED", "API_KEY_INVALID",
+    "API_KEY_EXPIRED", "API_KEY_SERVICE_BLOCKED", "API_KEY_IP_ADDRESS_BLOCKED",
+    "API_KEY_HTTP_REFERRER_BLOCKED", "RATE_LIMIT_EXCEEDED", "QUOTA_EXCEEDED",
+})
 
 
 @dataclass(frozen=True)
@@ -119,7 +125,13 @@ class GooglePlacesTextSearchClient:
             self._limiter.release()
 
         if response.status_code != 200:
-            logger.warning("Google 장소 ID 조회 비정상 응답: status=%s", response.status_code)
+            logger.warning(
+                "Google 장소 ID 조회 비정상 응답: status=%s reason=%s",
+                response.status_code,
+                _safe_error_reasons(response),
+            )
+            if response.status_code == 403:
+                logger.warning("Google Places API (New) 활성화·결제 연결·키의 API/IP 제한을 확인하세요.")
             raise GooglePlacesUnavailableError()
 
         try:
@@ -136,6 +148,23 @@ class GooglePlacesTextSearchClient:
             logger.warning("Google 장소 ID 조회 응답의 places 형식이 잘못됨")
             raise GooglePlacesUnavailableError()
         return [candidate for place in places if (candidate := _parse_candidate(place)) is not None]
+
+
+def _safe_error_reasons(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return "UNKNOWN"
+    error = body.get("error") if isinstance(body, dict) else None
+    details = error.get("details") if isinstance(error, dict) else None
+    if not isinstance(details, list):
+        return "UNKNOWN"
+    reasons = set()
+    for detail in details:
+        reason = detail.get("reason") if isinstance(detail, dict) else None
+        if isinstance(reason, str) and reason in GOOGLE_SAFE_ERROR_REASONS:
+            reasons.add(reason)
+    return ",".join(sorted(reasons)) or "UNKNOWN"
 
 
 def _parse_candidate(value: Any) -> GooglePlaceCandidate | None:
@@ -168,6 +197,7 @@ def _text(value: Any) -> str:
 def get_google_place_search_client() -> GooglePlaceSearchClient:
     api_key = (settings.GOOGLE_PLACES_API_KEY or "").strip()
     if not api_key:
+        logger.warning("GOOGLE_PLACES_API_KEY 미설정: Google 장소 ID 보강 비활성화")
         return DisabledGooglePlaceSearchClient()
     return GooglePlacesTextSearchClient(
         api_key,
